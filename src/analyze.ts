@@ -652,6 +652,13 @@ function processStmtNode(stmtNode: Json, parentScope: Scope, ctx: BodyCtx): Deri
 
 // ── Parsing entry points ────────────────────────────────────────────────────
 
+/**
+ * The WASM parse calls are synchronous, so a long analysis run would otherwise
+ * starve the event loop (frozen progress UI in the extension host). A real
+ * macrotask yield lets queued messages paint.
+ */
+const yieldEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
 /** `target := …` / `target[i] := …` prefix of PL/pgSQL assignment expressions. */
 const ASSIGN_PREFIX = /^\s*[a-zA-Z_][\w$]*(?:\.[a-zA-Z_][\w$]*)*(?:\[[^\]]*\])?\s*:=\s*/;
 
@@ -723,8 +730,9 @@ export async function analyzeFunc(
         walk(tree?.plpgsql_funcs ?? tree, (tag, v) => {
           if (tag === "PLpgSQL_expr" && typeof v.query === "string") exprs.push(v.query);
         });
-        for (const q of exprs) {
-          const parsedTree = await tryParse(parser, q);
+        for (let i = 0; i < exprs.length; i++) {
+          if (i > 0 && i % 20 === 0) await yieldEventLoop();
+          const parsedTree = await tryParse(parser, exprs[i]!);
           if (parsedTree) analyzeParsedQuery(parsedTree, ctx);
         }
         refs.parsed = true;
@@ -779,6 +787,7 @@ export async function analyzeAll(
   const out = new Map<number, FuncRefs>();
   let done = 0;
   for (const fn of candidates) {
+    await yieldEventLoop();
     const start = Date.now();
     const refs = await analyzeFunc(fn, resolver, triggerRelsByFunc.get(fn.oid) ?? [], parser);
     out.set(fn.oid, refs);
