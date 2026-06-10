@@ -1,0 +1,75 @@
+{
+  "name": "postgres-viz",
+  "displayName": "Postgres Viz",
+  "description": "Call-graph & dependency visualizer for PostgreSQL: triggers, views, PL/pgSQL functions, tables and columns.",
+  "version": "0.0.1",
+  "publisher": "baltuta",
+  "private": true,
+  "engines": {
+    "vscode": "^1.120.0"
+  },
+  "categories": [
+    "Visualization"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "postgresViz.visualize",
+        "title": "Postgres Viz: Visualize Database"
+      },
+      {
+        "command": "postgresViz.setConnection",
+        "title": "Postgres Viz: Set Connection String"
+      },
+      {
+        "command": "postgresViz.clearConnection",
+        "title": "Postgres Viz: Clear Connection String"
+      }
+    ],
+    "configuration": {
+      "title": "Postgres Viz",
+      "properties": {
+        "postgresViz.schemas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Schemas to introspect. Empty = all non-system schemas."
+        },
+        "postgresViz.includeForeignKeys": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include foreign-key edges in the graph."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
+    "lint": "oxlint src webview test",
+    "format": "oxfmt src webview test esbuild.mjs",
+    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js",
+    "test:db": "node esbuild.mjs --smoke && node dist-test/integration.js"
+  },
+  "dependencies": {
+    "pg": "^8.21.0",
+    "pg-query-emscripten": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/cytoscape": "^3.31.0",
+    "@types/node": "^25.9.2",
+    "@types/pg": "^8.20.0",
+    "@types/vscode": "^1.120.0",
+    "cytoscape": "^3.34.0",
+    "cytoscape-fcose": "^2.2.0",
+    "esbuild": "^0.28.0",
+    "oxfmt": "^0.54.0",
+    "oxlint": "^1.69.0",
+    "typescript": "^6.0.3"
+  }
+}

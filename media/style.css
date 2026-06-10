@@ -1,0 +1,197 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--vscode-font-family);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+  font-size: 12px;
+}
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  height: 26px;
+  border-bottom: 1px solid var(--vscode-panel-border, #444);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+#toolbar input[type='text'] {
+  width: 160px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, transparent);
+  border-radius: 2px;
+  padding: 2px 6px;
+}
+
+#toolbar select {
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+  border: 1px solid var(--vscode-dropdown-border, transparent);
+}
+
+#toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  opacity: 0.9;
+  cursor: pointer;
+}
+
+#toolbar button,
+#panel button {
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #fff);
+  border: none;
+  border-radius: 2px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+#toolbar button:hover,
+#panel button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494e);
+}
+
+#stats {
+  margin-left: auto;
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+#content {
+  position: absolute;
+  top: 35px;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+}
+
+#cy {
+  flex: 1;
+  min-width: 0;
+}
+
+#panel {
+  width: 260px;
+  border-left: 1px solid var(--vscode-panel-border, #444);
+  padding: 10px;
+  overflow-y: auto;
+  background: var(--vscode-sideBar-background, transparent);
+}
+
+#panel.hidden {
+  display: none;
+}
+
+#panel h2 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+#panel h3 {
+  margin: 12px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+#panel .meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+#panel .chip {
+  color: #1b1f23;
+  border-radius: 8px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+#panel .detail {
+  opacity: 0.75;
+  margin: 4px 0;
+  word-break: break-all;
+}
+
+#panel .edge-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#panel .edge-list li {
+  padding: 3px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+#panel .edge-list li:hover {
+  background: var(--vscode-list-hoverBackground, #ffffff14);
+}
+
+#panel .edge-list .kind {
+  font-size: 10px;
+  min-width: 70px;
+}
+
+#panel .edge-list .name {
+  word-break: break-all;
+}
+
+#panel .edge-list small {
+  opacity: 0.55;
+}
+
+#legend {
+  position: absolute;
+  bottom: 6px;
+  left: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  max-width: 70%;
+  font-size: 10px;
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+#legend .dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 3px;
+}
+
+#legend .line {
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  margin: 0 3px 2px 0;
+  vertical-align: middle;
+}
+
+#empty {
+  position: absolute;
+  inset: 35px 0 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+  font-size: 14px;
+}

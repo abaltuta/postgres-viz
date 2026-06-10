@@ -1,0 +1,6 @@
+node_modules/
+dist/
+dist-test/
+media/webview.js
+media/webview.js.map
+*.vsix
