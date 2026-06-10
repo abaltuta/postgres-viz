@@ -242,6 +242,8 @@ function render(graph: GraphPayload): void {
     wheelSensitivity: 0.2,
     hideEdgesOnViewport: true,
     motionBlur: true,
+    // dragging always pans the canvas — node positions are layout-owned
+    autoungrabify: true,
   });
   viewState = null;
   lastStats = graph.stats;
@@ -411,10 +413,10 @@ function unitAdjacency(units: NodeSingular[]): {
   return { out, degree };
 }
 
-function layoutGridCards(units: NodeSingular[]): void {
-  const sorted = [...units].sort(
+/** Lay a block of cards in non-overlapping rows starting at yOffset; returns the block height. */
+function layoutCardBlock(members: NodeSingular[], yOffset: number): number {
+  const sorted = [...members].sort(
     (a, b) =>
-      String(a.data("schema") ?? "").localeCompare(String(b.data("schema") ?? "")) ||
       String(a.data("type")).localeCompare(String(b.data("type"))) ||
       String(a.data("label")).localeCompare(String(b.data("label"))),
   );
@@ -422,7 +424,7 @@ function layoutGridCards(units: NodeSingular[]): void {
   const totalArea = boxes.reduce((s, b) => s + (b.w + GAP) * (b.h + GAP), 0);
   const rowWidth = Math.max(800, Math.sqrt(totalArea) * 1.8);
   let x = 0;
-  let y = 0;
+  let y = yOffset;
   let rowH = 0;
   sorted.forEach((u, i) => {
     const b = boxes[i]!;
@@ -435,6 +437,63 @@ function layoutGridCards(units: NodeSingular[]): void {
     x += b.w + GAP;
     rowH = Math.max(rowH, b.h);
   });
+  return y + rowH - yOffset;
+}
+
+/** Schema-blocked grid: each schema gets its own band so compounds never interleave. */
+function layoutGridCards(units: NodeSingular[]): void {
+  const groups = new Map<string, NodeSingular[]>();
+  for (const u of units) {
+    const key = String(u.data("schema") ?? "");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(u);
+  }
+  let y = 0;
+  for (const key of [...groups.keys()].sort()) {
+    y += layoutCardBlock(groups.get(key)!, y) + GAP * 2.5;
+  }
+}
+
+/** Push overlapping cards apart (organic layouts can collide after row restacking). */
+function resolveOverlaps(units: NodeSingular[]): void {
+  const MARGIN = 24;
+  const boxes = units.map((u) => {
+    const b = u.boundingBox({ includeLabels: true });
+    return { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 };
+  });
+  for (let iter = 0; iter < 10; iter++) {
+    let moved = false;
+    for (let i = 0; i < units.length; i++) {
+      for (let j = i + 1; j < units.length; j++) {
+        const a = boxes[i]!;
+        const b = boxes[j]!;
+        const ox = Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1);
+        const oy = Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1);
+        if (ox <= 0 || oy <= 0) continue;
+        moved = true;
+        const shift = (apply: { x: number; y: number }, idx: number, u: NodeSingular): void => {
+          (u.isParent() ? u.descendants() : u).shift(apply);
+          const box = boxes[idx]!;
+          box.x1 += apply.x;
+          box.x2 += apply.x;
+          box.y1 += apply.y;
+          box.y2 += apply.y;
+        };
+        if (ox < oy) {
+          const push = (ox + MARGIN) / 2;
+          const dir = (a.x1 + a.x2) / 2 <= (b.x1 + b.x2) / 2 ? 1 : -1;
+          shift({ x: -dir * push, y: 0 }, i, units[i]!);
+          shift({ x: dir * push, y: 0 }, j, units[j]!);
+        } else {
+          const push = (oy + MARGIN) / 2;
+          const dir = (a.y1 + a.y2) / 2 <= (b.y1 + b.y2) / 2 ? 1 : -1;
+          shift({ x: 0, y: -dir * push }, i, units[i]!);
+          shift({ x: 0, y: dir * push }, j, units[j]!);
+        }
+      }
+    }
+    if (!moved) break;
+  }
 }
 
 function layoutTreeCards(units: NodeSingular[]): void {
@@ -520,7 +579,11 @@ function runLayout(): void {
   // right-angle elbows read better in the structured layouts; organic keeps curves
   cy.edges("[!detail]").toggleClass("ortho", name === "breadthfirst" || name === "grid");
   if (name === "fcose") {
-    const layout = cy.elements(":visible").layout({
+    // include card-level edges as forces even when visually hidden (edge mode off)
+    const eles = cy
+      .elements(":visible")
+      .union(cy.edges("[!detail]").filter((e) => e.source().visible() && e.target().visible()));
+    const layout = eles.layout({
       name: "fcose",
       animate: false,
       quality: "proof",
@@ -536,7 +599,11 @@ function runLayout(): void {
       tile: true,
       packComponents: true,
     } as cytoscape.LayoutOptions);
-    layout.one("layoutstop", () => restackRows());
+    layout.one("layoutstop", () => {
+      restackRows();
+      resolveOverlaps(cardUnits());
+      cy?.fit(undefined, 50);
+    });
     layout.run();
     return;
   }

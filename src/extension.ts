@@ -261,10 +261,10 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   <div id="toolbar">
     <input id="search" type="text" placeholder="search nodes…" />
     <select id="layout" title="layout">
-      <option value="fcose" selected>fcose</option>
+      <option value="grid" selected>grid</option>
+      <option value="fcose">organic</option>
       <option value="breadthfirst">tree</option>
       <option value="concentric">concentric</option>
-      <option value="grid">grid</option>
     </select>
     <label><input type="checkbox" id="flt-schemagroup" checked />schemas</label>
     <label><input type="checkbox" id="flt-columns" checked />columns</label>
@@ -275,8 +275,8 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     <label><input type="checkbox" id="flt-fk" checked />FKs</label>
     <label title="cards: one rolled-up edge per pair of tables/functions; all: every per-column edge; off: click a node to reveal">edges
       <select id="edge-mode">
-        <option value="off">off</option>
-        <option value="cards" selected>cards</option>
+        <option value="off" selected>off</option>
+        <option value="cards">cards</option>
         <option value="all">all</option>
       </select>
     </label>
