@@ -26,6 +26,10 @@
       {
         "command": "postgresViz.clearConnection",
         "title": "Postgres Viz: Clear Connection String"
+      },
+      {
+        "command": "postgresViz.showLogs",
+        "title": "Postgres Viz: Show Logs"
       }
     ],
     "configuration": {

@@ -15,6 +15,8 @@ import type {
   ViewFuncDep,
 } from "./types";
 
+export type Log = (msg: string) => void;
+
 const REL_KINDS: Record<string, RelKind> = {
   r: "table",
   p: "table",
@@ -30,8 +32,38 @@ function schemaPred(nspname: string): string {
     ELSE ${nspname} = ANY($1::text[]) END)`;
 }
 
-export async function introspect(client: Client, schemas: string[] | null): Promise<Catalog> {
+function countBy<T>(items: T[], key: (item: T) => string): string {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const k = key(item);
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return (
+    [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${n} ${k}`)
+      .join(", ") || "none"
+  );
+}
+
+export async function introspect(
+  client: Client,
+  schemas: string[] | null,
+  log: Log = () => {},
+): Promise<Catalog> {
   const params = [schemas];
+  log(
+    schemas
+      ? `introspecting schemas: ${schemas.join(", ")}`
+      : "introspecting all non-system schemas",
+  );
+
+  let stepStart = Date.now();
+  const took = (): string => {
+    const ms = Date.now() - stepStart;
+    stepStart = Date.now();
+    return `${ms} ms`;
+  };
 
   const rels: CatalogRel[] = (
     await client.query(
@@ -47,6 +79,7 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     name: String(r.name),
     kind: REL_KINDS[r.relkind] ?? "table",
   }));
+  log(`pg_class: ${rels.length} relations (${countBy(rels, (r) => r.kind)}) — ${took()}`);
 
   const cols: CatalogCol[] = (
     await client.query(
@@ -65,6 +98,7 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     name: String(r.name),
     type: String(r.type),
   }));
+  log(`pg_attribute: ${cols.length} columns — ${took()}`);
 
   const triggers: CatalogTrigger[] = (
     await client.query(
@@ -84,6 +118,7 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     tgtype: Number(r.tgtype),
     updateCols: ((r.update_cols ?? []) as unknown[]).map(Number),
   }));
+  log(`pg_trigger: ${triggers.length} user triggers — ${took()}`);
 
   // Column-level (and table-level) dependencies of view/matview rewrite rules.
   // This is exact: Postgres records which columns of which relations every view uses.
@@ -102,6 +137,10 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     relOid: Number(r.rel_oid),
     attnum: Number(r.attnum),
   }));
+  log(
+    `pg_rewrite/pg_depend: ${viewDeps.length} view→relation deps ` +
+      `(${viewDeps.filter((d) => d.attnum > 0).length} column-level) — ${took()}`,
+  );
 
   const viewFuncDeps: ViewFuncDep[] = (
     await client.query(
@@ -113,6 +152,7 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
          AND d.deptype = 'n'`,
     )
   ).rows.map((r) => ({ viewOid: Number(r.view_oid), funcOid: Number(r.func_oid) }));
+  log(`pg_depend: ${viewFuncDeps.length} view→function deps — ${took()}`);
 
   const fks: Fk[] = (
     await client.query(
@@ -128,6 +168,7 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     cols: ((r.cols ?? []) as unknown[]).map(Number),
     refCols: ((r.ref_cols ?? []) as unknown[]).map(Number),
   }));
+  log(`pg_constraint: ${fks.length} foreign keys — ${took()}`);
 
   // CHECK / PRIMARY KEY / UNIQUE / EXCLUDE constraints (FKs are separate, as edges).
   const constraints: CatalogConstraint[] = (
@@ -149,6 +190,11 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     cols: ((r.cols ?? []) as unknown[]).map(Number),
     def: r.def === null || r.def === undefined ? null : String(r.def),
   }));
+  const conNames: Record<string, string> = { c: "CHECK", p: "PK", u: "UNIQUE", x: "EXCLUDE" };
+  log(
+    `pg_constraint: ${constraints.length} constraints ` +
+      `(${countBy(constraints, (c) => conNames[c.contype] ?? c.contype)}) — ${took()}`,
+  );
 
   // Functions referenced by constraint expressions (CHECK (my_fn(col)) …) — exact, from pg_depend.
   const constraintFuncDeps: ConstraintFuncDep[] = (
@@ -160,6 +206,7 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
          AND d.deptype = 'n'`,
     )
   ).rows.map((r) => ({ conOid: Number(r.con_oid), funcOid: Number(r.func_oid) }));
+  log(`pg_depend: ${constraintFuncDeps.length} constraint→function deps — ${took()}`);
 
   // Exact relation deps of new-style (BEGIN ATOMIC) SQL functions — tracked by pg_depend.
   const sqlBodyDeps: SqlBodyDep[] = (
@@ -175,6 +222,7 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     relOid: Number(r.rel_oid),
     attnum: Number(r.attnum),
   }));
+  log(`pg_depend: ${sqlBodyDeps.length} SQL-body (BEGIN ATOMIC) function deps — ${took()}`);
 
   // Column defaults & generated columns: what other columns/functions they reference.
   const defaultDeps: DefaultDep[] = (
@@ -198,11 +246,16 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     refAttnum: r.ref_attnum === null ? null : Number(r.ref_attnum),
     refFuncOid: r.ref_func_oid === null ? null : Number(r.ref_func_oid),
   }));
+  log(`pg_attrdef/pg_depend: ${defaultDeps.length} default/generated-column deps — ${took()}`);
 
   const funcs = await fetchFuncs(
     client,
     `p.prokind IN ('f','p') AND ${schemaPred("n.nspname")}`,
     params,
+  );
+  log(
+    `pg_proc: ${funcs.length} functions/procedures ` +
+      `(${countBy(funcs, (f) => f.language)}) — ${took()}`,
   );
 
   // Pull in trigger functions / view-called functions living outside the schema filter
@@ -221,10 +274,18 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
   }
   if (wanted.size > 0) {
     const extra = await fetchFuncs(client, `p.oid = ANY($1::oid[])`, [[...wanted]]);
+    let kept = 0;
     for (const f of extra) {
       const system = f.schema === "pg_catalog" || f.schema === "information_schema";
-      if (!system || trigFnOids.has(f.oid)) funcs.push(f);
+      if (!system || trigFnOids.has(f.oid)) {
+        funcs.push(f);
+        kept++;
+      }
     }
+    log(
+      `pg_proc: ${kept} extra out-of-filter functions referenced by ` +
+        `triggers/views/constraints (${wanted.size} candidates) — ${took()}`,
+    );
   }
 
   return {

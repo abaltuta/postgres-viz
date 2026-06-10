@@ -106,6 +106,96 @@ CREATE FUNCTION touch_customer(cid bigint) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   UPDATE customers AS tgt SET email = tgt.name WHERE tgt.id = cid;
 END $$;
+
+-- ── shapes lifted from real BPO/EOR payroll migrations ──
+CREATE SCHEMA payroll;
+
+CREATE TABLE payroll.paycode (
+  id bigint PRIMARY KEY,
+  paycode_type text NOT NULL,
+  currency text NOT NULL,
+  exclude_from_validation boolean DEFAULT false
+);
+
+CREATE TABLE payroll.report_entry (
+  id bigint PRIMARY KEY,
+  payroll_report_id uuid NOT NULL,
+  employee_id bigint NOT NULL,
+  payroll_paycode_id bigint REFERENCES payroll.paycode (id),
+  amount numeric NOT NULL
+);
+
+CREATE TABLE payroll.employee_totals (
+  payroll_report_id uuid,
+  employee_id bigint,
+  paycode_type text,
+  computed_total numeric
+);
+
+CREATE TABLE payroll.payrun (
+  id bigint PRIMARY KEY,
+  recurring_id bigint,
+  cutoff_date date,
+  finalized_at timestamptz
+);
+
+CREATE TABLE payroll.instruction (
+  id bigint PRIMARY KEY,
+  recurring_payrun_id bigint,
+  status text
+);
+
+CREATE FUNCTION payroll.entry_amount(entry payroll.report_entry)
+  RETURNS numeric IMMUTABLE LANGUAGE sql AS 'SELECT entry.amount';
+
+-- modeled on payroll.calculate_report_submitted_employee_totals: old-style
+-- LANGUAGE sql, a data-modifying CTE, aggregation, and a CTE re-read by alias
+CREATE FUNCTION payroll.recalculate_totals(report_id uuid) RETURNS void LANGUAGE sql AS $fn$
+WITH deleted AS (
+  DELETE FROM payroll.employee_totals
+  WHERE payroll_report_id = report_id
+  RETURNING employee_id
+),
+computed AS (
+  SELECT
+    e.payroll_report_id,
+    e.employee_id,
+    p.paycode_type,
+    SUM(payroll.entry_amount(e)) AS computed_total
+  FROM payroll.report_entry e
+  JOIN payroll.paycode p ON e.payroll_paycode_id = p.id
+  WHERE e.payroll_report_id = report_id
+    AND p.exclude_from_validation = FALSE
+  GROUP BY e.payroll_report_id, e.employee_id, p.paycode_type
+)
+INSERT INTO payroll.employee_totals (payroll_report_id, employee_id, paycode_type, computed_total)
+SELECT t.payroll_report_id, t.employee_id, t.paycode_type, COALESCE(t.computed_total, 0)
+FROM computed t;
+$fn$;
+
+-- modeled on payroll.payrun_instruction_update_status: composite-type parameter
+-- (Hasura computed-field style), EXISTS subquery, CASE over param fields
+CREATE FUNCTION payroll.payrun_status(payrun payroll.payrun)
+  RETURNS text STABLE LANGUAGE plpgsql AS $fn$
+DECLARE
+  cutoff date := payrun.cutoff_date;
+  needs_review boolean;
+BEGIN
+  needs_review := EXISTS (
+    SELECT 1
+    FROM payroll.instruction i
+    WHERE i.recurring_payrun_id = payrun.recurring_id
+      AND i.status = 'NEEDS_REVIEW'
+  );
+  RETURN (
+    SELECT CASE
+      WHEN needs_review AND CURRENT_DATE > cutoff THEN 'OVERDUE'
+      WHEN NOT needs_review AND (CURRENT_DATE > cutoff OR payrun.finalized_at IS NOT NULL)
+        THEN 'COMPLETED'
+      ELSE 'IN_PROGRESS'
+    END
+  );
+END $fn$;
 `;
 
 async function connectWithRetry(attempts = 40): Promise<Client> {
@@ -151,7 +241,9 @@ function assertEdge(
 async function main(): Promise<void> {
   const client = await connectWithRetry();
   try {
-    await client.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
+    await client.query(
+      "DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS payroll CASCADE;",
+    );
     await client.query(FIXTURE);
 
     const catalog = await introspect(client, null);
@@ -268,6 +360,73 @@ async function main(): Promise<void> {
     );
     assertEdge(g, "reads", touch, customersName, "tgt.name read via target alias");
     assertEdge(g, "reads", touch, customersId, "tgt.id read via target alias");
+
+    // ── real-world payroll shapes (BPO/EOR style) ──
+    const entryTable = nodeId(g, "table", "report_entry");
+    const paycode = nodeId(g, "table", "paycode");
+    const totalsTable = nodeId(g, "table", "employee_totals");
+    const payrunTable = nodeId(g, "table", "payrun");
+    const instruction = nodeId(g, "table", "instruction");
+    const recalc = nodeId(g, "function", "recalculate_totals()");
+    const entryAmount = nodeId(g, "function", "entry_amount()");
+    const payrunStatus = nodeId(g, "function", "payrun_status()");
+
+    // LANGUAGE sql body with a data-modifying CTE + aggregation
+    assertEdge(g, "writes", recalc, totalsTable, "DELETE inside CTE writes employee_totals");
+    assertEdge(
+      g,
+      "writes",
+      recalc,
+      nodeId(g, "column", "computed_total", totalsTable),
+      "INSERT column list writes employee_totals.computed_total",
+    );
+    assertEdge(g, "reads", recalc, entryTable, "reads report_entry");
+    assertEdge(
+      g,
+      "reads",
+      recalc,
+      nodeId(g, "column", "payroll_paycode_id", entryTable),
+      "join key e.payroll_paycode_id read",
+    );
+    assertEdge(
+      g,
+      "reads",
+      recalc,
+      nodeId(g, "column", "paycode_type", paycode),
+      "p.paycode_type read in CTE, re-read through alias t",
+    );
+    assertEdge(
+      g,
+      "reads",
+      recalc,
+      nodeId(g, "column", "exclude_from_validation", paycode),
+      "p.exclude_from_validation filter read",
+    );
+    assertEdge(g, "calls", recalc, entryAmount, "schema-qualified payroll.entry_amount() call");
+
+    // composite-type parameter fields attribute to the rowtype's table
+    assertEdge(
+      g,
+      "reads",
+      payrunStatus,
+      nodeId(g, "column", "cutoff_date", payrunTable),
+      "payrun.cutoff_date (composite param) traces to payroll.payrun",
+    );
+    assertEdge(
+      g,
+      "reads",
+      payrunStatus,
+      nodeId(g, "column", "finalized_at", payrunTable),
+      "payrun.finalized_at traces to payroll.payrun",
+    );
+    assertEdge(g, "reads", payrunStatus, instruction, "EXISTS subquery reads instruction");
+    assertEdge(
+      g,
+      "reads",
+      payrunStatus,
+      nodeId(g, "column", "status", instruction),
+      "i.status read inside EXISTS",
+    );
 
     console.log(
       `integration OK — ${g.nodes.length} nodes, ${g.edges.length} edges, stats: ${JSON.stringify(g.stats)}`,

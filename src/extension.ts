@@ -9,6 +9,27 @@ const SECRET_KEY = "postgresViz.connectionString";
 
 let panel: vscode.WebviewPanel | undefined;
 let lastConnection: string | undefined;
+let output: vscode.OutputChannel | undefined;
+
+function getOutput(): vscode.OutputChannel {
+  output ??= vscode.window.createOutputChannel("Postgres Viz");
+  return output;
+}
+
+function logLine(msg: string): void {
+  getOutput().appendLine(`${new Date().toISOString().slice(11, 23)}  ${msg}`);
+}
+
+/** Connection strings go to logs with the password stripped. */
+function redact(conn: string): string {
+  try {
+    const u = new URL(conn);
+    if (u.password) u.password = "***";
+    return u.toString();
+  } catch {
+    return "(unparseable connection string)";
+  }
+}
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
@@ -18,8 +39,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("postgresViz.clearConnection", async () => {
       await context.secrets.delete(SECRET_KEY);
       lastConnection = undefined;
+      panel?.webview.postMessage({ type: "connection", value: "" });
       vscode.window.showInformationMessage("Postgres Viz: connection string cleared.");
     }),
+    vscode.commands.registerCommand("postgresViz.showLogs", () => getOutput().show(true)),
     vscode.commands.registerCommand("postgresViz.visualize", () => visualize(context)),
   );
 }
@@ -36,20 +59,23 @@ async function promptConnection(context: vscode.ExtensionContext): Promise<strin
     ignoreFocusOut: true,
     value: (await context.secrets.get(SECRET_KEY)) ?? "",
   });
-  if (value) await context.secrets.store(SECRET_KEY, value);
+  if (value) {
+    await context.secrets.store(SECRET_KEY, value);
+    lastConnection = value;
+    panel?.webview.postMessage({ type: "connection", value });
+    if (panel) await loadGraph(value);
+  }
   return value || undefined;
 }
 
-async function getConnection(context: vscode.ExtensionContext): Promise<string | undefined> {
-  return (await context.secrets.get(SECRET_KEY)) ?? promptConnection(context);
-}
-
 async function visualize(context: vscode.ExtensionContext): Promise<void> {
-  const conn = await getConnection(context);
-  if (!conn) return;
-  lastConnection = conn;
   ensurePanel(context);
-  await loadGraph(conn);
+  const conn = await context.secrets.get(SECRET_KEY);
+  if (conn) {
+    lastConnection = conn;
+    await loadGraph(conn);
+  }
+  // no stored connection → the webview's connection bar takes over
 }
 
 function ensurePanel(context: vscode.ExtensionContext): void {
@@ -68,7 +94,16 @@ function ensurePanel(context: vscode.ExtensionContext): void {
   });
   panel.webview.onDidReceiveMessage(async (msg: Record<string, unknown>) => {
     try {
-      if (msg.type === "refresh" && lastConnection) {
+      if (msg.type === "ready") {
+        const stored = (await context.secrets.get(SECRET_KEY)) ?? "";
+        panel?.webview.postMessage({ type: "connection", value: stored });
+      } else if (msg.type === "connect") {
+        const conn = String(msg.connectionString ?? "").trim();
+        if (!conn) return;
+        await context.secrets.store(SECRET_KEY, conn);
+        lastConnection = conn;
+        await loadGraph(conn);
+      } else if (msg.type === "refresh" && lastConnection) {
         await loadGraph(lastConnection);
       } else if (msg.type === "openDdl") {
         await openDdl(msg.nodeType as NodeType, Number(msg.oid), String(msg.label ?? ""));
@@ -80,7 +115,15 @@ function ensurePanel(context: vscode.ExtensionContext): void {
 }
 
 async function withClient<T>(conn: string, fn: (client: Client) => Promise<T>): Promise<T> {
-  const client = new Client({ connectionString: conn, application_name: "postgres-viz" });
+  // hard timeouts: a wrong host or a blocked catalog query should fail with a
+  // real error instead of spinning on "introspecting catalogs…" forever
+  const client = new Client({
+    connectionString: conn,
+    application_name: "postgres-viz",
+    connectionTimeoutMillis: 10_000,
+    statement_timeout: 60_000,
+    query_timeout: 90_000,
+  });
   await client.connect();
   try {
     return await fn(client);
@@ -94,21 +137,49 @@ async function loadGraph(conn: string): Promise<void> {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: "Postgres Viz", cancellable: false },
       async (progress) => {
+        const log = (msg: string): void => {
+          logLine(msg);
+          progress.report({ message: msg.length > 64 ? `${msg.slice(0, 61)}…` : msg });
+        };
+        const analysisLog = (msg: string): void => {
+          logLine(msg);
+          const m = msg.match(/^\[(\d+)\/(\d+)\]/);
+          progress.report({
+            message: m ? `analyzing function bodies ${m[1]}/${m[2]}…` : msg.slice(0, 64),
+          });
+        };
+        const startedAt = Date.now();
         const cfg = vscode.workspace.getConfiguration("postgresViz");
         const schemas = cfg.get<string[]>("schemas") ?? [];
         const includeFks = cfg.get<boolean>("includeForeignKeys") ?? true;
+        logLine(`─── visualize ${redact(conn)} ───`);
+        log("connecting (10s timeout)…");
         const { graph, database } = await withClient(conn, async (client) => {
-          progress.report({ message: "introspecting catalogs…" });
-          const catalog = await introspect(client, schemas.length > 0 ? schemas : null);
-          progress.report({ message: `analyzing ${catalog.funcs.length} functions…` });
-          const analysis = await analyzeAll(catalog);
+          log("connected; introspecting catalogs…");
+          const catalog = await introspect(client, schemas.length > 0 ? schemas : null, log);
+          const analysis = await analyzeAll(catalog, analysisLog);
+          log("building graph…");
           const db: string = (await client.query("SELECT current_database() AS db")).rows[0].db;
           return { graph: buildGraph(catalog, analysis, { includeFks }), database: db };
         });
+        logLine(
+          `graph ready: ${graph.nodes.length} nodes, ${graph.edges.length} edges ` +
+            `(${JSON.stringify(graph.stats)}) — total ${Date.now() - startedAt} ms`,
+        );
+        if (graph.nodes.length > 3000) {
+          logLine(
+            'note: large graph — set "postgresViz.schemas" to a subset (e.g. ["public"]) to trim it',
+          );
+        }
         panel?.webview.postMessage({ type: "graph", graph, database });
       },
     );
   } catch (err) {
+    logLine(`ERROR: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    panel?.webview.postMessage({
+      type: "error",
+      message: String(err instanceof Error ? err.message : err),
+    });
     showError(err);
   }
 }
@@ -185,6 +256,11 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   <title>Postgres Viz</title>
 </head>
 <body>
+  <div id="connbar">
+    <input id="conn" type="text" spellcheck="false"
+           placeholder="postgres://user:password@localhost:5432/dbname" />
+    <button id="connect">connect</button>
+  </div>
   <div id="toolbar">
     <input id="search" type="text" placeholder="search nodes…" />
     <select id="layout" title="layout">

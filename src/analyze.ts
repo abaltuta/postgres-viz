@@ -1,3 +1,4 @@
+import type { Log } from "./introspect";
 import type { Catalog, CatalogCol, CatalogFunc, CatalogRel } from "./types";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -630,6 +631,9 @@ function processStmtNode(stmtNode: Json, parentScope: Scope, ctx: BodyCtx): Deri
 
 // ── Parsing entry points ────────────────────────────────────────────────────
 
+/** `target := …` / `target[i] := …` prefix of PL/pgSQL assignment expressions. */
+const ASSIGN_PREFIX = /^\s*[a-zA-Z_][\w$]*(?:\.[a-zA-Z_][\w$]*)*(?:\[[^\]]*\])?\s*:=\s*/;
+
 async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
   try {
     return await parser.parseQuery(sql);
@@ -638,7 +642,14 @@ async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
     try {
       return await parser.parseQuery(`SELECT ${sql}`);
     } catch {
-      return null;
+      // assignment statements keep their "var := " prefix in the parse tree
+      const rhs = sql.replace(ASSIGN_PREFIX, "");
+      if (rhs === sql) return null;
+      try {
+        return await parser.parseQuery(`SELECT ${rhs}`);
+      } catch {
+        return null;
+      }
     }
   }
 }
@@ -711,7 +722,10 @@ export async function analyzeFunc(
   return refs;
 }
 
-export async function analyzeAll(catalog: Catalog): Promise<Map<number, FuncRefs>> {
+export async function analyzeAll(
+  catalog: Catalog,
+  log: Log = () => {},
+): Promise<Map<number, FuncRefs>> {
   const resolver = new Resolver(catalog);
   const relByOid = new Map(catalog.rels.map((r) => [r.oid, r]));
   const triggerRelsByFunc = new Map<number, CatalogRel[]>();
@@ -724,12 +738,36 @@ export async function analyzeAll(catalog: Catalog): Promise<Map<number, FuncRefs
   }
 
   const parser = await getParser();
+  log(
+    parser
+      ? "SQL parser: pg-query-emscripten (WASM) loaded"
+      : "SQL parser unavailable — regex fallback only (table-level precision)",
+  );
+
+  // BEGIN ATOMIC bodies are skipped: pg_depend already has exact deps (see sqlBodyDeps).
+  const candidates = catalog.funcs.filter(
+    (fn) =>
+      (fn.language === "plpgsql" || fn.language === "sql") &&
+      !(fn.language === "sql" && fn.hasSqlBody),
+  );
+  log(
+    `analyzing ${candidates.length} function bodies ` +
+      `(of ${catalog.funcs.length} functions; BEGIN ATOMIC and non-SQL languages skipped)`,
+  );
+
   const out = new Map<number, FuncRefs>();
-  for (const fn of catalog.funcs) {
-    if (fn.language !== "plpgsql" && fn.language !== "sql") continue;
-    // BEGIN ATOMIC bodies: pg_depend already has exact deps (see sqlBodyDeps).
-    if (fn.language === "sql" && fn.hasSqlBody) continue;
-    out.set(fn.oid, await analyzeFunc(fn, resolver, triggerRelsByFunc.get(fn.oid) ?? [], parser));
+  let done = 0;
+  for (const fn of candidates) {
+    const start = Date.now();
+    const refs = await analyzeFunc(fn, resolver, triggerRelsByFunc.get(fn.oid) ?? [], parser);
+    out.set(fn.oid, refs);
+    done++;
+    log(
+      `[${done}/${candidates.length}] ${fn.schema}.${fn.name}(): ` +
+        `${refs.parsed ? "parsed" : "regex fallback"} — ` +
+        `${refs.reads.size} read rels, ${refs.writes.size} write rels, ` +
+        `${refs.calls.size} calls (${Date.now() - start} ms)`,
+    );
   }
   return out;
 }

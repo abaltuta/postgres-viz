@@ -295,7 +295,31 @@ window.addEventListener("message", (ev: MessageEvent) => {
   if (msg?.type === "graph") {
     database = msg.database ?? "";
     render(msg.graph as GraphPayload);
+  } else if (msg?.type === "connection") {
+    const connEl = el<HTMLInputElement>("conn");
+    if (!connEl.value) connEl.value = msg.value ?? "";
+    if (!msg.value && !cy) {
+      el("empty").textContent = "Enter a Postgres connection string above and press connect.";
+    }
+  } else if (msg?.type === "error") {
+    if (!cy) {
+      el("empty").style.display = "flex";
+      el("empty").textContent = `Error: ${msg.message ?? "unknown"}`;
+    }
   }
+});
+
+function doConnect(): void {
+  const value = el<HTMLInputElement>("conn").value.trim();
+  if (!value) return;
+  el("empty").style.display = "flex";
+  el("empty").textContent = "Connecting…";
+  vscode.postMessage({ type: "connect", connectionString: value });
+}
+
+el("connect").addEventListener("click", doConnect);
+el<HTMLInputElement>("conn").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") doConnect();
 });
 
 let searchTimer: number | undefined;
@@ -337,3 +361,4 @@ el("refresh").addEventListener("click", () => {
 });
 
 buildLegend();
+vscode.postMessage({ type: "ready" });
