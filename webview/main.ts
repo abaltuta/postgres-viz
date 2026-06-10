@@ -301,6 +301,11 @@ window.addEventListener("message", (ev: MessageEvent) => {
     if (!msg.value && !cy) {
       el("empty").textContent = "Enter a Postgres connection string above and press connect.";
     }
+  } else if (msg?.type === "status") {
+    if (!cy) {
+      el("empty").style.display = "flex";
+      el("empty").textContent = String(msg.message ?? "");
+    }
   } else if (msg?.type === "error") {
     if (!cy) {
       el("empty").style.display = "flex";

@@ -2,7 +2,7 @@
   "name": "postgres-viz",
   "displayName": "Postgres Viz",
   "description": "Call-graph & dependency visualizer for PostgreSQL: triggers, views, PL/pgSQL functions, tables and columns.",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "baltuta",
   "private": true,
   "engines": {
@@ -18,14 +18,6 @@
       {
         "command": "postgresViz.visualize",
         "title": "Postgres Viz: Visualize Database"
-      },
-      {
-        "command": "postgresViz.setConnection",
-        "title": "Postgres Viz: Set Connection String"
-      },
-      {
-        "command": "postgresViz.clearConnection",
-        "title": "Postgres Viz: Clear Connection String"
       },
       {
         "command": "postgresViz.showLogs",

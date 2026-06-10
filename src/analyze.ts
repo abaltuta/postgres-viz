@@ -23,6 +23,13 @@ export interface PgParser {
 let cachedParser: PgParser | null | undefined;
 
 /**
+ * A long-lived pg-query-emscripten instance accumulates WASM heap state and,
+ * after a few hundred parse calls, can lock up in a synchronous (and therefore
+ * uninterruptible) loop. Instantiation costs ~2 ms, so recycle aggressively.
+ */
+const RECYCLE_AFTER_CALLS = 25;
+
+/**
  * pg-query-emscripten (the real Postgres parser compiled to WASM) is optional at
  * runtime: if it fails to load we fall back to regexes. Its API reports parse
  * failures via an `error` field rather than throwing — normalize to throws.
@@ -32,19 +39,33 @@ export async function getParser(): Promise<PgParser | null> {
   try {
     const mod: Json = await import("pg-query-emscripten");
     const factory = typeof mod === "function" ? mod : (mod?.default ?? mod);
-    const instance = typeof factory === "function" ? await factory() : factory;
-    if (typeof instance?.parse !== "function" || typeof instance?.parsePlpgsql !== "function") {
+    if (typeof factory !== "function") {
+      cachedParser = null;
+      return cachedParser;
+    }
+    let instance: Json = null;
+    let calls = 0;
+    const get = async (): Promise<Json> => {
+      if (!instance || calls >= RECYCLE_AFTER_CALLS) {
+        instance = await factory();
+        calls = 0;
+      }
+      calls++;
+      return instance;
+    };
+    const probe = await get();
+    if (typeof probe?.parse !== "function" || typeof probe?.parsePlpgsql !== "function") {
       cachedParser = null;
       return cachedParser;
     }
     cachedParser = {
       async parseQuery(sql: string): Promise<Json> {
-        const r = instance.parse(sql);
+        const r = (await get()).parse(sql);
         if (r?.error) throw new Error(String(r.error.message ?? "parse error"));
         return r?.parse_tree;
       },
       async parsePlPgSQL(sql: string): Promise<Json> {
-        const r = instance.parsePlpgsql(sql);
+        const r = (await get()).parsePlpgsql(sql);
         if (r?.error) throw new Error(String(r.error.message ?? "parse error"));
         return r;
       },

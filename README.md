@@ -28,7 +28,7 @@ pnpm build
 
 Open the folder in VS Code and press **F5** (Run Extension). In the dev host:
 
-1. `Postgres Viz: Visualize Database` — prompts for a connection string (stored in VS Code secret storage), introspects, and renders the graph.
+1. `Postgres Viz: Visualize Database` — opens the graph panel; enter the connection string in the bar at the top (stored in VS Code secret storage, prefilled next time). `Postgres Viz: Show Logs` opens the output channel with per-step introspection/analysis logs.
 2. Click a node → neighborhood highlight + side panel with all connections; **Open DDL** shows the view/function/trigger/table definition.
 3. Toolbar: search, layout switcher (fcose/tree/concentric/grid), and filters for columns, views, functions, triggers, FK edges, and isolated nodes.
 
