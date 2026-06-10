@@ -17,6 +17,21 @@ const extension = {
   logLevel: "info",
 };
 
+/** Out-of-process parser worker — killable when a sync WASM parse hangs. */
+const worker = {
+  entryPoints: ["src/parser-worker.ts"],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  target: "node18",
+  outfile: "dist/parser-worker.js",
+  external: ["pg-native"],
+  sourcemap: true,
+  logLevel: "info",
+};
+
+const workerTest = { ...worker, outfile: "dist-test/parser-worker.js" };
+
 /** Webview bundle (browser) — cytoscape + app code. */
 const webview = {
   entryPoints: ["webview/main.ts"],
@@ -42,11 +57,12 @@ const smokeTest = {
 };
 
 if (smoke) {
-  await esbuild.build(smokeTest);
+  await Promise.all([esbuild.build(smokeTest), esbuild.build(workerTest)]);
 } else if (watch) {
   const c1 = await esbuild.context(extension);
   const c2 = await esbuild.context(webview);
-  await Promise.all([c1.watch(), c2.watch()]);
+  const c3 = await esbuild.context(worker);
+  await Promise.all([c1.watch(), c2.watch(), c3.watch()]);
 } else {
-  await Promise.all([esbuild.build(extension), esbuild.build(webview)]);
+  await Promise.all([esbuild.build(extension), esbuild.build(webview), esbuild.build(worker)]);
 }

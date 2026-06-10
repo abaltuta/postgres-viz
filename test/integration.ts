@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { Client } from "pg";
-import { analyzeAll } from "../src/analyze";
+import { analyzeAll, disposeParser } from "../src/analyze";
 import { buildGraph } from "../src/graph";
 import { introspect } from "../src/introspect";
 import type { EdgeKind, GraphPayload, NodeType } from "../src/types";
@@ -18,8 +18,22 @@ const FIXTURE = `
 CREATE TABLE customers (
   id bigint PRIMARY KEY,
   name text NOT NULL,
-  email text
+  email text,
+  updated_at timestamptz
 );
+
+-- Hasura-style generic trigger fn: writes a column of whatever table the
+-- trigger is attached to, with no table name anywhere in the body
+CREATE FUNCTION set_current_timestamp_updated_at() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE _new record;
+BEGIN
+  _new := NEW;
+  _new."updated_at" = NOW();
+  RETURN _new;
+END $$;
+
+CREATE TRIGGER customers_set_updated_at BEFORE UPDATE ON customers
+  FOR EACH ROW EXECUTE FUNCTION set_current_timestamp_updated_at();
 
 CREATE TABLE orders (
   id bigint PRIMARY KEY,
@@ -246,7 +260,7 @@ async function main(): Promise<void> {
     );
     await client.query(FIXTURE);
 
-    const catalog = await introspect(client, null);
+    const catalog = await introspect(client, { include: null, exclude: [] });
     const analysis = await analyzeAll(catalog);
     const g = buildGraph(catalog, analysis, { includeFks: true });
 
@@ -361,6 +375,16 @@ async function main(): Promise<void> {
     assertEdge(g, "reads", touch, customersName, "tgt.name read via target alias");
     assertEdge(g, "reads", touch, customersId, "tgt.id read via target alias");
 
+    // generic trigger fn: assignment-target write lands on the attached table
+    const setUpdatedAt = nodeId(g, "function", "set_current_timestamp_updated_at()");
+    assertEdge(
+      g,
+      "writes",
+      setUpdatedAt,
+      nodeId(g, "column", "updated_at", customers),
+      "set_current_timestamp_updated_at writes customers.updated_at via trigger attachment",
+    );
+
     // ── real-world payroll shapes (BPO/EOR style) ──
     const entryTable = nodeId(g, "table", "report_entry");
     const paycode = nodeId(g, "table", "paycode");
@@ -433,6 +457,7 @@ async function main(): Promise<void> {
     );
   } finally {
     await client.end();
+    disposeParser();
   }
 }
 

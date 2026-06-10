@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { Client } from "pg";
-import { analyzeAll } from "./analyze";
+import { analyzeAll, disposeParser } from "./analyze";
 import { buildGraph } from "./graph";
 import { introspect } from "./introspect";
 import type { NodeType } from "./types";
@@ -38,7 +38,9 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-export function deactivate(): void {}
+export function deactivate(): void {
+  disposeParser();
+}
 
 async function visualize(context: vscode.ExtensionContext): Promise<void> {
   ensurePanel(context);
@@ -139,12 +141,17 @@ async function loadGraph(conn: string): Promise<void> {
         const startedAt = Date.now();
         const cfg = vscode.workspace.getConfiguration("postgresViz");
         const schemas = cfg.get<string[]>("schemas") ?? [];
+        const excludeSchemas = cfg.get<string[]>("excludeSchemas") ?? [];
         const includeFks = cfg.get<boolean>("includeForeignKeys") ?? true;
         logLine(`─── visualize ${redact(conn)} ───`);
         log("connecting (10s timeout)…");
         const { graph, database } = await withClient(conn, async (client) => {
           log("connected; introspecting catalogs…");
-          const catalog = await introspect(client, schemas.length > 0 ? schemas : null, log);
+          const catalog = await introspect(
+            client,
+            { include: schemas.length > 0 ? schemas : null, exclude: excludeSchemas },
+            log,
+          );
           const analysis = await analyzeAll(catalog, analysisLog);
           log("building graph…");
           const db: string = (await client.query("SELECT current_database() AS db")).rows[0].db;

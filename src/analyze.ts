@@ -1,3 +1,6 @@
+import { fork, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import type { Log } from "./introspect";
 import type { Catalog, CatalogCol, CatalogFunc, CatalogRel } from "./types";
 
@@ -29,6 +32,117 @@ let cachedParser: PgParser | null | undefined;
  */
 const RECYCLE_AFTER_CALLS = 25;
 
+/** A parse stuck in synchronous WASM can only be recovered by killing the worker. */
+const PARSE_TIMEOUT_MS = 5_000;
+const WORKER_RECYCLE_AFTER = 500;
+
+interface WorkerRes {
+  id: number;
+  ok: boolean;
+  result?: Json;
+  error?: string;
+}
+
+/**
+ * Out-of-process parser backed by parser-worker.js. Hung parse calls time out,
+ * the worker is SIGKILLed and respawned, and the affected function falls back
+ * to regex extraction — a poisoned input can never freeze the host again.
+ */
+class WorkerParser implements PgParser {
+  private child: ChildProcess | null = null;
+  private nextId = 1;
+  private pending = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
+  private requests = 0;
+
+  constructor(private readonly workerPath: string) {}
+
+  private ensure(): ChildProcess {
+    if (this.child) return this.child;
+    const child = fork(this.workerPath, [], { silent: true });
+    child.on("message", (res: WorkerRes) => {
+      const p = this.pending.get(res.id);
+      if (!p) return;
+      this.pending.delete(res.id);
+      if (res.ok) p.resolve(res.result);
+      else p.reject(new Error(res.error ?? "parse error"));
+    });
+    child.on("error", () => this.kill());
+    child.on("exit", () => {
+      if (this.child === child) this.child = null;
+      for (const p of this.pending.values()) p.reject(new Error("parser worker exited"));
+      this.pending.clear();
+    });
+    // never keep the parent process alive: hold a ref only while a request is in flight
+    child.unref();
+    (child as Json).channel?.unref?.();
+    this.child = child;
+    this.requests = 0;
+    return child;
+  }
+
+  /** drop the event-loop ref once no requests are pending */
+  private idleUnref(): void {
+    if (this.pending.size === 0) (this.child as Json)?.channel?.unref?.();
+  }
+
+  private request(op: "parseQuery" | "parsePlPgSQL", sql: string): Promise<Json> {
+    if (this.requests >= WORKER_RECYCLE_AFTER) this.kill();
+    this.requests++;
+    const child = this.ensure();
+    return new Promise<Json>((resolve, reject) => {
+      const id = this.nextId++;
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        this.kill();
+        reject(new Error(`parse timed out: ${sql.slice(0, 60)}`));
+      }, PARSE_TIMEOUT_MS);
+      this.pending.set(id, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          this.idleUnref();
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          this.idleUnref();
+          reject(e);
+        },
+      });
+      try {
+        child.send({ id, op, sql });
+        (child as Json).channel?.ref?.();
+      } catch (e) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        this.kill();
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    });
+  }
+
+  kill(): void {
+    const child = this.child;
+    this.child = null;
+    child?.kill("SIGKILL");
+  }
+
+  parseQuery(sql: string): Promise<Json> {
+    return this.request("parseQuery", sql);
+  }
+
+  parsePlPgSQL(sql: string): Promise<Json> {
+    return this.request("parsePlPgSQL", sql);
+  }
+}
+
+let workerParser: WorkerParser | null = null;
+
+export function disposeParser(): void {
+  workerParser?.kill();
+  workerParser = null;
+  cachedParser = undefined;
+}
+
 /**
  * pg-query-emscripten (the real Postgres parser compiled to WASM) is optional at
  * runtime: if it fails to load we fall back to regexes. Its API reports parse
@@ -36,6 +150,20 @@ const RECYCLE_AFTER_CALLS = 25;
  */
 export async function getParser(): Promise<PgParser | null> {
   if (cachedParser !== undefined) return cachedParser;
+  // Prefer the out-of-process parser (killable on hang).
+  try {
+    const workerPath = path.join(__dirname, "parser-worker.js");
+    if (existsSync(workerPath)) {
+      workerParser = new WorkerParser(workerPath);
+      await workerParser.parseQuery("SELECT 1"); // health check
+      cachedParser = workerParser;
+      return cachedParser;
+    }
+  } catch {
+    workerParser?.kill();
+    workerParser = null;
+  }
+  // In-process fallback with instance recycling.
   try {
     const mod: Json = await import("pg-query-emscripten");
     const factory = typeof mod === "function" ? mod : (mod?.default ?? mod);
@@ -662,14 +790,18 @@ const yieldEventLoop = (): Promise<void> => new Promise((resolve) => setImmediat
 /** `target := …` / `target[i] := …` prefix of PL/pgSQL assignment expressions. */
 const ASSIGN_PREFIX = /^\s*[a-zA-Z_][\w$]*(?:\.[a-zA-Z_][\w$]*)*(?:\[[^\]]*\])?\s*:=\s*/;
 
+const isTimeout = (e: unknown): boolean => String(e).includes("parse timed out");
+
 async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
   try {
     return await parser.parseQuery(sql);
-  } catch {
+  } catch (e) {
+    if (isTimeout(e)) return null; // hung worker was killed — don't retry variants
     // PL/pgSQL expressions ("a + b") aren't full statements — retry as a SELECT.
     try {
       return await parser.parseQuery(`SELECT ${sql}`);
-    } catch {
+    } catch (e2) {
+      if (isTimeout(e2)) return null;
       // assignment statements keep their "var := " prefix in the parse tree
       const rhs = sql.replace(ASSIGN_PREFIX, "");
       if (rhs === sql) return null;
@@ -678,6 +810,27 @@ async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
       } catch {
         return null;
       }
+    }
+  }
+}
+
+/**
+ * Generic trigger functions (Hasura's set_current_timestamp_updated_at, audit
+ * triggers, …) assign `NEW.col := …` / `_new."col" = …` — assignment targets the
+ * SQL parser never sees, and bodies using an untyped `record` variable don't even
+ * parse as PL/pgSQL. Scan the source text and attribute the write to every table
+ * whose trigger executes the function. Statement-start anchors (`;`, BEGIN, THEN,
+ * ELSE, LOOP) keep `IF NEW.x = 1` comparisons from matching.
+ */
+const TRIGGER_ASSIGN_RE =
+  /(?:^|;|\bbegin\b|\bthen\b|\belse\b|\bloop\b)\s*"?(_?new|_?old)"?\."?([a-zA-Z_][\w$]*)"?\s*:?=(?![=<>])/gim;
+
+function triggerAssignWrites(src: string, ctx: BodyCtx): void {
+  if (ctx.triggerRels.length === 0 || !src) return;
+  for (const m of src.matchAll(TRIGGER_ASSIGN_RE)) {
+    for (const rel of ctx.triggerRels) {
+      const col = ctx.resolver.col(rel.oid, m[2]!);
+      if (col) add(ctx.refs.writes, rel.oid, col.attnum);
     }
   }
 }
@@ -748,6 +901,7 @@ export async function analyzeFunc(
     }
   }
   if (!refs.parsed) regexAnalyze(fn.src ?? fn.def ?? "", ctx);
+  if (fn.language === "plpgsql") triggerAssignWrites(fn.src ?? fn.def ?? "", ctx);
   return refs;
 }
 
@@ -769,7 +923,7 @@ export async function analyzeAll(
   const parser = await getParser();
   log(
     parser
-      ? "SQL parser: pg-query-emscripten (WASM) loaded"
+      ? `SQL parser: pg-query-emscripten loaded (${parser === workerParser ? "worker process, killable on hang" : "in-process WASM"})`
       : "SQL parser unavailable — regex fallback only (table-level precision)",
   );
 

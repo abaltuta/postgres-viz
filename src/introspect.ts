@@ -17,6 +17,13 @@ import type {
 
 export type Log = (msg: string) => void;
 
+export interface SchemaFilter {
+  /** explicit whitelist; null = all non-system schemas */
+  include: string[] | null;
+  /** schemas dropped when no whitelist is set (e.g. hdb_catalog) */
+  exclude: string[];
+}
+
 const REL_KINDS: Record<string, RelKind> = {
   r: "table",
   p: "table",
@@ -25,11 +32,21 @@ const REL_KINDS: Record<string, RelKind> = {
   f: "foreign",
 };
 
-/** `$1` is always the (possibly NULL) text[] of schemas to include. */
+/** `$1` = include whitelist (or NULL), `$2` = exclude list — in every query. */
 function schemaPred(nspname: string): string {
   return `(CASE WHEN $1::text[] IS NULL
     THEN ${nspname} !~ '^pg_' AND ${nspname} <> 'information_schema'
+         AND NOT (${nspname} = ANY($2::text[]))
     ELSE ${nspname} = ANY($1::text[]) END)`;
+}
+
+/** Objects installed by an extension (pgcrypto, uuid-ossp, …) are noise. */
+function notExtensionOwned(classid: string, oid: string): string {
+  return `NOT EXISTS (
+    SELECT 1 FROM pg_depend ext_dep
+    WHERE ext_dep.classid = '${classid}'::regclass
+      AND ext_dep.objid = ${oid}
+      AND ext_dep.deptype = 'e')`;
 }
 
 function countBy<T>(items: T[], key: (item: T) => string): string {
@@ -48,14 +65,16 @@ function countBy<T>(items: T[], key: (item: T) => string): string {
 
 export async function introspect(
   client: Client,
-  schemas: string[] | null,
+  filter: SchemaFilter,
   log: Log = () => {},
 ): Promise<Catalog> {
-  const params = [schemas];
+  const params: unknown[] = [filter.include, filter.exclude];
   log(
-    schemas
-      ? `introspecting schemas: ${schemas.join(", ")}`
-      : "introspecting all non-system schemas",
+    filter.include
+      ? `introspecting schemas: ${filter.include.join(", ")}`
+      : `introspecting all non-system schemas${
+          filter.exclude.length > 0 ? ` except: ${filter.exclude.join(", ")}` : ""
+        }`,
   );
 
   let stepStart = Date.now();
@@ -70,7 +89,8 @@ export async function introspect(
       `SELECT c.oid AS oid, n.nspname AS schema, c.relname AS name, c.relkind::text AS relkind
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE c.relkind IN ('r','p','v','m','f') AND ${schemaPred("n.nspname")}`,
+       WHERE c.relkind IN ('r','p','v','m','f') AND ${schemaPred("n.nspname")}
+         AND ${notExtensionOwned("pg_class", "c.oid")}`,
       params,
     )
   ).rows.map((r) => ({
@@ -250,7 +270,8 @@ export async function introspect(
 
   const funcs = await fetchFuncs(
     client,
-    `p.prokind IN ('f','p') AND ${schemaPred("n.nspname")}`,
+    `p.prokind IN ('f','p') AND ${schemaPred("n.nspname")}
+     AND ${notExtensionOwned("pg_proc", "p.oid")}`,
     params,
   );
   log(

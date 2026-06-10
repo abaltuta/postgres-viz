@@ -126,6 +126,12 @@ function buildStyle(): cytoscape.StylesheetJson {
 
 function render(graph: GraphPayload): void {
   el("empty").style.display = "none";
+  // large graphs start decluttered: columns hidden, isolated nodes hidden —
+  // the toolbar toggles reflect this and can bring everything back
+  if (graph.nodes.length > 600) {
+    el<HTMLInputElement>("flt-columns").checked = false;
+    el<HTMLInputElement>("flt-isolated").checked = true;
+  }
   cy?.destroy();
   cy = cytoscape({
     container: el("cy"),
@@ -193,15 +199,22 @@ function runLayout(): void {
     fcose: {
       name: "fcose",
       animate: false,
-      quality: "default",
-      nodeSeparation: 80,
-      idealEdgeLength: 110,
-      nestingFactor: 0.7,
+      quality: "proof",
+      randomize: true,
+      nodeSeparation: 160,
+      idealEdgeLength: 160,
+      edgeElasticity: 0.45,
+      nodeRepulsion: 50000,
+      nestingFactor: 0.1,
+      gravity: 0.2,
+      gravityCompound: 1.5,
+      numIter: 2500,
+      tile: true,
       packComponents: true,
     },
-    breadthfirst: { name: "breadthfirst", directed: true, spacingFactor: 1.1 },
-    concentric: { name: "concentric", minNodeSpacing: 30 },
-    grid: { name: "grid" },
+    breadthfirst: { name: "breadthfirst", directed: true, spacingFactor: 1.6 },
+    concentric: { name: "concentric", minNodeSpacing: 60 },
+    grid: { name: "grid", avoidOverlapPadding: 30 },
   };
   cy.elements(":visible")
     .layout((options[name] ?? options.fcose) as cytoscape.LayoutOptions)

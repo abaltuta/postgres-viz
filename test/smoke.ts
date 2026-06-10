@@ -4,7 +4,7 @@
  * against a small fake catalog — no database needed.
  */
 import assert from "node:assert/strict";
-import { analyzeFunc, getParser, Resolver } from "../src/analyze";
+import { analyzeFunc, disposeParser, getParser, Resolver } from "../src/analyze";
 import type { Catalog, CatalogFunc, CatalogRel } from "../src/types";
 
 const ORDERS = 1001;
@@ -107,6 +107,7 @@ async function main(): Promise<void> {
   assert.ok(fallback.calls.has(NOTIFY_FN), "fallback: notify_stats call");
 
   console.log("smoke OK — parser + fallback paths both detect reads/writes/calls");
+  disposeParser();
 }
 
 main().catch((err) => {
