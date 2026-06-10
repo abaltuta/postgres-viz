@@ -300,7 +300,17 @@ export function buildGraph(
 
   // ── Aggregation: roll row-level (detail) edges up to one card-level edge per
   // (kind, source card, target card) with a count, so the overview shows a few
-  // hundred card edges instead of thousands of column edges. ──
+  // hundred card edges instead of thousands of column edges.
+  //
+  // Invariants the webview relies on:
+  //  - `detail: true` ⟺ at least one endpoint is a row (column/trigger/
+  //    constraint); these are the edges hidden by default and materialized
+  //    lazily.
+  //  - intra-card pairs (constrains, update-of) never aggregate — containment
+  //    already shows them.
+  //  - if a REAL unit-level edge with the same (kind, src, tgt) exists (e.g. a
+  //    whole-table read with no column info, or fn→fn calls), no aggregate is
+  //    emitted: one pair, one card-level edge, never both. ──
   const unitLevelKeys = new Set<string>();
   for (const e of edgeList) {
     const su = unitOfId.get(e.data.source) ?? e.data.source;

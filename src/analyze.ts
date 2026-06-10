@@ -265,7 +265,13 @@ export class Resolver {
   }
 }
 
-/** Visit every object-valued entry of a parse tree; handlers match on the key. */
+/**
+ * Visit every object-valued entry of a parse tree; handlers match on the key.
+ * libpg_query JSON wraps repeated-Node fields as `{ SelectStmt: {...} }` but
+ * leaves singular typed fields (InsertStmt.relation, CallStmt.funccall, …)
+ * UNWRAPPED — so visitors can't rely on tag names alone for those; see
+ * isRangeVar() and the explicit CallStmt case in analyzeStmt().
+ */
 export function walk(node: Json, visit: (tag: string, value: Json) => void): void {
   if (Array.isArray(node)) {
     for (const item of node) walk(item, visit);
@@ -358,7 +364,9 @@ function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
     return resolver.resolveRel(rv.relname, rv.schemaname, schema);
   };
 
-  // Write targets, tracked by object identity so the generic RangeVar pass can classify them.
+  // Write targets, tracked by OBJECT IDENTITY (not name): the same relation can
+  // appear as both a read and a write in one statement (UPDATE t … FROM t), and
+  // only the specific RangeVar node sitting in `relation` is the write.
   const writeTargets = new Set<Json>();
   walk(stmt, (tag, v) => {
     switch (tag) {
@@ -448,10 +456,15 @@ interface BaseBinding {
 
 interface DerivedBinding {
   kind: "derived";
+  /** output name → base-table columns it was projected from (empty refs = expression) */
   cols: Map<string, BaseRef[]>;
-  /** star-passthrough sources: `SELECT * FROM t` lets unknown names fall through */
+  /**
+   * star-passthrough sources: `SELECT * FROM t` can't enumerate outputs, so a
+   * name miss falls through to the FROM bindings — but only resolves when
+   * exactly ONE source has the column (ambiguity would be a SQL error anyway).
+   */
   sources: Binding[];
-  /** outputs in declaration order, for positional column aliasing */
+  /** outputs in declaration order, for positional `WITH x(a, b)` renames */
   ordered: OutputCol[];
 }
 
@@ -547,6 +560,8 @@ function resolveColumnRefRefs(cr: Json, scope: Scope, ctx: BodyCtx): BaseRef[] |
   const qual = names[fields.length - 2];
   if (!qual) return null;
   const colName = star ? null : (names[fields.length - 1] ?? null);
+  // Order matters: a real FROM alias named "new"/"old" must shadow the trigger
+  // pseudo-records, so bindings are consulted before the NEW/OLD fallback.
   let binding = lookupBinding(scope, qual);
   if (!binding) {
     const lower = qual.toLowerCase();
@@ -559,6 +574,11 @@ function resolveColumnRefRefs(cr: Json, scope: Scope, ctx: BodyCtx): BaseRef[] |
       }
       return out.length > 0 ? out : null;
     }
+    // No FROM binding and not NEW/OLD: treat the qualifier as a relation name
+    // (`schema.table.col` or bare `table.col`). This also intentionally covers
+    // composite-type parameters (Hasura computed fields take `payrun
+    // payroll.payrun`): attributing `payrun.cutoff_date` to the payroll.payrun
+    // TABLE is semantically right — the param is a row of that table.
     const schemaName = fields.length >= 3 ? names[fields.length - 3] : undefined;
     const rel = ctx.resolver.resolveRel(qual, schemaName, ctx.schema);
     if (rel) binding = { kind: "base", rel };
@@ -787,11 +807,24 @@ function processStmtNode(stmtNode: Json, parentScope: Scope, ctx: BodyCtx): Deri
  */
 const yieldEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
-/** `target := …` / `target[i] := …` prefix of PL/pgSQL assignment expressions. */
+/**
+ * `target := …` / `target[i] := …` prefix of PL/pgSQL assignment expressions.
+ * libpg_query keeps the WHOLE statement text in PLpgSQL_stmt_assign's expr
+ * query — `needs_review := EXISTS (…)` — which neither parses as a statement
+ * nor as `SELECT <it>`. Stripping the prefix recovers the RHS; without this,
+ * everything referenced inside assignments was silently invisible.
+ */
 const ASSIGN_PREFIX = /^\s*[a-zA-Z_][\w$]*(?:\.[a-zA-Z_][\w$]*)*(?:\[[^\]]*\])?\s*:=\s*/;
 
 const isTimeout = (e: unknown): boolean => String(e).includes("parse timed out");
 
+/**
+ * Parse cascade for PL/pgSQL expression fragments: full statement → wrapped as
+ * `SELECT <expr>` (bare expressions like `a + b`) → RHS of an assignment.
+ * Each failed attempt is a real round-trip into the C parser, so a timed-out
+ * (killed-worker) attempt must NOT retry variants — the next two would each
+ * eat another full timeout on input that already proved poisonous.
+ */
 async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
   try {
     return await parser.parseQuery(sql);
@@ -818,9 +851,13 @@ async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
  * Generic trigger functions (Hasura's set_current_timestamp_updated_at, audit
  * triggers, …) assign `NEW.col := …` / `_new."col" = …` — assignment targets the
  * SQL parser never sees, and bodies using an untyped `record` variable don't even
- * parse as PL/pgSQL. Scan the source text and attribute the write to every table
- * whose trigger executes the function. Statement-start anchors (`;`, BEGIN, THEN,
- * ELSE, LOOP) keep `IF NEW.x = 1` comparisons from matching.
+ * parse as PL/pgSQL (the plpgsql parser rejects `_new."x"` with "not a known
+ * variable"), so the AST route is a dead end for exactly these functions. Scan
+ * the source text instead and attribute the write to EVERY table whose trigger
+ * executes the function — one generic fn attached to 100 tables gets 100 write
+ * edges, which is the desired blast-radius answer. Statement-start anchors
+ * (`;`, BEGIN, THEN, ELSE, LOOP) keep `IF NEW.x = 1` comparisons from matching,
+ * and the `(?![=<>])` tail keeps `!=`, `<=`, `>=` out.
  */
 const TRIGGER_ASSIGN_RE =
   /(?:^|;|\bbegin\b|\bthen\b|\belse\b|\bloop\b)\s*"?(_?new|_?old)"?\."?([a-zA-Z_][\w$]*)"?\s*:?=(?![=<>])/gim;
@@ -835,7 +872,13 @@ function triggerAssignWrites(src: string, ctx: BodyCtx): void {
   }
 }
 
-/** Crude lexical fallback when the WASM parser is unavailable. Table-level only. */
+/**
+ * Crude lexical fallback when the WASM parser is unavailable (or a body failed
+ * to parse). Table-level only. Knowingly over-matches — `UPDATE` also matches
+ * `FOR UPDATE` / `UPDATE OF`, and `callRe` matches every `ident(` — but every
+ * candidate must resolve against the live catalog, which drops nearly all of
+ * the noise; what survives is at worst a plausible table-level edge.
+ */
 export function regexAnalyze(src: string, ctx: BodyCtx): void {
   const cleaned = src.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ");
   const ident = String.raw`([a-zA-Z_][\w$]*(?:\.[a-zA-Z_][\w$]*)?)`;

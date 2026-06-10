@@ -48,6 +48,7 @@ let payload: GraphPayload | null = null;
 const rowsByCard = new Map<string, NodeDef[]>();
 const detailEdgesByCard = new Map<string, EdgeDef[]>();
 const cardOfNode = new Map<string, string>(); // row id → card id
+const nodeDefById = new Map<string, NodeDef>();
 const materialized = new Set<string>();
 const MATERIALIZE_CAP = 30;
 
@@ -387,9 +388,11 @@ function render(graph: GraphPayload): void {
   rowsByCard.clear();
   detailEdgesByCard.clear();
   cardOfNode.clear();
+  nodeDefById.clear();
   materialized.clear();
 
   const liveNodes: NodeDef[] = [];
+  for (const n of graph.nodes) nodeDefById.set(n.data.id, n);
   for (const n of graph.nodes) {
     if (ROW_TYPES.has(n.data.type)) {
       const card = n.data.parent!;
@@ -512,13 +515,25 @@ function applyFilters(): void {
 /**
  * ERD pass: stack each materialized card's visible children (columns by attnum,
  * then triggers and constraints) as uniform-width rows inside the card.
+ * Compound positions are DERIVED from children in cytoscape, so this must
+ * re-run after anything that moves cards or changes row visibility — layouts,
+ * filters, materialization — or edges anchor to stale row positions. The card
+ * center is snapshotted before the loop because moving rows shifts it.
  */
 function restackRows(): void {
   if (!cy) return;
   cy.batch(() => {
     cy!.nodes(':parent[type != "schema"]').forEach((p) => {
+      // class checks, NOT `:visible` — freshly materialized rows have no
+      // computed style yet, so `:visible` returns empty and leaves the pile
       const rows = p
-        .children(":visible")
+        .children()
+        .filter(
+          (d) =>
+            !d.hasClass("hidden-el") &&
+            !d.hasClass("isolated-hidden") &&
+            !d.hasClass("focus-hidden"),
+        )
         .sort((a, b) => (Number(a.data("ord")) || 0) - (Number(b.data("ord")) || 0));
       if (rows.length === 0) return;
       let maxLen = String(p.data("label") ?? "").length;
@@ -643,7 +658,14 @@ function layoutCardBlock(
   return h;
 }
 
-/** Schema-blocked grid, packed to the viewport's aspect ratio. */
+/**
+ * Schema-blocked grid, packed to the viewport's aspect ratio.
+ * Geometry: a region of area A laid out at aspect ratio r has width
+ * W = sqrt(A·r) — applied twice: each schema block gets its width from its own
+ * area share, and the outer shelf width comes from the total. Shelf packing
+ * wastes 10–25% height, hence the ×1.15 bias in canvasAspect() and ×1.1 on the
+ * outer width. Blocks pack tallest-first (FFDH) to keep shelves dense.
+ */
 function layoutGridCards(units: NodeSingular[]): void {
   const groups = new Map<string, NodeSingular[]>();
   for (const u of units) {
@@ -686,7 +708,12 @@ function layoutGridCards(units: NodeSingular[]): void {
   }
 }
 
-/** Push overlapping cards apart (organic layouts can collide after row restacking). */
+/**
+ * Push overlapping cards apart (organic layouts can collide after row
+ * restacking changes card sizes). Pairwise separation along the axis of least
+ * penetration, O(n²) per iteration with local bbox mutation so later pairs in
+ * the same sweep see earlier pushes; converges or gives up after 10 rounds.
+ */
 function resolveOverlaps(units: NodeSingular[]): void {
   const MARGIN = 24;
   const boxes = units.map((u) => {
@@ -1089,6 +1116,36 @@ function wireHoverPreview(): void {
 
 // ── panel ──
 
+/**
+ * The column pairs an aggregate edge stands for, from the payload (its member
+ * detail edges may not be materialized): fk → "created_by→id, modified_by→id";
+ * reads/writes/selects → the touched column names.
+ */
+function aggMembers(data: GraphEdgeData): string {
+  const unitOfId = (id: string): string => cardOfNode.get(id) ?? id;
+  const members = (detailEdgesByCard.get(data.source) ?? [])
+    .filter(
+      (e) =>
+        e.data.kind === data.kind &&
+        unitOfId(e.data.source) === data.source &&
+        unitOfId(e.data.target) === data.target,
+    )
+    .map((e) => {
+      const src = nodeDefById.get(e.data.source);
+      const tgt = nodeDefById.get(e.data.target);
+      const srcRow = src && ROW_TYPES.has(src.data.type);
+      const tgtRow = tgt && ROW_TYPES.has(tgt.data.type);
+      if (srcRow && tgtRow) return `${src.data.label}→${tgt.data.label}`;
+      if (srcRow) return String(src!.data.label);
+      if (tgtRow) return String(tgt!.data.label);
+      return "";
+    })
+    .filter(Boolean);
+  const MAX = 6;
+  const shown = members.slice(0, MAX).join(", ");
+  return members.length > MAX ? `${shown}, +${members.length - MAX} more` : shown;
+}
+
 function renderPanel(node: NodeSingular): void {
   const d = node.data() as GraphNodeData;
   const panel = el("panel");
@@ -1108,10 +1165,12 @@ function renderPanel(node: NodeSingular): void {
         : "";
       const display = owner ? `${owner}.${otherData.label}` : otherData.label;
       const kindLabel = `${data.kind}${data.count && data.count > 1 ? ` ×${data.count}` : ""}`;
+      const cols = data.agg ? aggMembers(data) : "";
       return `<li data-node="${esc(other.id())}">
         <span class="kind" style="color:${EDGE_COLORS[data.kind] ?? "#8993A4"}">${outgoing ? "→" : "←"} ${esc(kindLabel)}</span>
         <span class="name">${esc(display)}</span>
         <small>${esc(otherData.type)}</small>
+        ${cols ? `<span class="cols">${esc(cols)}</span>` : ""}
       </li>`;
     })
     .join("");
@@ -1163,45 +1222,64 @@ function explorerDot(type: string): string {
 
 function buildExplorer(): void {
   if (!payload) return;
-  const bySchema = new Map<string, { rels: NodeDef[]; fns: NodeDef[] }>();
+  const bySchema = new Map<string, Map<string, NodeDef[]>>();
   for (const n of payload.nodes) {
     const t = n.data.type;
     if (t === "schema" || ROW_TYPES.has(t)) continue;
     const schema = String(n.data.schema ?? "");
-    if (!bySchema.has(schema)) bySchema.set(schema, { rels: [], fns: [] });
-    if (t === "function") bySchema.get(schema)!.fns.push(n);
-    else bySchema.get(schema)!.rels.push(n);
+    if (!bySchema.has(schema)) bySchema.set(schema, new Map());
+    const byType = bySchema.get(schema)!;
+    if (!byType.has(t)) byType.set(t, []);
+    byType.get(t)!.push(n);
   }
   const byLabel = (a: NodeDef, b: NodeDef): number =>
     String(a.data.label).localeCompare(String(b.data.label));
+  const relEntry = (rel: NodeDef): string => {
+    const rows = rowsByCard.get(rel.data.id) ?? [];
+    const parts = [
+      `<details><summary class="obj" data-node="${esc(rel.data.id)}">${explorerDot(rel.data.type)}${esc(rel.data.label)}</summary><ul>`,
+    ];
+    for (const r of rows) {
+      parts.push(
+        `<li data-node="${esc(r.data.id)}">${explorerDot(r.data.type)}${esc(r.data.label)}<small>${esc(r.data.detail ?? r.data.type)}</small></li>`,
+      );
+    }
+    parts.push("</ul></details>");
+    return parts.join("");
+  };
+  const GROUPS: [string, string][] = [
+    ["table", "tables"],
+    ["view", "views"],
+    ["matview", "materialized views"],
+    ["foreign", "foreign tables"],
+    ["function", "functions"],
+  ];
   const html: string[] = [];
   for (const schema of [...bySchema.keys()].sort()) {
-    const { rels, fns } = bySchema.get(schema)!;
-    rels.sort(byLabel);
-    fns.sort(byLabel);
+    const byType = bySchema.get(schema)!;
+    const total = [...byType.values()].reduce((s, list) => s + list.length, 0);
     html.push(
-      `<details open><summary>${explorerDot("schema")}<b>${esc(schema)}</b><small>${rels.length} rel · ${fns.length} fn</small></summary>`,
+      `<details open><summary>${explorerDot("schema")}<b>${esc(schema)}</b><small>${total}</small></summary>`,
     );
-    for (const rel of rels) {
-      const rows = rowsByCard.get(rel.data.id) ?? [];
+    for (const [type, title] of GROUPS) {
+      const list = byType.get(type);
+      if (!list || list.length === 0) continue;
+      list.sort(byLabel);
       html.push(
-        `<details><summary class="obj" data-node="${esc(rel.data.id)}">${explorerDot(rel.data.type)}${esc(rel.data.label)}<small>${esc(rel.data.type)}</small></summary><ul>`,
+        `<details ${type === "table" ? "open" : ""}><summary>${explorerDot(type)}<small>${esc(title)} (${list.length})</small></summary>`,
       );
-      for (const r of rows) {
-        html.push(
-          `<li data-node="${esc(r.data.id)}">${explorerDot(r.data.type)}${esc(r.data.label)}<small>${esc(r.data.detail ?? r.data.type)}</small></li>`,
-        );
+      if (type === "function") {
+        html.push("<ul>");
+        for (const f of list) {
+          html.push(
+            `<li data-node="${esc(f.data.id)}">${explorerDot("function")}${esc(f.data.label)}</li>`,
+          );
+        }
+        html.push("</ul>");
+      } else {
+        for (const rel of list) html.push(relEntry(rel));
       }
-      html.push("</ul></details>");
-    }
-    if (fns.length > 0) {
-      html.push(`<details><summary><small>functions (${fns.length})</small></summary><ul>`);
-      for (const f of fns) {
-        html.push(
-          `<li data-node="${esc(f.data.id)}">${explorerDot("function")}${esc(f.data.label)}</li>`,
-        );
-      }
-      html.push("</ul></details>");
+      html.push("</details>");
     }
     html.push("</details>");
   }

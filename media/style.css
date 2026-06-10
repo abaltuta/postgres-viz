@@ -298,10 +298,18 @@ body {
   opacity: 0.55;
 }
 
+#panel .edge-list .cols {
+  flex-basis: 100%;
+  margin-left: 76px;
+  font-size: 10px;
+  opacity: 0.6;
+  word-break: break-all;
+}
+
 #legend {
   position: absolute;
   bottom: 6px;
-  left: 8px;
+  left: 258px; /* clears the explorer; collapses to 8px when it's hidden */
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
@@ -309,6 +317,10 @@ body {
   font-size: 10px;
   opacity: 0.75;
   pointer-events: none;
+}
+
+#explorer.hidden ~ #legend {
+  left: 8px;
 }
 
 #legend .dot {
