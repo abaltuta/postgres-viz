@@ -295,7 +295,10 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     <div id="cy"></div>
     <div id="crumb" class="hidden"></div>
     <div id="legend"></div>
-    <aside id="panel" class="hidden"></aside>
+    <aside id="panel" class="hidden">
+      <div id="panel-resize" title="drag to resize"></div>
+      <div id="panel-body"></div>
+    </aside>
   </div>
   <div id="empty">Connecting to the database…</div>
   <script src="${scriptUri}"></script>

@@ -582,7 +582,18 @@ function canvasAspect(): number {
   const c = el("cy");
   const raw = c.clientWidth / Math.max(1, c.clientHeight);
   // shelf packing wastes some height — bias wider
-  return Math.min(4, Math.max(1, raw)) * 1.15;
+  return Math.min(5, Math.max(1, raw)) * 1.3;
+}
+
+/** Animated fit — every viewport change eases instead of teleporting. */
+function fitView(eles?: cytoscape.CollectionArgument, padding = 50): void {
+  if (!cy) return;
+  cy.stop();
+  cy.animate({
+    fit: { eles: (eles ?? cy.elements(":visible")) as never, padding },
+    duration: 250,
+    easing: "ease-in-out-cubic",
+  } as never);
 }
 
 /** Layout units: whole cards and standalone nodes. */
@@ -814,22 +825,19 @@ function layoutTreeCards(units: NodeSingular[]): void {
     if (!byLevel.has(lv)) byLevel.set(lv, []);
     byLevel.get(lv)!.push(u);
   }
+  // wrap each dependency layer to the viewport's aspect so wide trees don't
+  // fit-to-specks; busiest cards lead their layer
+  const totalArea = units.reduce((s, u) => {
+    const b = u.boundingBox({ includeLabels: true });
+    return s + (b.w + GAP) * (b.h + GAP);
+  }, 0);
+  const maxW = Math.max(900, Math.sqrt(totalArea * canvasAspect()));
   let y = 0;
   for (const lv of [...byLevel.keys()].sort((a, b) => a - b)) {
     const row = byLevel
       .get(lv)!
       .sort((a, b) => (degree.get(b.id()) ?? 0) - (degree.get(a.id()) ?? 0));
-    const boxes = row.map((u) => u.boundingBox({ includeLabels: true }));
-    const width = boxes.reduce((s, b) => s + b.w, 0) + GAP * Math.max(0, row.length - 1);
-    let x = -width / 2;
-    let rowH = 0;
-    row.forEach((u, i) => {
-      const b = boxes[i]!;
-      moveUnitTo(u, x + b.w / 2, y + b.h / 2);
-      x += b.w + GAP;
-      rowH = Math.max(rowH, b.h);
-    });
-    y += rowH + GAP * 2;
+    y += packShelf(row, 0, y, maxW, GAP) + GAP * 2;
   }
 }
 
@@ -887,7 +895,7 @@ function runLayout(): void {
     layout.one("layoutstop", () => {
       restackRows();
       resolveOverlaps(cardUnits());
-      cy?.fit(undefined, 50);
+      fitView();
     });
     layout.run();
     return;
@@ -897,7 +905,7 @@ function runLayout(): void {
   if (name === "breadthfirst") layoutTreeCards(units);
   else if (name === "concentric") layoutConcentricCards(units);
   else layoutGridCards(units);
-  cy.fit(undefined, 50);
+  fitView();
 }
 
 // ── selection ──
@@ -1006,7 +1014,7 @@ function exitView(refit: boolean): void {
   });
   hideCrumb();
   restackRows();
-  if (refit) cy.fit(undefined, 50);
+  if (refit) fitView();
 }
 
 /** 1-hop card neighborhood, isolated, re-laid-out, with the origin selected. */
@@ -1095,7 +1103,13 @@ function showCallTree(node: NodeSingular): void {
 
   restackRows();
   layoutTreeCards(cardUnits());
-  cy.fit(undefined, 50);
+  fitView();
+  // wide trees fit to specks — guarantee a readable zoom centered on the root
+  window.setTimeout(() => {
+    if (cy && viewState && cy.zoom() < 0.3) {
+      cy.animate({ zoom: 0.5, center: { eles: node }, duration: 200 } as never);
+    }
+  }, 300);
   renderPanel(node);
 }
 
@@ -1114,6 +1128,14 @@ function wireHoverPreview(): void {
   cy.on("mouseout", "node", () => {
     hoverUnit = null;
     cy!.edges(".hover-reveal").removeClass("hover-reveal");
+  });
+  // cursor affordance: pointer over interactive nodes, default for panning
+  const container = el("cy");
+  cy.on("mouseover", "node", () => {
+    container.style.cursor = "pointer";
+  });
+  cy.on("mouseout", "node", () => {
+    container.style.cursor = "";
   });
 }
 
@@ -1164,8 +1186,9 @@ const PASSIVE_KIND: Record<string, string> = {
 
 function renderPanel(node: NodeSingular): void {
   const d = node.data() as GraphNodeData;
-  const panel = el("panel");
-  panel.classList.remove("hidden");
+  el("panel").classList.remove("hidden");
+  const panel = el("panel-body");
+  syncExplorerSelection(node.id());
   const isCard = rowsByCard.has(node.id()) || node.isParent();
   const edges = (
     isCard ? node.union(node.descendants()).connectedEdges("[!detail]") : node.connectedEdges()
@@ -1195,6 +1218,7 @@ function renderPanel(node: NodeSingular): void {
   const where = ownerTable ? `${d.schema ?? ""}.${ownerTable}` : (d.schema ?? "");
   const canCallTree = d.type === "function" || d.type === "trigger";
   panel.innerHTML = `
+    <button class="close" id="panel-close" title="close">✕</button>
     <h2>${esc(d.label)}</h2>
     <p class="meta">
       <span class="chip" style="background:${NODE_COLORS[d.type] ?? "#888"}">${esc(d.type)}</span>
@@ -1206,9 +1230,10 @@ function renderPanel(node: NodeSingular): void {
       <button id="focus-btn">Focus</button>
       ${canCallTree ? '<button id="calltree-btn">Call tree</button>' : ""}
     </div>
-    ${outRows.length > 0 ? `<h3>Uses (${outRows.length})</h3><ul class="edge-list">${outRows.join("")}</ul>` : ""}
-    ${inRows.length > 0 ? `<h3>Used by (${inRows.length})</h3><ul class="edge-list">${inRows.join("")}</ul>` : ""}
+    ${outRows.length > 0 ? `<details open><summary>Uses (${outRows.length})</summary><ul class="edge-list">${outRows.join("")}</ul></details>` : ""}
+    ${inRows.length > 0 ? `<details open><summary>Used by (${inRows.length})</summary><ul class="edge-list">${inRows.join("")}</ul></details>` : ""}
     ${outRows.length === 0 && inRows.length === 0 ? "<h3>No connections</h3>" : ""}`;
+  panel.querySelector("#panel-close")?.addEventListener("click", () => clearSelection());
 
   panel.querySelector("#ddl-btn")?.addEventListener("click", () => {
     const td = d.type === "column" ? (node.parent().first().data() as GraphNodeData) : d;
@@ -1230,6 +1255,21 @@ function renderPanel(node: NodeSingular): void {
       }
     });
   });
+}
+
+/** Highlight + reveal the selected node in the explorer list. */
+function syncExplorerSelection(id: string): void {
+  const tree = el("explorer-tree");
+  tree.querySelector(".active")?.classList.remove("active");
+  const item = tree.querySelector<HTMLElement>(`[data-node="${CSS.escape(id)}"]`);
+  if (!item) return;
+  item.classList.add("active");
+  let p = item.parentElement;
+  while (p && p !== tree) {
+    if (p instanceof HTMLDetailsElement) p.open = true;
+    p = p.parentElement;
+  }
+  item.scrollIntoView({ block: "nearest" });
 }
 
 // ── explorer: structured schema → object → column list ──
@@ -1482,7 +1522,28 @@ el("edge-mode").addEventListener("change", () => {
 el("flt-schemagroup").addEventListener("change", () => applySchemaGrouping(true));
 el("layout").addEventListener("change", runLayout);
 el("relayout").addEventListener("click", runLayout);
-el("fit").addEventListener("click", () => cy?.fit(undefined, 40));
+el("fit").addEventListener("click", () => fitView(undefined, 40));
+
+// side panel resize: drag the left edge (no native webview splitter exists)
+{
+  const panelEl = el("panel");
+  const handle = el("panel-resize");
+  let resizing = false;
+  handle.addEventListener("pointerdown", (ev) => {
+    resizing = true;
+    handle.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  });
+  handle.addEventListener("pointermove", (ev) => {
+    if (!resizing) return;
+    const width = Math.min(680, Math.max(220, window.innerWidth - ev.clientX - 8));
+    panelEl.style.width = `${width}px`;
+  });
+  handle.addEventListener("pointerup", (ev) => {
+    resizing = false;
+    handle.releasePointerCapture(ev.pointerId);
+  });
+}
 el("refresh").addEventListener("click", () => {
   exitView(false);
   el("empty").style.display = "flex";
