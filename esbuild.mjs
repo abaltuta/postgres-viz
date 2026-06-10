@@ -3,8 +3,8 @@ import esbuild from "esbuild";
 const watch = process.argv.includes("--watch");
 const smoke = process.argv.includes("--smoke");
 
-/** Extension host bundle (Node). pg-query-emscripten is left external (ESM with an
- *  embedded WASM blob, loaded from node_modules); pg-native is an optional dep of pg. */
+/** Extension host bundle (Node). pg-query-emscripten (embedded WASM blob) is bundled
+ *  in so the .vsix needs no node_modules; pg-native is an optional dep of pg. */
 const extension = {
   entryPoints: ["src/extension.ts"],
   bundle: true,
@@ -12,7 +12,7 @@ const extension = {
   format: "cjs",
   target: "node18",
   outfile: "dist/extension.js",
-  external: ["vscode", "pg-native", "pg-query-emscripten"],
+  external: ["vscode", "pg-native"],
   sourcemap: true,
   logLevel: "info",
 };
@@ -36,7 +36,7 @@ const smokeTest = {
   format: "cjs",
   target: "node18",
   outdir: "dist-test",
-  external: ["pg-query-emscripten", "pg-native"],
+  external: ["pg-native"],
   sourcemap: true,
   logLevel: "info",
 };

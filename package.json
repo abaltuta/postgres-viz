@@ -54,7 +54,8 @@
     "lint": "oxlint src webview test",
     "format": "oxfmt src webview test esbuild.mjs",
     "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js",
-    "test:db": "node esbuild.mjs --smoke && node dist-test/integration.js"
+    "test:db": "node esbuild.mjs --smoke && node dist-test/integration.js",
+    "package": "pnpm build && vsce package --no-dependencies"
   },
   "dependencies": {
     "pg": "^8.21.0",
@@ -65,6 +66,7 @@
     "@types/node": "^25.9.2",
     "@types/pg": "^8.20.0",
     "@types/vscode": "^1.120.0",
+    "@vscode/vsce": "^3.9.2",
     "cytoscape": "^3.34.0",
     "cytoscape-fcose": "^2.2.0",
     "esbuild": "^0.28.0",

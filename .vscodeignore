@@ -7,3 +7,5 @@ esbuild.mjs
 tsconfig.json
 **/*.map
 .gitignore
+pnpm-lock.yaml
+pnpm-workspace.yaml
