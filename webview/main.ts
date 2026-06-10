@@ -297,6 +297,9 @@ function buildStyle(): cytoscape.StylesheetJson {
     {
       selector: 'node[type="schema"]',
       style: {
+        // fully click-through: drags pan, clicks land on the cards beneath —
+        // a schema box spans most of the viewport and must never eat input
+        events: "no",
         "background-opacity": 0.02,
         "background-color": "#57606A",
         "border-width": 2,
