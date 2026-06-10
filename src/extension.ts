@@ -273,7 +273,13 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     <label><input type="checkbox" id="flt-triggers" checked />triggers</label>
     <label><input type="checkbox" id="flt-constraints" checked />constraints</label>
     <label><input type="checkbox" id="flt-fk" checked />FKs</label>
-    <label title="show every relationship at once (otherwise click a node to reveal its edges)"><input type="checkbox" id="flt-edges" />all edges</label>
+    <label title="cards: one rolled-up edge per pair of tables/functions; all: every per-column edge; off: click a node to reveal">edges
+      <select id="edge-mode">
+        <option value="off">off</option>
+        <option value="cards" selected>cards</option>
+        <option value="all">all</option>
+      </select>
+    </label>
     <label><input type="checkbox" id="flt-isolated" />hide isolated</label>
     <button id="relayout">layout</button>
     <button id="fit">fit</button>
@@ -282,6 +288,7 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   </div>
   <div id="content">
     <div id="cy"></div>
+    <div id="crumb" class="hidden"></div>
     <aside id="panel" class="hidden"></aside>
   </div>
   <div id="legend"></div>

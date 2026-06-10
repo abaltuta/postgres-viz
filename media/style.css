@@ -124,6 +124,34 @@ body {
   display: none;
 }
 
+#crumb {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, #252526);
+  border: 1px solid var(--vscode-panel-border, #444);
+  font-size: 12px;
+}
+
+#crumb.hidden {
+  display: none;
+}
+
+#crumb button {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+  border: none;
+  border-radius: 2px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
 #panel h2 {
   margin: 0 0 4px;
   font-size: 14px;

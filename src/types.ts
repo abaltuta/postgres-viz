@@ -139,8 +139,12 @@ export interface GraphEdgeData {
   target: string;
   kind: EdgeKind;
   label?: string;
-  /** table-level duplicate of column-level edges; shown only when columns are hidden */
-  dup?: boolean;
+  /** connects individual rows (columns/triggers/constraints) — hidden in card view */
+  detail?: boolean;
+  /** synthetic card-level rollup of detail edges */
+  agg?: boolean;
+  /** number of detail edges this aggregate stands for */
+  count?: number;
 }
 
 export interface GraphPayload {

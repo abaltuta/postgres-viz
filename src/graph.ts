@@ -35,24 +35,12 @@ export function buildGraph(
 
   const edges = new Map<string, { data: GraphEdgeData }>();
 
-  const addEdge = (
-    kind: EdgeKind,
-    source: string,
-    target: string,
-    label?: string,
-    dup?: boolean,
-  ): void => {
+  const addEdge = (kind: EdgeKind, source: string, target: string, label?: string): void => {
     if (source === target) return;
     const id = `${kind}|${source}|${target}`;
-    const existing = edges.get(id);
-    if (existing) {
-      // a real (non-dup) edge wins over a dup marker
-      if (!dup) delete existing.data.dup;
-      return;
-    }
+    if (edges.has(id)) return;
     const data: GraphEdgeData = { id, source, target, kind };
     if (label) data.label = label;
-    if (dup) data.dup = true;
     edges.set(id, { data });
   };
 
@@ -78,7 +66,9 @@ export function buildGraph(
         hasCols = true;
       }
     }
-    addEdge("selects", relId(g.viewOid), relId(g.relOid), undefined, hasCols);
+    // whole-table dependency only when no column detail exists (aggregation
+    // synthesizes the card-level edge otherwise)
+    if (!hasCols) addEdge("selects", relId(g.viewOid), relId(g.relOid));
   }
 
   // 2. Views → functions they call.
@@ -115,7 +105,7 @@ export function buildGraph(
           hasCols = true;
         }
       }
-      addEdge(kind, fnId(funcOid), relId(relOid), undefined, hasCols);
+      if (!hasCols) addEdge(kind, fnId(funcOid), relId(relOid));
     }
   };
   for (const [funcOid, refs] of analysis) {
@@ -146,10 +136,11 @@ export function buildGraph(
         hasCols = true;
       }
     }
-    addEdge("reads", fnId(g.funcOid), relId(g.relOid), undefined, hasCols);
+    if (!hasCols) addEdge("reads", fnId(g.funcOid), relId(g.relOid));
   }
 
   // 6. Foreign keys (column → referenced column).
+  const fkLabelHint = new Map<string, string>();
   if (opts.includeFks) {
     for (const fk of catalog.fks) {
       if (!relByOid.has(fk.relOid) || !relByOid.has(fk.refRelOid)) continue;
@@ -165,7 +156,9 @@ export function buildGraph(
           hasCols = true;
         }
       }
-      addEdge("fk", relId(fk.relOid), relId(fk.refRelOid), fk.name, hasCols);
+      const pairKey = `${relId(fk.relOid)}|${relId(fk.refRelOid)}`;
+      if (!fkLabelHint.has(pairKey)) fkLabelHint.set(pairKey, fk.name);
+      if (!hasCols) addEdge("fk", relId(fk.relOid), relId(fk.refRelOid), fk.name);
     }
   }
 
@@ -203,6 +196,8 @@ export function buildGraph(
 
   // ── Nodes ──
   const nodes: { data: GraphNodeData }[] = [];
+  /** node id → its card id (rows map to their relation; cards/functions to themselves) */
+  const unitOfId = new Map<string, string>();
 
   // schema compounds: tables/views/functions nest inside their schema
   const schemaId = (name: string): string => `s_${name}`;
@@ -217,6 +212,7 @@ export function buildGraph(
   }
 
   for (const r of catalog.rels) {
+    unitOfId.set(relId(r.oid), relId(r.oid));
     nodes.push({
       data: {
         id: relId(r.oid),
@@ -232,6 +228,7 @@ export function buildGraph(
   }
   for (const c of catalog.cols) {
     if (!relByOid.has(c.relOid)) continue;
+    unitOfId.set(colId(c.relOid, c.attnum), relId(c.relOid));
     nodes.push({
       data: {
         id: colId(c.relOid, c.attnum),
@@ -248,6 +245,7 @@ export function buildGraph(
   for (const t of catalog.triggers) {
     const rel = relByOid.get(t.relOid);
     if (!rel) continue;
+    unitOfId.set(trgId(t.oid), relId(t.relOid));
     nodes.push({
       data: {
         id: trgId(t.oid),
@@ -264,6 +262,7 @@ export function buildGraph(
   for (const con of catalog.constraints) {
     const rel = relByOid.get(con.relOid);
     if (!rel) continue;
+    unitOfId.set(conId(con.oid), relId(con.relOid));
     nodes.push({
       data: {
         id: conId(con.oid),
@@ -278,6 +277,7 @@ export function buildGraph(
     });
   }
   for (const f of catalog.funcs) {
+    unitOfId.set(fnId(f.oid), fnId(f.oid));
     nodes.push({
       data: {
         id: fnId(f.oid),
@@ -298,7 +298,45 @@ export function buildGraph(
     (e) => nodeIds.has(e.data.source) && nodeIds.has(e.data.target),
   );
 
-  const stats: Record<string, number> = { edges: edgeList.length };
+  // ── Aggregation: roll row-level (detail) edges up to one card-level edge per
+  // (kind, source card, target card) with a count, so the overview shows a few
+  // hundred card edges instead of thousands of column edges. ──
+  const unitLevelKeys = new Set<string>();
+  for (const e of edgeList) {
+    const su = unitOfId.get(e.data.source) ?? e.data.source;
+    const tu = unitOfId.get(e.data.target) ?? e.data.target;
+    if (su === e.data.source && tu === e.data.target) {
+      unitLevelKeys.add(`${e.data.kind}|${su}|${tu}`);
+    } else {
+      e.data.detail = true;
+    }
+  }
+  const aggCounts = new Map<string, number>();
+  for (const e of edgeList) {
+    if (!e.data.detail) continue;
+    const su = unitOfId.get(e.data.source) ?? e.data.source;
+    const tu = unitOfId.get(e.data.target) ?? e.data.target;
+    if (su === tu) continue; // intra-card (constrains, update-of, …)
+    const key = `${e.data.kind}|${su}|${tu}`;
+    aggCounts.set(key, (aggCounts.get(key) ?? 0) + 1);
+  }
+  for (const [key, count] of aggCounts) {
+    if (unitLevelKeys.has(key)) continue; // a real card-level edge already covers the pair
+    const [kind, source, target] = key.split("|") as [EdgeKind, string, string];
+    const data: GraphEdgeData = { id: `agg|${key}`, source, target, kind, agg: true, count };
+    const hint = kind === "fk" ? fkLabelHint.get(`${source}|${target}`) : undefined;
+    const suffix = count > 1 ? `×${count}` : "";
+    const label = [hint, suffix].filter(Boolean).join(" ");
+    if (label) data.label = label;
+    edgeList.push({ data });
+  }
+
+  const detailCount = edgeList.filter((e) => e.data.detail).length;
+  const stats: Record<string, number> = {
+    edges: edgeList.length,
+    cardEdges: edgeList.length - detailCount,
+    detailEdges: detailCount,
+  };
   for (const n of nodes) stats[n.data.type] = (stats[n.data.type] ?? 0) + 1;
 
   return { nodes, edges: edgeList, stats };

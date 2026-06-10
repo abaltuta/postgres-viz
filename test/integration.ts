@@ -320,6 +320,28 @@ async function main(): Promise<void> {
     // FK column → column
     assertEdge(g, "fk", ordersCustomerId, customersId, "orders.customer_id → customers.id");
 
+    // ── edge aggregation ──
+    const fkDetail = g.edges.find(
+      (e) =>
+        e.data.kind === "fk" && e.data.source === ordersCustomerId && e.data.target === customersId,
+    );
+    assert.ok(fkDetail?.data.detail, "column-level fk edge is flagged detail");
+    const fkAgg = g.edges.find(
+      (e) => e.data.kind === "fk" && e.data.source === orders && e.data.target === customers,
+    );
+    assert.ok(fkAgg?.data.agg, "card-level fk aggregate orders→customers exists");
+    assert.equal(fkAgg!.data.count, 1, "fk aggregate counts its member edges");
+    assert.ok(fkAgg!.data.label, "fk aggregate carries the constraint name");
+    const writesAgg = g.edges.find(
+      (e) => e.data.kind === "writes" && e.data.source === logOrder && e.data.target === auditLog,
+    );
+    assert.ok(writesAgg?.data.agg, "log_order→audit_log card edge is an aggregate");
+    assert.equal(writesAgg!.data.count, 2, "aggregate counts table_name + payload writes");
+    assert.ok(
+      g.edges.every((e) => !("dup" in e.data)),
+      "dup mechanism fully removed",
+    );
+
     // generated column → source column
     assertEdge(g, "default", ordersVat, ordersTotal, "orders.vat generated from orders.total");
 
