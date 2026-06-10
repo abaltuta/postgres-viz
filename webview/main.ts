@@ -669,7 +669,7 @@ function hideCrumb(): void {
   el("crumb").classList.add("hidden");
 }
 
-function enterIsolatedView(keepUnits: Set<string>, crumb: string, revealDetail: boolean): void {
+function enterIsolatedView(keepUnits: Set<string>, crumb: string): void {
   if (!cy) return;
   exitView(false);
   const saved = new Map<string, { x: number; y: number }>();
@@ -686,16 +686,6 @@ function enterIsolatedView(keepUnits: Set<string>, crumb: string, revealDetail: 
     cy!.nodes('[type="schema"]').forEach((s) => {
       if (s.descendants(":visible").length === 0) s.addClass("focus-hidden");
     });
-    if (revealDetail) {
-      cy!.edges("[?detail]").forEach((e) => {
-        if (
-          keepUnits.has(unitOf(e.source() as NodeSingular).id()) &&
-          keepUnits.has(unitOf(e.target() as NodeSingular).id())
-        ) {
-          e.addClass("revealed");
-        }
-      });
-    }
   });
   viewState = { saved };
   showCrumb(crumb);
@@ -729,7 +719,7 @@ function focusNode(node: NodeSingular): void {
     if (e.target().id() === unit.id()) keep.add(e.source().id());
   });
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
-  enterIsolatedView(keep, `Focused: ${label} · 1 hop`, false);
+  enterIsolatedView(keep, `Focused: ${label} · 1 hop`);
   runLayout();
 }
 
@@ -764,7 +754,37 @@ function showCallTree(node: NodeSingular): void {
     if (fns.has(e.source().id())) keep.add(e.target().id());
   });
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
-  enterIsolatedView(keep, `Call tree: ${label}`, true);
+  enterIsolatedView(keep, `Call tree: ${label}`);
+
+  // Reveal ONLY the chain itself: executes into the closure, calls within it,
+  // and the closure's reads/writes — never the kept tables' unrelated wiring
+  // (fk / constrains / update-of / selects stay hidden).
+  const onChain = (kind: string, srcUnit: string, tgtUnit: string, tgtId: string): boolean => {
+    if (!keep.has(srcUnit) || !keep.has(tgtUnit)) return false;
+    if (kind === "executes") return fns.has(tgtId) || fns.has(tgtUnit);
+    if (kind === "calls") return fns.has(srcUnit) && fns.has(tgtUnit);
+    if (kind === "reads" || kind === "writes") return fns.has(srcUnit);
+    return false;
+  };
+  const revealedPairs = new Set<string>();
+  cy.edges("[?detail]").forEach((e) => {
+    const su = unitOf(e.source() as NodeSingular).id();
+    const tu = unitOf(e.target() as NodeSingular).id();
+    const k = String(e.data("kind"));
+    if (!onChain(k, su, tu, e.target().id())) return;
+    e.addClass("revealed");
+    revealedPairs.add(`${k}|${su}|${tu}`);
+  });
+  cy.edges("[!detail]").forEach((e) => {
+    const su = e.source().id();
+    const tu = e.target().id();
+    const k = String(e.data("kind"));
+    if (!onChain(k, su, tu, tu)) return;
+    // an aggregate whose member edges are already revealed would double-render
+    if (e.data("agg") && revealedPairs.has(`${k}|${su}|${tu}`)) e.addClass("agg-suppressed");
+    else e.addClass("revealed");
+  });
+
   restackRows();
   layoutTreeCards(cardUnits());
   cy.fit(undefined, 50);
