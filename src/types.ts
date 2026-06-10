@@ -59,6 +59,22 @@ export interface Fk {
   refCols: number[];
 }
 
+/** CHECK / PRIMARY KEY / UNIQUE / EXCLUDE constraint (FKs are modelled as edges). */
+export interface CatalogConstraint {
+  oid: number;
+  name: string;
+  relOid: number;
+  contype: string;
+  cols: number[];
+  def: string | null;
+}
+
+/** Function referenced by a constraint expression (CHECK …), from pg_depend. */
+export interface ConstraintFuncDep {
+  conOid: number;
+  funcOid: number;
+}
+
 /** Function → relation dependency recorded by Postgres for BEGIN ATOMIC SQL bodies. */
 export interface SqlBodyDep {
   funcOid: number;
@@ -83,11 +99,13 @@ export interface Catalog {
   viewDeps: ViewDep[];
   viewFuncDeps: ViewFuncDep[];
   fks: Fk[];
+  constraints: CatalogConstraint[];
+  constraintFuncDeps: ConstraintFuncDep[];
   sqlBodyDeps: SqlBodyDep[];
   defaultDeps: DefaultDep[];
 }
 
-export type NodeType = RelKind | "column" | "function" | "trigger";
+export type NodeType = RelKind | "column" | "function" | "trigger" | "constraint";
 
 export type EdgeKind =
   | "selects"
@@ -97,6 +115,7 @@ export type EdgeKind =
   | "executes"
   | "update-of"
   | "fk"
+  | "constrains"
   | "default";
 
 export interface GraphNodeData {

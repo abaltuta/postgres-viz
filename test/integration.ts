@@ -64,6 +64,48 @@ CREATE TRIGGER orders_audit
 CREATE FUNCTION total_for(cid bigint) RETURNS numeric LANGUAGE sql BEGIN ATOMIC
   SELECT coalesce(sum(total), 0) FROM orders WHERE customer_id = cid;
 END;
+
+-- constraints: CHECK calling a function, on top of the PK/UNIQUE/FK above
+CREATE FUNCTION non_negative(n numeric) RETURNS boolean IMMUTABLE LANGUAGE sql
+  AS 'SELECT n >= 0';
+ALTER TABLE orders ADD CONSTRAINT total_non_negative CHECK (non_negative(total));
+
+-- alias gauntlet: CTE with column-list rename, named CTE outputs, derived-table
+-- alias, and a correlated subquery referencing both
+CREATE FUNCTION alias_gauntlet() RETURNS SETOF text LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  WITH recent(cid, amount) AS (
+    SELECT o.customer_id, o.total FROM orders o
+  ),
+  named AS (
+    SELECT c.email AS contact FROM customers c
+  )
+  SELECT n.contact
+  FROM named n
+  JOIN (SELECT r.cid FROM recent r WHERE r.amount > 10) rc ON rc.cid > 0
+  WHERE EXISTS (
+    SELECT 1 FROM customers cc WHERE cc.id = rc.cid AND cc.name <> n.contact
+  );
+END $$;
+
+-- same alias bound to different tables in sibling subquery scopes
+CREATE FUNCTION collision_check() RETURNS int LANGUAGE plpgsql AS $$
+DECLARE x int;
+BEGIN
+  SELECT count(*) INTO x FROM (
+    SELECT t.total FROM orders t
+  ) a JOIN (
+    SELECT t.email FROM customers t
+  ) b ON true;
+  RETURN x;
+END $$;
+
+-- aliased UPDATE target
+CREATE FUNCTION touch_customer(cid bigint) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE customers AS tgt SET email = tgt.name WHERE tgt.id = cid;
+END $$;
 `;
 
 async function connectWithRetry(attempts = 40): Promise<Client> {
@@ -174,6 +216,58 @@ async function main(): Promise<void> {
 
     // generated column → source column
     assertEdge(g, "default", ordersVat, ordersTotal, "orders.vat generated from orders.total");
+
+    // ── constraints ──
+    const customersEmail = nodeId(g, "column", "email", customers);
+    const customersPk = nodeId(g, "constraint", "customers_pkey", customers);
+    const checkCon = nodeId(g, "constraint", "total_non_negative", orders);
+    const nonNegative = nodeId(g, "function", "non_negative()");
+    assertEdge(g, "constrains", customersPk, customersId, "PK constrains customers.id");
+    assertEdge(g, "constrains", checkCon, ordersTotal, "CHECK constrains orders.total");
+    assertEdge(g, "calls", checkCon, nonNegative, "CHECK calls non_negative()");
+
+    // ── alias gauntlet: provenance through CTEs, derived tables, correlation ──
+    const gauntlet = nodeId(g, "function", "alias_gauntlet()");
+    assertEdge(
+      g,
+      "reads",
+      gauntlet,
+      ordersCustomerId,
+      "WITH recent(cid…) rename → r.cid → rc.cid traces to orders.customer_id",
+    );
+    assertEdge(g, "reads", gauntlet, ordersTotal, "r.amount traces to orders.total");
+    assertEdge(
+      g,
+      "reads",
+      gauntlet,
+      customersEmail,
+      "named.contact → n.contact traces to customers.email",
+    );
+    assertEdge(g, "reads", gauntlet, customersId, "correlated cc.id read");
+    assertEdge(
+      g,
+      "reads",
+      gauntlet,
+      nodeId(g, "column", "name", customers),
+      "correlated cc.name read",
+    );
+
+    // sibling scopes reusing alias `t` must not cross-contaminate
+    const collision = nodeId(g, "function", "collision_check()");
+    assertEdge(g, "reads", collision, ordersTotal, "collision: t.total → orders.total");
+    assertEdge(g, "reads", collision, customersEmail, "collision: t.email → customers.email");
+
+    // aliased UPDATE target
+    const touch = nodeId(g, "function", "touch_customer()");
+    assertEdge(
+      g,
+      "writes",
+      touch,
+      customersEmail,
+      "UPDATE … AS tgt SET email writes customers.email",
+    );
+    assertEdge(g, "reads", touch, customersName, "tgt.name read via target alias");
+    assertEdge(g, "reads", touch, customersId, "tgt.id read via target alias");
 
     console.log(
       `integration OK — ${g.nodes.length} nodes, ${g.edges.length} edges, stats: ${JSON.stringify(g.stats)}`,

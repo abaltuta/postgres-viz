@@ -158,6 +158,10 @@ function isStar(f: Json): boolean {
   return !!f && typeof f === "object" && "A_Star" in f;
 }
 
+function nameList(list: Json): string[] {
+  return ((list ?? []) as Json[]).map(fieldName).filter((s): s is string => !!s);
+}
+
 function addCall(funcname: Json, ctx: BodyCtx): void {
   const parts = ((funcname ?? []) as Json[]).map(fieldName).filter((s): s is string => !!s);
   if (parts.length === 0) return;
@@ -181,10 +185,18 @@ function collectMergeTargets(mergeStmt: Json): Json[] {
   return out;
 }
 
+/**
+ * Two passes over each statement:
+ *  1. a conservative whole-tree pass for table-level reads/writes, write columns
+ *     and function calls (never misses a relation, may lack column precision);
+ *  2. a scope-aware pass for column attribution that models FROM aliases, CTEs,
+ *     derived tables (subquery aliases) and correlated subqueries, so a column
+ *     reached through `WITH x AS (…) SELECT x.col` is traced to its base table.
+ */
 function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
   const { resolver, schema, refs } = ctx;
 
-  // CTE names shadow real relations of the same name.
+  // CTE names shadow real relations of the same name (statement-global, conservative).
   const ctes = new Set<string>();
   walk(stmt, (tag, v) => {
     if (tag === "CommonTableExpr" && typeof v.ctename === "string") ctes.add(v.ctename);
@@ -216,23 +228,6 @@ function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
     }
   });
 
-  // Alias → relation map for column attribution.
-  const aliases = new Map<string, CatalogRel>();
-  walk(stmt, (tag, v) => {
-    if (!isRangeVar(tag, v)) return;
-    const rel = resolveRangeVar(v);
-    if (!rel) return;
-    const alias: string | undefined = v.alias?.aliasname;
-    if (alias && !aliases.has(alias)) aliases.set(alias, rel);
-    if (!aliases.has(v.relname)) aliases.set(v.relname, rel);
-  });
-  const aliasRels = [...new Set(aliases.values())];
-
-  const readCol = (rel: CatalogRel, colName: string): void => {
-    const col = resolver.col(rel.oid, colName);
-    if (col) add(refs.reads, rel.oid, col.attnum);
-  };
-
   walk(stmt, (tag, v) => {
     if (isRangeVar(tag, v)) {
       const rel = resolveRangeVar(v);
@@ -241,35 +236,6 @@ function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
       return;
     }
     switch (tag) {
-      case "ColumnRef": {
-        const fields: Json[] = v.fields ?? [];
-        if (fields.length === 0) return;
-        const star = isStar(fields[fields.length - 1]);
-        const names = fields.map(fieldName);
-        if (fields.length === 1) {
-          const colName = names[0];
-          if (star || !colName) return;
-          const cands = aliasRels.filter((r) => resolver.col(r.oid, colName));
-          if (cands.length === 1) readCol(cands[0]!, colName);
-          return;
-        }
-        const qual = names[fields.length - 2];
-        if (!qual) return;
-        const colName = star ? undefined : names[fields.length - 1];
-        const lower = qual.toLowerCase();
-        if (lower === "new" || lower === "old") {
-          if (colName) for (const rel of ctx.triggerRels) readCol(rel, colName);
-          return;
-        }
-        let rel = aliases.get(qual);
-        if (!rel && fields.length >= 3)
-          rel = resolver.resolveRel(qual, names[fields.length - 3], schema);
-        if (!rel) rel = resolver.resolveRel(qual, undefined, schema);
-        if (!rel) return;
-        if (colName) readCol(rel, colName);
-        else add(refs.reads, rel.oid, 0);
-        return;
-      }
       case "FuncCall":
         addCall(v.funcname, ctx);
         return;
@@ -301,7 +267,368 @@ function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
       }
     }
   });
+
+  // Scope-aware column attribution.
+  processStmtNode(stmt, new Scope(), ctx);
 }
+
+// ── Scoped column resolution ────────────────────────────────────────────────
+//
+// Every SELECT / DML statement, CTE body and derived table gets its own Scope.
+// A scope maps FROM-clause names (aliases or bare relation names) to bindings:
+// either a base catalog relation, or a "derived" relation (CTE / subquery)
+// whose output columns carry provenance back to base table columns. Lookups
+// climb the parent chain, which makes correlated subqueries resolve correctly,
+// and alias collisions between sibling scopes can no longer cross-contaminate.
+
+interface BaseRef {
+  relOid: number;
+  attnum: number;
+}
+
+interface OutputCol {
+  name: string | null;
+  refs: BaseRef[];
+}
+
+interface BaseBinding {
+  kind: "base";
+  rel: CatalogRel;
+}
+
+interface DerivedBinding {
+  kind: "derived";
+  cols: Map<string, BaseRef[]>;
+  /** star-passthrough sources: `SELECT * FROM t` lets unknown names fall through */
+  sources: Binding[];
+  /** outputs in declaration order, for positional column aliasing */
+  ordered: OutputCol[];
+}
+
+type Binding = BaseBinding | DerivedBinding;
+
+class Scope {
+  readonly bindings = new Map<string, Binding>();
+  readonly ctes = new Map<string, DerivedBinding>();
+  constructor(readonly parent?: Scope) {}
+}
+
+const emptyDerived = (): DerivedBinding => ({
+  kind: "derived",
+  cols: new Map(),
+  sources: [],
+  ordered: [],
+});
+
+function lookupBinding(scope: Scope | undefined, name: string): Binding | undefined {
+  for (let s = scope; s; s = s.parent) {
+    const b = s.bindings.get(name);
+    if (b) return b;
+  }
+  return undefined;
+}
+
+function lookupCte(scope: Scope | undefined, name: string): DerivedBinding | undefined {
+  for (let s = scope; s; s = s.parent) {
+    const d = s.ctes.get(name);
+    if (d) return d;
+  }
+  return undefined;
+}
+
+/** Positional column rename: `WITH x(a, b) AS (…)` / `FROM (…) t(a, b)`. */
+function applyColAliases(d: DerivedBinding, names: string[]): DerivedBinding {
+  if (names.length === 0) return d;
+  const out = emptyDerived();
+  out.sources = d.sources;
+  names.forEach((name, i) => {
+    const refs = d.ordered[i]?.refs ?? [];
+    out.cols.set(name, refs);
+    out.ordered.push({ name, refs });
+  });
+  return out;
+}
+
+function colsInBinding(b: Binding, col: string, ctx: BodyCtx): BaseRef[] | null {
+  if (b.kind === "base") {
+    const c = ctx.resolver.col(b.rel.oid, col);
+    return c ? [{ relOid: b.rel.oid, attnum: c.attnum }] : null;
+  }
+  const direct = b.cols.get(col);
+  if (direct && direct.length > 0) return direct;
+  const hits: BaseRef[][] = [];
+  for (const s of b.sources) {
+    const r = colsInBinding(s, col, ctx);
+    if (r) hits.push(r);
+  }
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+/** Unqualified column: search each scope level; ambiguous names are dropped. */
+function findColumn(scope: Scope | undefined, name: string, ctx: BodyCtx): BaseRef[] | null {
+  for (let s = scope; s; s = s.parent) {
+    const hits: BaseRef[][] = [];
+    for (const b of s.bindings.values()) {
+      const r = colsInBinding(b, name, ctx);
+      if (r) hits.push(r);
+    }
+    if (hits.length === 1) return hits[0]!;
+    if (hits.length > 1) return null;
+  }
+  return null;
+}
+
+function emitReads(refs: BaseRef[] | null, ctx: BodyCtx): void {
+  for (const r of refs ?? []) {
+    if (r.attnum > 0) add(ctx.refs.reads, r.relOid, r.attnum);
+  }
+}
+
+function resolveColumnRefRefs(cr: Json, scope: Scope, ctx: BodyCtx): BaseRef[] | null {
+  const fields: Json[] = cr?.fields ?? [];
+  if (fields.length === 0) return null;
+  const star = isStar(fields[fields.length - 1]);
+  const names = fields.map(fieldName);
+  if (fields.length === 1) {
+    const colName = names[0];
+    if (star || !colName) return null;
+    return findColumn(scope, colName, ctx);
+  }
+  const qual = names[fields.length - 2];
+  if (!qual) return null;
+  const colName = star ? null : (names[fields.length - 1] ?? null);
+  let binding = lookupBinding(scope, qual);
+  if (!binding) {
+    const lower = qual.toLowerCase();
+    if (lower === "new" || lower === "old") {
+      if (!colName) return null;
+      const out: BaseRef[] = [];
+      for (const rel of ctx.triggerRels) {
+        const c = ctx.resolver.col(rel.oid, colName);
+        if (c) out.push({ relOid: rel.oid, attnum: c.attnum });
+      }
+      return out.length > 0 ? out : null;
+    }
+    const schemaName = fields.length >= 3 ? names[fields.length - 3] : undefined;
+    const rel = ctx.resolver.resolveRel(qual, schemaName, ctx.schema);
+    if (rel) binding = { kind: "base", rel };
+  }
+  if (!binding || !colName) return null;
+  return colsInBinding(binding, colName, ctx);
+}
+
+/** Walk expressions in a scope; recurse into subqueries with proper child scopes. */
+function walkExprs(node: Json, scope: Scope, ctx: BodyCtx): void {
+  if (!node) return;
+  if (Array.isArray(node)) {
+    for (const item of node) walkExprs(item, scope, ctx);
+    return;
+  }
+  if (typeof node !== "object") return;
+  if (node.ColumnRef) {
+    emitReads(resolveColumnRefRefs(node.ColumnRef, scope, ctx), ctx);
+    return;
+  }
+  if (node.SubLink) {
+    walkExprs(node.SubLink.testexpr, scope, ctx);
+    if (node.SubLink.subselect) processStmtNode(node.SubLink.subselect, scope, ctx);
+    return;
+  }
+  if (node.SelectStmt) {
+    processSelect(node.SelectStmt, scope, ctx);
+    return;
+  }
+  // owned by bindFromItem / processWith — never descend generically
+  if (node.RangeSubselect || node.CommonTableExpr || node.RangeVar) return;
+  for (const value of Object.values(node)) {
+    if (value && typeof value === "object") walkExprs(value, scope, ctx);
+  }
+}
+
+function bindFromItem(item: Json, scope: Scope, ctx: BodyCtx): void {
+  if (!item || typeof item !== "object") return;
+  if (item.RangeVar) {
+    const rv = item.RangeVar;
+    const alias: string | undefined = rv.alias?.aliasname;
+    const colAliases = nameList(rv.alias?.colnames);
+    if (!rv.schemaname && typeof rv.relname === "string") {
+      const cte = lookupCte(scope, rv.relname);
+      if (cte) {
+        scope.bindings.set(alias ?? rv.relname, applyColAliases(cte, colAliases));
+        return;
+      }
+    }
+    const rel = ctx.resolver.resolveRel(rv.relname, rv.schemaname, ctx.schema);
+    if (rel) scope.bindings.set(alias ?? rv.relname, { kind: "base", rel });
+    return;
+  }
+  if (item.RangeSubselect) {
+    const rs = item.RangeSubselect;
+    const derived = rs.subquery ? processStmtNode(rs.subquery, scope, ctx) : emptyDerived();
+    const alias: string | undefined = rs.alias?.aliasname;
+    if (alias) scope.bindings.set(alias, applyColAliases(derived, nameList(rs.alias?.colnames)));
+    return;
+  }
+  if (item.JoinExpr) {
+    const j = item.JoinExpr;
+    bindFromItem(j.larg, scope, ctx);
+    bindFromItem(j.rarg, scope, ctx);
+    walkExprs(j.quals, scope, ctx);
+    // JOIN USING (col, …): the column is read on every side that has it
+    for (const name of nameList(j.usingClause)) {
+      for (const b of scope.bindings.values()) emitReads(colsInBinding(b, name, ctx), ctx);
+    }
+    return;
+  }
+  if (item.RangeFunction) {
+    const alias: string | undefined = item.RangeFunction.alias?.aliasname;
+    if (alias) scope.bindings.set(alias, emptyDerived());
+    walkExprs(item.RangeFunction.functions, scope, ctx); // LATERAL args may be correlated
+    return;
+  }
+  walkExprs(item, scope, ctx);
+}
+
+/** Output provenance of a SELECT/RETURNING target list, for CTE / subquery aliases. */
+function buildOutputs(targetList: Json[], scope: Scope, ctx: BodyCtx): DerivedBinding {
+  const out = emptyDerived();
+  for (const t of targetList) {
+    const rt = t?.ResTarget;
+    if (!rt) {
+      out.ordered.push({ name: null, refs: [] });
+      continue;
+    }
+    let name: string | null = rt.name ?? null;
+    let refs: BaseRef[] = [];
+    const cr = rt.val?.ColumnRef;
+    if (cr) {
+      const fields: Json[] = cr.fields ?? [];
+      if (isStar(fields[fields.length - 1])) {
+        out.sources = [...scope.bindings.values()];
+        out.ordered.push({ name: null, refs: [] });
+        continue;
+      }
+      refs = resolveColumnRefRefs(cr, scope, ctx) ?? [];
+      if (!name) name = fieldName(fields[fields.length - 1]) ?? null;
+    }
+    if (name) out.cols.set(name, refs);
+    out.ordered.push({ name, refs });
+  }
+  return out;
+}
+
+function processWith(withClause: Json, scope: Scope, ctx: BodyCtx): void {
+  for (const item of withClause?.ctes ?? []) {
+    const cte = item?.CommonTableExpr;
+    if (!cte || typeof cte.ctename !== "string") continue;
+    // placeholder first, so a recursive CTE's self-reference resolves to the
+    // (empty) CTE instead of a real table that happens to share the name
+    scope.ctes.set(cte.ctename, emptyDerived());
+    const derived = cte.ctequery ? processStmtNode(cte.ctequery, scope, ctx) : emptyDerived();
+    scope.ctes.set(cte.ctename, applyColAliases(derived, nameList(cte.aliascolnames)));
+  }
+}
+
+function processSelect(sel: Json, parentScope: Scope, ctx: BodyCtx): DerivedBinding {
+  const scope = new Scope(parentScope);
+  processWith(sel.withClause, scope, ctx);
+  if (sel.op && sel.op !== "SETOP_NONE") {
+    const left = sel.larg ? processSelect(sel.larg, scope, ctx) : emptyDerived();
+    if (sel.rarg) processSelect(sel.rarg, scope, ctx);
+    return left; // set-op outputs follow the left arm
+  }
+  for (const f of sel.fromClause ?? []) bindFromItem(f, scope, ctx);
+  walkExprs(
+    [
+      sel.targetList,
+      sel.whereClause,
+      sel.groupClause,
+      sel.havingClause,
+      sel.windowClause,
+      sel.sortClause,
+      sel.distinctClause,
+      sel.limitOffset,
+      sel.limitCount,
+      sel.valuesLists,
+    ],
+    scope,
+    ctx,
+  );
+  return buildOutputs(sel.targetList ?? [], scope, ctx);
+}
+
+function bindTargetRel(relation: Json, scope: Scope, ctx: BodyCtx): BaseBinding | null {
+  if (!relation || typeof relation.relname !== "string") return null;
+  const rel = ctx.resolver.resolveRel(relation.relname, relation.schemaname, ctx.schema);
+  if (!rel) return null;
+  const binding: BaseBinding = { kind: "base", rel };
+  scope.bindings.set(relation.alias?.aliasname ?? relation.relname, binding);
+  return binding;
+}
+
+function processInsert(ins: Json, parentScope: Scope, ctx: BodyCtx): DerivedBinding {
+  const scope = new Scope(parentScope);
+  processWith(ins.withClause, scope, ctx);
+  // the source SELECT must not see the target relation
+  if (ins.selectStmt) processStmtNode(ins.selectStmt, scope, ctx);
+  const targetScope = new Scope(scope);
+  const target = bindTargetRel(ins.relation, targetScope, ctx);
+  if (ins.onConflictClause && target) {
+    const cScope = new Scope(targetScope);
+    cScope.bindings.set("excluded", target);
+    walkExprs(
+      [
+        ins.onConflictClause.targetList,
+        ins.onConflictClause.whereClause,
+        ins.onConflictClause.infer,
+      ],
+      cScope,
+      ctx,
+    );
+  }
+  walkExprs(ins.returningList, targetScope, ctx);
+  return buildOutputs(ins.returningList ?? [], targetScope, ctx);
+}
+
+function processUpdate(u: Json, parentScope: Scope, ctx: BodyCtx): DerivedBinding {
+  const scope = new Scope(parentScope);
+  processWith(u.withClause, scope, ctx);
+  bindTargetRel(u.relation, scope, ctx);
+  for (const f of u.fromClause ?? []) bindFromItem(f, scope, ctx);
+  walkExprs([u.targetList, u.whereClause, u.returningList], scope, ctx);
+  return buildOutputs(u.returningList ?? [], scope, ctx);
+}
+
+function processDelete(d: Json, parentScope: Scope, ctx: BodyCtx): DerivedBinding {
+  const scope = new Scope(parentScope);
+  processWith(d.withClause, scope, ctx);
+  bindTargetRel(d.relation, scope, ctx);
+  for (const f of d.usingClause ?? []) bindFromItem(f, scope, ctx);
+  walkExprs([d.whereClause, d.returningList], scope, ctx);
+  return buildOutputs(d.returningList ?? [], scope, ctx);
+}
+
+function processMerge(m: Json, parentScope: Scope, ctx: BodyCtx): DerivedBinding {
+  const scope = new Scope(parentScope);
+  processWith(m.withClause, scope, ctx);
+  bindTargetRel(m.relation, scope, ctx);
+  if (m.sourceRelation) bindFromItem(m.sourceRelation, scope, ctx);
+  walkExprs([m.joinCondition, m.mergeWhenClauses, m.returningList], scope, ctx);
+  return buildOutputs(m.returningList ?? [], scope, ctx);
+}
+
+function processStmtNode(stmtNode: Json, parentScope: Scope, ctx: BodyCtx): DerivedBinding {
+  if (!stmtNode || typeof stmtNode !== "object") return emptyDerived();
+  if (stmtNode.SelectStmt) return processSelect(stmtNode.SelectStmt, parentScope, ctx);
+  if (stmtNode.InsertStmt) return processInsert(stmtNode.InsertStmt, parentScope, ctx);
+  if (stmtNode.UpdateStmt) return processUpdate(stmtNode.UpdateStmt, parentScope, ctx);
+  if (stmtNode.DeleteStmt) return processDelete(stmtNode.DeleteStmt, parentScope, ctx);
+  if (stmtNode.MergeStmt) return processMerge(stmtNode.MergeStmt, parentScope, ctx);
+  walkExprs(stmtNode, parentScope, ctx);
+  return emptyDerived();
+}
+
+// ── Parsing entry points ────────────────────────────────────────────────────
 
 async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
   try {

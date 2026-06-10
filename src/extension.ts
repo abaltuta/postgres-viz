@@ -27,11 +27,14 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {}
 
 async function promptConnection(context: vscode.ExtensionContext): Promise<string | undefined> {
+  // intentionally NOT a password field: connection strings are long and
+  // easy to mistype, so keep them visible while editing (storage is still
+  // the OS keychain via the VS Code secrets API)
   const value = await vscode.window.showInputBox({
     title: "Postgres connection string",
     placeHolder: "postgres://user:password@localhost:5432/dbname",
     ignoreFocusOut: true,
-    password: true,
+    value: (await context.secrets.get(SECRET_KEY)) ?? "",
   });
   if (value) await context.secrets.store(SECRET_KEY, value);
   return value || undefined;
@@ -130,6 +133,11 @@ async function openDdl(nodeType: NodeType, oid: number, label: string): Promise<
           .rows[0]?.def;
         return `${def ?? ""};`;
       }
+      case "constraint": {
+        const def = (await client.query("SELECT pg_get_constraintdef($1::oid, true) AS def", [oid]))
+          .rows[0]?.def;
+        return `-- ${label}\n${def ?? ""}`;
+      }
       default: {
         const rows = (
           await client.query(
@@ -189,6 +197,7 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     <label><input type="checkbox" id="flt-views" checked />views</label>
     <label><input type="checkbox" id="flt-functions" checked />functions</label>
     <label><input type="checkbox" id="flt-triggers" checked />triggers</label>
+    <label><input type="checkbox" id="flt-constraints" checked />constraints</label>
     <label><input type="checkbox" id="flt-fk" checked />FKs</label>
     <label><input type="checkbox" id="flt-isolated" />hide isolated</label>
     <button id="relayout">layout</button>

@@ -14,6 +14,7 @@ A VS Code extension that draws the **call graph / dependency graph of a PostgreS
 | function → function calls (`PERFORM`, `CALL`, expressions) | parser | best-effort |
 | `BEGIN ATOMIC` SQL functions (PG 14+) | `pg_depend.prosqlbody` deps | exact, column-level |
 | foreign keys | `pg_constraint` | exact, column-level |
+| CHECK / PK / UNIQUE / EXCLUDE constraints → columns, and functions used in CHECK expressions | `pg_constraint` + `pg_depend` | exact |
 | column defaults / generated columns → columns & functions | `pg_attrdef` deps | exact |
 
 If the WASM parser fails to load, function bodies degrade to a regex fallback (table-level only). The bundled parser grammar is PostgreSQL 16; newer syntax in function bodies degrades gracefully to the fallback.
@@ -61,7 +62,7 @@ docker stop pgviz-test
 ## Architecture
 
 - `src/introspect.ts` — one pass over the system catalogs (`pg_class`, `pg_attribute`, `pg_trigger`, `pg_proc`, `pg_depend`, `pg_rewrite`, `pg_constraint`, `pg_attrdef`).
-- `src/analyze.ts` — parses PL/pgSQL bodies with `pg-query-emscripten` (`parsePlpgsql` → every `PLpgSQL_expr` → `parse`), then walks the parse trees resolving range vars, aliases, column refs, and function calls against the catalog. Regex fallback included.
+- `src/analyze.ts` — parses PL/pgSQL bodies with `pg-query-emscripten` (`parsePlpgsql` → every `PLpgSQL_expr` → `parse`), then runs two passes per statement: a conservative whole-tree pass for table-level reads/writes and calls, and a **scope-aware pass for column attribution** that models FROM aliases, CTEs (including `WITH x(a, b)` column lists), derived tables, and correlated subqueries — so `rc.cid` reached through a CTE and a subquery alias still traces back to `orders.customer_id`, and the same alias bound to different tables in sibling scopes cannot cross-contaminate. Regex fallback included.
 - `src/graph.ts` — turns catalog + analysis into Cytoscape elements (tables as compound nodes containing referenced columns and triggers).
 - `src/extension.ts` — commands, secret-stored connection string, webview panel, DDL viewer.
 - `webview/main.ts` — Cytoscape rendering, fcose layout, filters, search, detail panel.
@@ -69,6 +70,6 @@ docker stop pgviz-test
 ## Known limitations
 
 - Dynamic SQL (`EXECUTE format(...)`) can't be statically resolved.
-- Unqualified column refs are attributed only when unambiguous within the statement's tables.
+- Unqualified column refs are attributed only when unambiguous within the visible scopes.
 - Languages other than `plpgsql`/`sql` (plpython, C, …) appear as nodes but their bodies aren't analyzed.
 - Tested against PG 14+; PG ≤ 13 works without `BEGIN ATOMIC` body deps.

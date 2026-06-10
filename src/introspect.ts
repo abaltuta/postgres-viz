@@ -2,9 +2,11 @@ import type { Client } from "pg";
 import type {
   Catalog,
   CatalogCol,
+  CatalogConstraint,
   CatalogFunc,
   CatalogRel,
   CatalogTrigger,
+  ConstraintFuncDep,
   DefaultDep,
   Fk,
   RelKind,
@@ -127,6 +129,38 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     refCols: ((r.ref_cols ?? []) as unknown[]).map(Number),
   }));
 
+  // CHECK / PRIMARY KEY / UNIQUE / EXCLUDE constraints (FKs are separate, as edges).
+  const constraints: CatalogConstraint[] = (
+    await client.query(
+      `SELECT con.oid AS oid, con.conname AS name, con.conrelid AS rel_oid,
+              con.contype::text AS contype, con.conkey AS cols,
+              pg_get_constraintdef(con.oid, true) AS def
+       FROM pg_constraint con
+       JOIN pg_class c ON c.oid = con.conrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE con.contype IN ('c','u','p','x') AND ${schemaPred("n.nspname")}`,
+      params,
+    )
+  ).rows.map((r) => ({
+    oid: Number(r.oid),
+    name: String(r.name),
+    relOid: Number(r.rel_oid),
+    contype: String(r.contype),
+    cols: ((r.cols ?? []) as unknown[]).map(Number),
+    def: r.def === null || r.def === undefined ? null : String(r.def),
+  }));
+
+  // Functions referenced by constraint expressions (CHECK (my_fn(col)) …) — exact, from pg_depend.
+  const constraintFuncDeps: ConstraintFuncDep[] = (
+    await client.query(
+      `SELECT DISTINCT d.objid AS con_oid, d.refobjid AS func_oid
+       FROM pg_depend d
+       WHERE d.classid = 'pg_constraint'::regclass
+         AND d.refclassid = 'pg_proc'::regclass
+         AND d.deptype = 'n'`,
+    )
+  ).rows.map((r) => ({ conOid: Number(r.con_oid), funcOid: Number(r.func_oid) }));
+
   // Exact relation deps of new-style (BEGIN ATOMIC) SQL functions — tracked by pg_depend.
   const sqlBodyDeps: SqlBodyDep[] = (
     await client.query(
@@ -176,10 +210,14 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
   const relOids = new Set(rels.map((r) => r.oid));
   const known = new Set(funcs.map((f) => f.oid));
   const trigFnOids = new Set(triggers.map((t) => t.funcOid));
+  const conOids = new Set(constraints.map((c) => c.oid));
   const wanted = new Set<number>();
   for (const t of triggers) if (!known.has(t.funcOid)) wanted.add(t.funcOid);
   for (const d of viewFuncDeps) {
     if (relOids.has(d.viewOid) && !known.has(d.funcOid)) wanted.add(d.funcOid);
+  }
+  for (const d of constraintFuncDeps) {
+    if (conOids.has(d.conOid) && !known.has(d.funcOid)) wanted.add(d.funcOid);
   }
   if (wanted.size > 0) {
     const extra = await fetchFuncs(client, `p.oid = ANY($1::oid[])`, [[...wanted]]);
@@ -189,7 +227,19 @@ export async function introspect(client: Client, schemas: string[] | null): Prom
     }
   }
 
-  return { rels, cols, triggers, funcs, viewDeps, viewFuncDeps, fks, sqlBodyDeps, defaultDeps };
+  return {
+    rels,
+    cols,
+    triggers,
+    funcs,
+    viewDeps,
+    viewFuncDeps,
+    fks,
+    constraints,
+    constraintFuncDeps,
+    sqlBodyDeps,
+    defaultDeps,
+  };
 }
 
 async function fetchFuncs(

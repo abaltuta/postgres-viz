@@ -14,6 +14,7 @@ const NODE_COLORS: Record<string, string> = {
   column: "#7A869A",
   function: "#FFAB00",
   trigger: "#FF5630",
+  constraint: "#6554C0",
 };
 
 const EDGE_COLORS: Record<string, string> = {
@@ -24,6 +25,7 @@ const EDGE_COLORS: Record<string, string> = {
   executes: "#FF7452",
   "update-of": "#FF8F73",
   fk: "#8993A4",
+  constrains: "#6554C0",
   default: "#998DD9",
 };
 
@@ -73,6 +75,10 @@ function buildStyle(): cytoscape.StylesheetJson {
     {
       selector: 'node[type="trigger"]',
       style: { "font-size": 8, height: 13, shape: "diamond", padding: "8px" },
+    },
+    {
+      selector: 'node[type="constraint"]',
+      style: { "font-size": 8, height: 13, shape: "hexagon", padding: "7px" },
     },
     {
       selector: ":parent",
@@ -148,6 +154,7 @@ function applyFilters(): void {
     g.nodes('[type="view"], [type="matview"]').toggleClass("hidden-el", !checked("flt-views"));
     g.nodes('[type="function"]').toggleClass("hidden-el", !checked("flt-functions"));
     g.nodes('[type="trigger"]').toggleClass("hidden-el", !checked("flt-triggers"));
+    g.nodes('[type="constraint"]').toggleClass("hidden-el", !checked("flt-constraints"));
     g.edges('[kind="fk"]').toggleClass("hidden-el", !checked("flt-fk"));
 
     g.nodes().removeClass("isolated-hidden");
@@ -314,6 +321,7 @@ for (const id of [
   "flt-views",
   "flt-functions",
   "flt-triggers",
+  "flt-constraints",
   "flt-fk",
   "flt-isolated",
 ]) {

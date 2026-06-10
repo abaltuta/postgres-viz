@@ -5,6 +5,14 @@ const relId = (oid: number): string => `r${oid}`;
 const colId = (relOid: number, attnum: number): string => `c${relOid}_${attnum}`;
 const fnId = (oid: number): string => `f${oid}`;
 const trgId = (oid: number): string => `g${oid}`;
+const conId = (oid: number): string => `k${oid}`;
+
+const CONTYPE_LABEL: Record<string, string> = {
+  c: "CHECK",
+  p: "PRIMARY KEY",
+  u: "UNIQUE",
+  x: "EXCLUDE",
+};
 
 function triggerDesc(tgtype: number): string {
   const timing = tgtype & 2 ? "BEFORE" : tgtype & 64 ? "INSTEAD OF" : "AFTER";
@@ -166,7 +174,23 @@ export function buildGraph(
     }
   }
 
-  // 7. Column defaults / generated columns.
+  // 7. CHECK / PK / UNIQUE / EXCLUDE constraints → their columns; CHECKs → functions they call.
+  const conByOid = new Map(catalog.constraints.map((c) => [c.oid, c]));
+  for (const con of catalog.constraints) {
+    if (!relByOid.has(con.relOid)) continue;
+    for (const att of con.cols) {
+      const cid = colNode(con.relOid, att);
+      if (cid) addEdge("constrains", conId(con.oid), cid);
+    }
+  }
+  for (const d of catalog.constraintFuncDeps) {
+    const con = conByOid.get(d.conOid);
+    if (con && relByOid.has(con.relOid) && fnByOid.has(d.funcOid)) {
+      addEdge("calls", conId(d.conOid), fnId(d.funcOid));
+    }
+  }
+
+  // 8. Column defaults / generated columns.
   for (const d of catalog.defaultDeps) {
     const src = relByOid.has(d.relOid) ? colNode(d.relOid, d.attnum) : null;
     if (!src) continue;
@@ -222,6 +246,21 @@ export function buildGraph(
         schema: rel.schema,
         oid: t.oid,
         detail: triggerDesc(t.tgtype),
+      },
+    });
+  }
+  for (const con of catalog.constraints) {
+    const rel = relByOid.get(con.relOid);
+    if (!rel) continue;
+    nodes.push({
+      data: {
+        id: conId(con.oid),
+        label: con.name,
+        type: "constraint",
+        parent: relId(con.relOid),
+        schema: rel.schema,
+        oid: con.oid,
+        detail: con.def ?? CONTYPE_LABEL[con.contype] ?? "constraint",
       },
     });
   }
