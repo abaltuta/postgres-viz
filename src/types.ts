@@ -131,6 +131,10 @@ export interface GraphNodeData {
   schemaParent?: string;
   /** row order inside an ERD card (columns by attnum, then triggers, constraints) */
   ord?: number;
+  /** client-side card art (set by the webview for virtualized cards) */
+  svg?: string;
+  cardW?: number;
+  cardH?: number;
 }
 
 export interface GraphEdgeData {

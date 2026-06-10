@@ -266,6 +266,7 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
       <option value="breadthfirst">tree</option>
       <option value="concentric">concentric</option>
     </select>
+    <label><input type="checkbox" id="flt-explorer" checked />list</label>
     <label><input type="checkbox" id="flt-schemagroup" checked />schemas</label>
     <label><input type="checkbox" id="flt-columns" checked />columns</label>
     <label><input type="checkbox" id="flt-views" checked />views</label>
@@ -287,6 +288,10 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     <span id="stats"></span>
   </div>
   <div id="content">
+    <aside id="explorer">
+      <input id="explorer-filter" type="text" placeholder="filter objects…" spellcheck="false" />
+      <div id="explorer-tree"></div>
+    </aside>
     <div id="cy"></div>
     <div id="crumb" class="hidden"></div>
     <aside id="panel" class="hidden"></aside>
