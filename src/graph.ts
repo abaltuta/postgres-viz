@@ -33,7 +33,6 @@ export function buildGraph(
   const colByKey = new Map(catalog.cols.map((c) => [`${c.relOid}:${c.attnum}`, c]));
   const fnByOid = new Map(catalog.funcs.map((f) => [f.oid, f]));
 
-  const usedCols = new Set<string>();
   const edges = new Map<string, { data: GraphEdgeData }>();
 
   const addEdge = (
@@ -57,13 +56,9 @@ export function buildGraph(
     edges.set(id, { data });
   };
 
-  /** Register a column node (only referenced columns become nodes) and return its id. */
-  const colNode = (relOid: number, attnum: number): string | null => {
-    const key = `${relOid}:${attnum}`;
-    if (!colByKey.has(key)) return null;
-    usedCols.add(key);
-    return colId(relOid, attnum);
-  };
+  /** Column edge endpoint — every catalog column is a node (ERD rows). */
+  const colNode = (relOid: number, attnum: number): string | null =>
+    colByKey.has(`${relOid}:${attnum}`) ? colId(relOid, attnum) : null;
 
   // 1. Views → columns/tables they select from (exact, from pg_depend).
   const viewGroups = new Map<string, { viewOid: number; relOid: number; atts: Set<number> }>();
@@ -235,8 +230,8 @@ export function buildGraph(
       },
     });
   }
-  for (const key of usedCols) {
-    const c = colByKey.get(key)!;
+  for (const c of catalog.cols) {
+    if (!relByOid.has(c.relOid)) continue;
     nodes.push({
       data: {
         id: colId(c.relOid, c.attnum),

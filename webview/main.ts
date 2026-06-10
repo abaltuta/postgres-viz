@@ -113,7 +113,7 @@ function buildStyle(): cytoscape.StylesheetJson {
         "text-margin-y": 14,
         "font-weight": "bold",
         "font-size": 10,
-        "background-opacity": 0.45,
+        "background-opacity": 0.92,
         "background-color": dark ? "#1c2128" : "#f6f8fa",
         "border-width": 1.5,
         padding: "12px",
@@ -172,6 +172,9 @@ function buildStyle(): cytoscape.StylesheetJson {
     { selector: 'edge[kind="default"]', style: { "line-style": "dotted" } },
     { selector: ".dimmed", style: { opacity: 0.12 } },
     { selector: "edge.hot", style: { opacity: 0.95, width: 1.8, "z-index": 9 } },
+    // relationships are hidden by default; clicking a node reveals its edges
+    { selector: "edge.edge-off", style: { display: "none" } },
+    { selector: "edge.revealed", style: { display: "element" } },
     { selector: ".hidden-el", style: { display: "none" } },
     { selector: ".isolated-hidden", style: { display: "none" } },
     {
@@ -185,10 +188,8 @@ function buildStyle(): cytoscape.StylesheetJson {
 
 function render(graph: GraphPayload): void {
   el("empty").style.display = "none";
-  // large graphs start decluttered: columns hidden, isolated nodes hidden —
-  // the toolbar toggles reflect this and can bring everything back
+  // large graphs start with isolated nodes hidden — the toggle brings them back
   if (graph.nodes.length > 600) {
-    el<HTMLInputElement>("flt-columns").checked = false;
     el<HTMLInputElement>("flt-isolated").checked = true;
   }
   cy?.destroy();
@@ -222,6 +223,10 @@ function applyFilters(): void {
     g.nodes('[type="trigger"]').toggleClass("hidden-el", !checked("flt-triggers"));
     g.nodes('[type="constraint"]').toggleClass("hidden-el", !checked("flt-constraints"));
     g.edges('[kind="fk"]').toggleClass("hidden-el", !checked("flt-fk"));
+
+    // relationships on demand: hide all edges unless the toggle is on; edges
+    // revealed by a selection keep showing (`.revealed` wins over `.edge-off`)
+    g.edges().toggleClass("edge-off", !checked("flt-edges"));
 
     g.nodes().removeClass("isolated-hidden");
     if (checked("flt-isolated")) {
@@ -332,17 +337,19 @@ function runLayout(): void {
 
 function selectNode(node: NodeSingular): void {
   if (!cy) return;
+  cy.edges().removeClass("hot revealed");
+  // a table click also reveals the edges of its columns/triggers/constraints
+  const core = node.union(node.descendants());
+  const hood = core.closedNeighborhood().union(node.ancestors());
   cy.elements().addClass("dimmed");
-  cy.edges().removeClass("hot");
-  const hood = node.closedNeighborhood().union(node.ancestors()).union(node.descendants());
   hood.removeClass("dimmed");
-  hood.edges().addClass("hot");
+  core.connectedEdges().addClass("revealed hot");
   renderPanel(node);
 }
 
 function clearSelection(): void {
   cy?.elements().removeClass("dimmed");
-  cy?.edges().removeClass("hot");
+  cy?.edges().removeClass("hot revealed");
   el("panel").classList.add("hidden");
 }
 
@@ -357,9 +364,17 @@ function renderPanel(node: NodeSingular): void {
       const outgoing = data.source === node.id();
       const other = outgoing ? e.target() : e.source();
       const otherData = other.data() as GraphNodeData;
+      // qualify children by their owning table: instruction.id, not just id
+      const owner =
+        otherData.type === "column" ||
+        otherData.type === "trigger" ||
+        otherData.type === "constraint"
+          ? String(other.parent().first().data("label") ?? "")
+          : "";
+      const display = owner ? `${owner}.${otherData.label}` : otherData.label;
       return `<li data-node="${esc(other.id())}">
         <span class="kind" style="color:${EDGE_COLORS[data.kind] ?? "#8993A4"}">${outgoing ? "→" : "←"} ${esc(data.kind)}</span>
-        <span class="name">${esc(otherData.label)}</span>
+        <span class="name">${esc(display)}</span>
         <small>${esc(otherData.type)}</small>
       </li>`;
     })
@@ -478,6 +493,7 @@ for (const id of [
   "flt-triggers",
   "flt-constraints",
   "flt-fk",
+  "flt-edges",
   "flt-isolated",
 ]) {
   el(id).addEventListener("change", applyFilters);
