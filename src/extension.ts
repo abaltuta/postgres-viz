@@ -3,13 +3,37 @@ import { Client } from "pg";
 import { analyzeAll, disposeParser } from "./analyze";
 import { buildGraph } from "./graph";
 import { introspect } from "./introspect";
-import type { NodeType } from "./types";
+import type { GraphPayload, NodeType } from "./types";
 
 const SECRET_KEY = "postgresViz.connectionString";
 
 let panel: vscode.WebviewPanel | undefined;
 let lastConnection: string | undefined;
 let output: vscode.OutputChannel | undefined;
+
+/**
+ * Memory cache for built graphs, alive as long as the extension host is —
+ * reopening the panel or reconnecting to the same database is instant; the
+ * refresh button forces a rebuild. Keyed by connection string plus every
+ * setting that shapes the graph.
+ */
+interface GraphCacheEntry {
+  graph: GraphPayload;
+  database: string;
+  builtAt: number;
+}
+const graphCache = new Map<string, GraphCacheEntry>();
+const GRAPH_CACHE_MAX = 4;
+
+function graphCacheKey(conn: string): string {
+  const cfg = vscode.workspace.getConfiguration("postgresViz");
+  return JSON.stringify([
+    conn,
+    cfg.get<string[]>("schemas") ?? [],
+    cfg.get<string[]>("excludeSchemas") ?? [],
+    cfg.get<boolean>("includeForeignKeys") ?? true,
+  ]);
+}
 
 function getOutput(): vscode.OutputChannel {
   output ??= vscode.window.createOutputChannel("Postgres Viz");
@@ -80,7 +104,7 @@ function ensurePanel(context: vscode.ExtensionContext): void {
         lastConnection = conn;
         await loadGraph(conn);
       } else if (msg.type === "refresh" && lastConnection) {
-        await loadGraph(lastConnection);
+        await loadGraph(lastConnection, { force: true });
       } else if (msg.type === "openDdl") {
         await openDdl(msg.nodeType as NodeType, Number(msg.oid), String(msg.label ?? ""));
       }
@@ -116,10 +140,24 @@ async function withClient<T>(conn: string, fn: (client: Client) => Promise<T>): 
 
 let loading = false;
 
-async function loadGraph(conn: string): Promise<void> {
+async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<void> {
   if (loading) {
     logLine("load already in progress — ignoring request");
     return;
+  }
+  const key = graphCacheKey(conn);
+  if (!opts.force) {
+    const cached = graphCache.get(key);
+    if (cached) {
+      const age = Math.round((Date.now() - cached.builtAt) / 1000);
+      logLine(`cache hit — serving graph built ${age}s ago (refresh to rebuild)`);
+      panel?.webview.postMessage({
+        type: "graph",
+        graph: cached.graph,
+        database: cached.database,
+      });
+      return;
+    }
   }
   loading = true;
   try {
@@ -165,6 +203,12 @@ async function loadGraph(conn: string): Promise<void> {
           logLine(
             'note: large graph — set "postgresViz.schemas" to a subset (e.g. ["public"]) to trim it',
           );
+        }
+        graphCache.delete(key); // re-insert so Map order stays LRU
+        graphCache.set(key, { graph, database, builtAt: Date.now() });
+        if (graphCache.size > GRAPH_CACHE_MAX) {
+          const oldest = graphCache.keys().next().value;
+          if (oldest !== undefined) graphCache.delete(oldest);
         }
         panel?.webview.postMessage({ type: "graph", graph, database });
       },
