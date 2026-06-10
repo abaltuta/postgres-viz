@@ -1149,6 +1149,19 @@ function aggMembers(data: GraphEdgeData): string {
   return members.length > MAX ? `${shown}, +${members.length - MAX} more` : shown;
 }
 
+/** Incoming relationships read passively: X *is called by* Y, never "Y calls". */
+const PASSIVE_KIND: Record<string, string> = {
+  calls: "called by",
+  executes: "executed by",
+  reads: "read by",
+  writes: "written by",
+  selects: "selected by",
+  fk: "referenced by",
+  constrains: "constrained by",
+  "update-of": "update-of by",
+  default: "default of",
+};
+
 function renderPanel(node: NodeSingular): void {
   const d = node.data() as GraphNodeData;
   const panel = el("panel");
@@ -1157,26 +1170,27 @@ function renderPanel(node: NodeSingular): void {
   const edges = (
     isCard ? node.union(node.descendants()).connectedEdges("[!detail]") : node.connectedEdges()
   ).filter((e) => !e.hasClass("hidden-el"));
-  const rows = edges
-    .map((e: EdgeSingular) => {
-      const data = e.data() as GraphEdgeData;
-      const outgoing = node.union(node.descendants()).contains(e.source());
-      const other = outgoing ? e.target() : e.source();
-      const otherData = other.data() as GraphNodeData;
-      const owner = ROW_TYPES.has(otherData.type)
-        ? String(other.parent().first().data("label") ?? "")
-        : "";
-      const display = owner ? `${owner}.${otherData.label}` : otherData.label;
-      const kindLabel = `${data.kind}${data.count && data.count > 1 ? ` ×${data.count}` : ""}`;
-      const cols = data.agg ? aggMembers(data) : "";
-      return `<li data-node="${esc(other.id())}">
+  const outRows: string[] = [];
+  const inRows: string[] = [];
+  edges.forEach((e: EdgeSingular) => {
+    const data = e.data() as GraphEdgeData;
+    const outgoing = node.union(node.descendants()).contains(e.source());
+    const other = outgoing ? e.target() : e.source();
+    const otherData = other.data() as GraphNodeData;
+    const owner = ROW_TYPES.has(otherData.type)
+      ? String(other.parent().first().data("label") ?? "")
+      : "";
+    const display = owner ? `${owner}.${otherData.label}` : otherData.label;
+    const kindWord = outgoing ? data.kind : (PASSIVE_KIND[data.kind] ?? `${data.kind} by`);
+    const kindLabel = `${kindWord}${data.count && data.count > 1 ? ` ×${data.count}` : ""}`;
+    const cols = data.agg ? aggMembers(data) : "";
+    (outgoing ? outRows : inRows).push(`<li data-node="${esc(other.id())}">
         <span class="kind" style="color:${EDGE_COLORS[data.kind] ?? "#8993A4"}">${outgoing ? "→" : "←"} ${esc(kindLabel)}</span>
         <span class="name">${esc(display)}</span>
         <small>${esc(otherData.type)}</small>
         ${cols ? `<span class="cols">${esc(cols)}</span>` : ""}
-      </li>`;
-    })
-    .join("");
+      </li>`);
+  });
   const ownerTable = ROW_TYPES.has(d.type) ? String(node.parent().first().data("label") ?? "") : "";
   const where = ownerTable ? `${d.schema ?? ""}.${ownerTable}` : (d.schema ?? "");
   const canCallTree = d.type === "function" || d.type === "trigger";
@@ -1192,8 +1206,9 @@ function renderPanel(node: NodeSingular): void {
       <button id="focus-btn">Focus</button>
       ${canCallTree ? '<button id="calltree-btn">Call tree</button>' : ""}
     </div>
-    <h3>Connections (${edges.length})</h3>
-    <ul class="edge-list">${rows}</ul>`;
+    ${outRows.length > 0 ? `<h3>Uses (${outRows.length})</h3><ul class="edge-list">${outRows.join("")}</ul>` : ""}
+    ${inRows.length > 0 ? `<h3>Used by (${inRows.length})</h3><ul class="edge-list">${inRows.join("")}</ul>` : ""}
+    ${outRows.length === 0 && inRows.length === 0 ? "<h3>No connections</h3>" : ""}`;
 
   panel.querySelector("#ddl-btn")?.addEventListener("click", () => {
     const td = d.type === "column" ? (node.parent().first().data() as GraphNodeData) : d;
