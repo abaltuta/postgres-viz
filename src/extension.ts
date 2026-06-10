@@ -266,6 +266,7 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
       <option value="concentric">concentric</option>
       <option value="grid">grid</option>
     </select>
+    <label><input type="checkbox" id="flt-schemagroup" checked />schemas</label>
     <label><input type="checkbox" id="flt-columns" checked />columns</label>
     <label><input type="checkbox" id="flt-views" checked />views</label>
     <label><input type="checkbox" id="flt-functions" checked />functions</label>

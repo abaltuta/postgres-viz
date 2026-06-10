@@ -105,7 +105,7 @@ export interface Catalog {
   defaultDeps: DefaultDep[];
 }
 
-export type NodeType = RelKind | "column" | "function" | "trigger" | "constraint";
+export type NodeType = RelKind | "column" | "function" | "trigger" | "constraint" | "schema";
 
 export type EdgeKind =
   | "selects"
@@ -127,6 +127,10 @@ export interface GraphNodeData {
   detail?: string;
   /** pg oid used for DDL lookups (for columns: the parent relation's oid) */
   oid: number;
+  /** the schema compound this node belongs in (so grouping can be toggled) */
+  schemaParent?: string;
+  /** row order inside an ERD card (columns by attnum, then triggers, constraints) */
+  ord?: number;
 }
 
 export interface GraphEdgeData {

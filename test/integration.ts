@@ -428,6 +428,25 @@ async function main(): Promise<void> {
     );
     assertEdge(g, "calls", recalc, entryAmount, "schema-qualified payroll.entry_amount() call");
 
+    // schema grouping: relations and functions nest inside schema compounds
+    const publicSchema = nodeId(g, "schema", "public");
+    const payrollSchema = nodeId(g, "schema", "payroll");
+    assert.equal(
+      g.nodes.find((n) => n.data.id === customers)!.data.parent,
+      publicSchema,
+      "customers table nests inside the public schema compound",
+    );
+    assert.equal(
+      g.nodes.find((n) => n.data.id === paycode)!.data.parent,
+      payrollSchema,
+      "paycode table nests inside the payroll schema compound",
+    );
+    assert.equal(
+      g.nodes.find((n) => n.data.id === recalc)!.data.parent,
+      payrollSchema,
+      "recalculate_totals() nests inside the payroll schema compound",
+    );
+
     // composite-type parameter fields attribute to the rowtype's table
     assertEdge(
       g,

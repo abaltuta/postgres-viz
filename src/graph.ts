@@ -208,12 +208,27 @@ export function buildGraph(
 
   // ── Nodes ──
   const nodes: { data: GraphNodeData }[] = [];
+
+  // schema compounds: tables/views/functions nest inside their schema
+  const schemaId = (name: string): string => `s_${name}`;
+  const schemas = new Set<string>([
+    ...catalog.rels.map((r) => r.schema),
+    ...catalog.funcs.map((f) => f.schema),
+  ]);
+  for (const name of schemas) {
+    nodes.push({
+      data: { id: schemaId(name), label: name, type: "schema", schema: name, oid: 0 },
+    });
+  }
+
   for (const r of catalog.rels) {
     nodes.push({
       data: {
         id: relId(r.oid),
         label: r.name,
         type: r.kind,
+        parent: schemaId(r.schema),
+        schemaParent: schemaId(r.schema),
         schema: r.schema,
         oid: r.oid,
         detail: `${r.schema}.${r.name}`,
@@ -231,6 +246,7 @@ export function buildGraph(
         schema: relByOid.get(c.relOid)?.schema,
         oid: c.relOid,
         detail: c.type,
+        ord: c.attnum,
       },
     });
   }
@@ -246,6 +262,7 @@ export function buildGraph(
         schema: rel.schema,
         oid: t.oid,
         detail: triggerDesc(t.tgtype),
+        ord: 10_000,
       },
     });
   }
@@ -261,6 +278,7 @@ export function buildGraph(
         schema: rel.schema,
         oid: con.oid,
         detail: con.def ?? CONTYPE_LABEL[con.contype] ?? "constraint",
+        ord: 20_000,
       },
     });
   }
@@ -270,6 +288,8 @@ export function buildGraph(
         id: fnId(f.oid),
         label: `${f.name}()`,
         type: "function",
+        parent: schemaId(f.schema),
+        schemaParent: schemaId(f.schema),
         schema: f.schema,
         oid: f.oid,
         detail: `${f.language} · returns ${f.returns}`,

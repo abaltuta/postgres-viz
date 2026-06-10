@@ -15,6 +15,7 @@ const NODE_COLORS: Record<string, string> = {
   function: "#FFAB00",
   trigger: "#FF5630",
   constraint: "#6554C0",
+  schema: "#57606A",
 };
 
 const EDGE_COLORS: Record<string, string> = {
@@ -68,41 +69,98 @@ function buildStyle(): cytoscape.StylesheetJson {
       selector: `node[type="${type}"]`,
       style: { "background-color": color },
     })),
+    // ERD rows: columns/triggers/constraints render as flat stripes inside the card
     {
       selector: 'node[type="column"]',
-      style: { "font-size": 8, height: 13, "background-opacity": 0.5 },
+      style: {
+        "font-size": 9,
+        height: 14,
+        shape: "rectangle",
+        "background-opacity": 0.18,
+        "border-width": 0,
+        padding: "1px",
+      },
     },
     {
       selector: 'node[type="trigger"]',
-      style: { "font-size": 8, height: 13, shape: "diamond", padding: "8px" },
+      style: {
+        "font-size": 8,
+        height: 14,
+        shape: "rectangle",
+        "background-opacity": 0.35,
+        "border-width": 0,
+        padding: "1px",
+      },
     },
     {
       selector: 'node[type="constraint"]',
-      style: { "font-size": 8, height: 13, shape: "hexagon", padding: "7px" },
+      style: {
+        "font-size": 8,
+        height: 14,
+        shape: "rectangle",
+        "background-opacity": 0.35,
+        "border-width": 0,
+        padding: "1px",
+      },
     },
+    // ERD card: solid panel, title bar inside the top edge
     {
       selector: ":parent",
       style: {
+        shape: "round-rectangle",
         "text-valign": "top",
         "text-halign": "center",
+        "text-margin-y": 14,
         "font-weight": "bold",
         "font-size": 10,
-        "background-opacity": 0.07,
+        "background-opacity": 0.45,
+        "background-color": dark ? "#1c2128" : "#f6f8fa",
         "border-width": 1.5,
-        "border-color": "#8993A4",
-        padding: "10px",
+        padding: "12px",
+        "min-width": "70px",
+        "min-height": "20px",
       },
+    },
+    {
+      selector: 'node:parent[type="table"]',
+      style: { "border-color": NODE_COLORS.table!, color: NODE_COLORS.table! },
+    },
+    {
+      selector: 'node:parent[type="view"]',
+      style: { "border-color": NODE_COLORS.view!, color: NODE_COLORS.view! },
+    },
+    {
+      selector: 'node:parent[type="matview"]',
+      style: { "border-color": NODE_COLORS.matview!, color: NODE_COLORS.matview! },
+    },
+    {
+      selector: 'node[type="schema"]',
+      style: {
+        "background-opacity": 0.02,
+        "background-color": "#57606A",
+        "border-width": 2,
+        "border-style": "dashed",
+        "border-color": "#57606A",
+        color: text,
+        "font-size": 14,
+        "text-margin-y": -6,
+        padding: "28px",
+      },
+    },
+    {
+      selector: 'node[type="function"]',
+      style: { "font-size": 8.5, height: 14, "background-opacity": 0.8 },
     },
     {
       selector: "edge",
       style: {
-        width: 1.2,
+        width: 1,
         "curve-style": "bezier",
         "target-arrow-shape": "triangle",
-        "arrow-scale": 0.7,
+        "arrow-scale": 0.6,
         "line-color": "#8993A4",
         "target-arrow-color": "#8993A4",
-        opacity: 0.7,
+        opacity: 0.35,
       },
     },
     ...Object.entries(EDGE_COLORS).map(([kind, color]) => ({
@@ -113,6 +171,7 @@ function buildStyle(): cytoscape.StylesheetJson {
     { selector: 'edge[kind="calls"]', style: { "line-style": "dashed" } },
     { selector: 'edge[kind="default"]', style: { "line-style": "dotted" } },
     { selector: ".dimmed", style: { opacity: 0.12 } },
+    { selector: "edge.hot", style: { opacity: 0.95, width: 1.8, "z-index": 9 } },
     { selector: ".hidden-el", style: { display: "none" } },
     { selector: ".isolated-hidden", style: { display: "none" } },
     {
@@ -141,6 +200,7 @@ function render(graph: GraphPayload): void {
     wheelSensitivity: 0.2,
   });
   lastStats = graph.stats;
+  applySchemaGrouping(false);
   applyFilters();
   runLayout();
   updateStats();
@@ -189,7 +249,54 @@ function applyFilters(): void {
       });
     }
   });
+  restackRows();
   updateStats();
+}
+
+/**
+ * ERD pass: stack each relation's visible children (columns by attnum, then
+ * triggers and constraints) as uniform-width rows inside the card, so a table
+ * reads like an entity in an ER diagram and edges land on the exact row.
+ */
+function restackRows(): void {
+  if (!cy) return;
+  cy.batch(() => {
+    cy!.nodes(':parent[type != "schema"]').forEach((p) => {
+      const rows = p
+        .children(":visible")
+        .sort((a, b) => (Number(a.data("ord")) || 0) - (Number(b.data("ord")) || 0));
+      if (rows.length === 0) return;
+      let maxLen = String(p.data("label") ?? "").length;
+      rows.forEach((r) => {
+        maxLen = Math.max(maxLen, String(r.data("label") ?? "").length);
+      });
+      const rowW = Math.max(70, maxLen * 6.5 + 14);
+      const rowH = 17;
+      const cx = p.position("x");
+      const top = p.position("y") - (rows.length * rowH) / 2;
+      rows.forEach((r, i) => {
+        r.position({ x: cx, y: top + i * rowH + rowH / 2 });
+        r.style({ width: rowW });
+      });
+    });
+  });
+}
+
+/** Move tables/views/functions in or out of their schema compound. */
+function applySchemaGrouping(relayout: boolean): void {
+  if (!cy) return;
+  const grouped = checked("flt-schemagroup");
+  cy.batch(() => {
+    cy!.nodes("[schemaParent]").forEach((n) => {
+      const target = grouped ? (n.data("schemaParent") as string) : null;
+      if ((n.data("parent") ?? null) !== target) n.move({ parent: target });
+    });
+    cy!.nodes('[type="schema"]').toggleClass("hidden-el", !grouped);
+  });
+  if (relayout) {
+    applyFilters();
+    runLayout();
+  }
 }
 
 function runLayout(): void {
@@ -216,20 +323,26 @@ function runLayout(): void {
     concentric: { name: "concentric", minNodeSpacing: 60 },
     grid: { name: "grid", avoidOverlapPadding: 30 },
   };
-  cy.elements(":visible")
-    .layout((options[name] ?? options.fcose) as cytoscape.LayoutOptions)
-    .run();
+  const layout = cy
+    .elements(":visible")
+    .layout((options[name] ?? options.fcose) as cytoscape.LayoutOptions);
+  layout.one("layoutstop", () => restackRows());
+  layout.run();
 }
 
 function selectNode(node: NodeSingular): void {
   if (!cy) return;
   cy.elements().addClass("dimmed");
-  node.closedNeighborhood().union(node.ancestors()).union(node.descendants()).removeClass("dimmed");
+  cy.edges().removeClass("hot");
+  const hood = node.closedNeighborhood().union(node.ancestors()).union(node.descendants());
+  hood.removeClass("dimmed");
+  hood.edges().addClass("hot");
   renderPanel(node);
 }
 
 function clearSelection(): void {
   cy?.elements().removeClass("dimmed");
+  cy?.edges().removeClass("hot");
   el("panel").classList.add("hidden");
 }
 
@@ -258,7 +371,7 @@ function renderPanel(node: NodeSingular): void {
       <span>${esc(d.schema ?? "")}</span>
     </p>
     ${d.detail ? `<p class="detail">${esc(d.detail)}</p>` : ""}
-    <div class="actions"><button id="ddl-btn">Open DDL</button></div>
+    ${d.type === "schema" ? "" : '<div class="actions"><button id="ddl-btn">Open DDL</button></div>'}
     <h3>Connections (${edges.length})</h3>
     <ul class="edge-list">${rows}</ul>`;
 
@@ -369,6 +482,7 @@ for (const id of [
 ]) {
   el(id).addEventListener("change", applyFilters);
 }
+el("flt-schemagroup").addEventListener("change", () => applySchemaGrouping(true));
 el("layout").addEventListener("change", runLayout);
 el("relayout").addEventListener("click", runLayout);
 el("fit").addEventListener("click", () => cy?.fit(undefined, 40));

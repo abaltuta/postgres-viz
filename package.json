@@ -2,7 +2,7 @@
   "name": "postgres-viz",
   "displayName": "Postgres Viz",
   "description": "Call-graph & dependency visualizer for PostgreSQL: triggers, views, PL/pgSQL functions, tables and columns.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "baltuta",
   "private": true,
   "engines": {
@@ -40,7 +40,9 @@
           "items": {
             "type": "string"
           },
-          "default": ["hdb_catalog"],
+          "default": [
+            "hdb_catalog"
+          ],
           "description": "Schemas to skip when no whitelist is set (PG internals and extension-owned objects are always skipped)."
         },
         "postgresViz.includeForeignKeys": {
