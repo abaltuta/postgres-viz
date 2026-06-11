@@ -50,31 +50,36 @@ export const DATA_KINDS = new Set(["reads", "inserts", "updates", "deletes", "wr
 /**
  * Call-tree closure from a trigger/function node: a trigger seeds with the
  * function(s) it executes; functions follow outgoing calls/executes
- * transitively (cycle-safe); `keep` adds every table the closure touches plus
- * the root's direct callers for context.
+ * level by level (cycle-safe) up to `maxLevels` deep (the seed functions are
+ * level 1); `keep` adds every table the closure touches plus the root's
+ * direct callers for context.
  */
 export function callTreeClosure(
   cy: Core,
   node: NodeSingular,
+  maxLevels = Number.POSITIVE_INFINITY,
 ): { fns: Set<string>; keep: Set<string>; roots: Set<string> } {
   const startUnit = unitOf(node);
   const fns = new Set<string>();
-  const queue: string[] = [];
+  let frontier: string[] = [];
   if (node.data("type") === "trigger") {
     node.connectedEdges('[kind="executes"]').forEach((e) => {
-      queue.push(e.target().id());
+      frontier.push(e.target().id());
     });
   } else {
-    queue.push(startUnit.id());
+    frontier.push(startUnit.id());
   }
-  const roots = new Set(queue);
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    if (fns.has(id)) continue;
-    fns.add(id);
-    cy.edges('[!detail][kind="calls"], [!detail][kind="executes"]').forEach((e) => {
-      if (e.source().id() === id && !fns.has(e.target().id())) queue.push(e.target().id());
-    });
+  const roots = new Set(frontier);
+  for (let level = 1; frontier.length > 0 && level <= maxLevels; level++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      if (fns.has(id)) continue;
+      fns.add(id);
+      cy.edges('[!detail][kind="calls"], [!detail][kind="executes"]').forEach((e) => {
+        if (e.source().id() === id && !fns.has(e.target().id())) next.push(e.target().id());
+      });
+    }
+    frontier = next;
   }
   const keep = new Set<string>(fns);
   keep.add(startUnit.id());

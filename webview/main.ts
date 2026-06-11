@@ -1136,14 +1136,19 @@ function focusNode(node: NodeSingular): void {
  * Call tree: from a trigger/function, follow executes/calls transitively, plus
  * the root's direct callers for context, plus every table the closure touches.
  */
-function showCallTree(node: NodeSingular): void {
+function showCallTree(node: NodeSingular, levels = 2): void {
   if (!cy) return;
-  const { fns, keep } = callTreeClosure(cy, node);
+  const { fns, keep } = callTreeClosure(cy, node, levels);
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
   enterIsolatedView(keep, `Call tree: ${label}`, "calltree", node.id());
   showCrumb(
     `Call tree: ${label}`,
-    '<label class="crumb-opt"><input type="checkbox" id="crumb-cols" checked />touched columns only</label>',
+    `<span class="crumb-opt">levels
+       <button class="lvl-btn" id="crumb-lvl-dn" title="fewer levels">−</button>
+       <span class="lvl-val">${levels}</span>
+       <button class="lvl-btn" id="crumb-lvl-up" title="more levels">+</button>
+     </span>
+     <label class="crumb-opt"><input type="checkbox" id="crumb-cols" checked />touched columns only</label>`,
   );
 
   const onChain = (kind: string, srcUnit: string, tgtUnit: string, tgtId: string): boolean => {
@@ -1229,6 +1234,17 @@ function showCallTree(node: NodeSingular): void {
     ?.addEventListener("change", () => {
       const box = document.getElementById("crumb-cols") as HTMLInputElement | null;
       apply(box?.checked ?? true);
+    });
+  // depth stepper: a different level means a different closure — full re-run
+  el("crumb")
+    .querySelector("#crumb-lvl-dn")
+    ?.addEventListener("click", () => {
+      if (levels > 1) showCallTree(node, levels - 1);
+    });
+  el("crumb")
+    .querySelector("#crumb-lvl-up")
+    ?.addEventListener("click", () => {
+      showCallTree(node, levels + 1);
     });
   // wide trees fit to specks — guarantee a readable zoom centered on the root
   window.setTimeout(() => {

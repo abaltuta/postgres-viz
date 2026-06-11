@@ -53,6 +53,15 @@ function build(): Core {
   assert.ok(keep.has("audit"), "tables the closure writes are kept");
   assert.ok(keep.has("f3"), "direct callers of the root are kept for context");
   assert.ok(!keep.has("unrelated"), "untouched tables stay out");
+
+  // depth limiting: levels count from the seed functions
+  const lvl1 = callTreeClosure(cy, trg, 1);
+  assert.deepEqual([...lvl1.fns], ["f1"], "1 level = just the executed function");
+  assert.ok(!lvl1.keep.has("f2"), "level-2 callee excluded at depth 1");
+  assert.ok(!lvl1.keep.has("audit"), "tables touched only by deeper levels excluded");
+  const lvl2 = callTreeClosure(cy, trg, 2);
+  assert.deepEqual([...lvl2.fns].sort(), ["f1", "f2"], "2 levels = seed + direct callees");
+  assert.ok(lvl2.keep.has("audit"), "depth 2 brings f2's tables back");
 }
 
 // ── 2. stale row reference after dematerialize/materialize ──

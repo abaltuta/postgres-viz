@@ -248,6 +248,18 @@ body {
   cursor: pointer;
 }
 
+#crumb .lvl-btn {
+  padding: 0 7px;
+  line-height: 16px;
+}
+
+#crumb .lvl-val {
+  min-width: 14px;
+  text-align: center;
+  display: inline-block;
+  font-weight: 600;
+}
+
 #crumb button {
   background: var(--vscode-button-background, #0e639c);
   color: var(--vscode-button-foreground, #fff);
