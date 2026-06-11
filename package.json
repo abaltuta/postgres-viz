@@ -2,7 +2,7 @@
   "name": "postgres-viz",
   "displayName": "Postgres Viz",
   "description": "Call-graph & dependency visualizer for PostgreSQL: triggers, views, PL/pgSQL functions, tables and columns.",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "publisher": "baltuta",
   "private": true,
   "engines": {
@@ -90,6 +90,17 @@
           "type": "boolean",
           "default": true,
           "description": "Include foreign-key edges in the graph."
+        },
+        "postgresViz.hclExcludeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/.baltuta/**",
+            "**/openspec/**"
+          ],
+          "description": "Glob patterns excluded when scanning the workspace for Atlas .hcl schema files (node_modules and .git are always excluded)."
         }
       }
     }

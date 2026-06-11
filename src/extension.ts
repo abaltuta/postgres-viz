@@ -256,7 +256,12 @@ class HclIndex {
     watcher.onDidChange(invalidate);
     watcher.onDidCreate(invalidate);
     watcher.onDidDelete(invalidate);
-    subscriptions.push(watcher);
+    subscriptions.push(
+      watcher,
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("postgresViz.hclExcludeGlobs")) invalidate();
+      }),
+    );
   }
 
   /** Where `schema.label` (owned by `owner`, for rows) is defined, if anywhere. */
@@ -281,11 +286,13 @@ class HclIndex {
 
   private async build(): Promise<Map<string, LocatedEntry>> {
     const all: LocatedEntry[] = [];
-    const files = await vscode.workspace.findFiles(
-      "**/*.hcl",
-      "{**/node_modules/**,**/.git/**}",
-      500,
-    );
+    // configurable excludes: scratch/spec folders carry .hcl drafts that must
+    // not win jump-to-definition over the real schema files
+    const userGlobs = vscode.workspace
+      .getConfiguration("postgresViz")
+      .get<string[]>("hclExcludeGlobs", ["**/.baltuta/**", "**/openspec/**"]);
+    const exclude = `{${["**/node_modules/**", "**/.git/**", ...userGlobs].join(",")}}`;
+    const files = await vscode.workspace.findFiles("**/*.hcl", exclude, 500);
     for (const uri of files) {
       let text: string;
       try {
