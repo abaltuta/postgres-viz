@@ -1,4 +1,3 @@
-import "@vscode-elements/elements/dist/bundled.js";
 import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import type { GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
 import {
@@ -58,11 +57,10 @@ let database = "";
 let lastStats: Record<string, number> = {};
 
 /**
- * Virtual rows: the full payload lives here; column/trigger/constraint row
- * nodes (and their detail edges) are added to cytoscape only when a card is
+ * Virtual rows: the full row set lives in these maps; column/trigger/constraint
+ * row nodes (and their detail edges) are added to cytoscape only when a card is
  * interacted with. Idle cards draw their column list as an SVG background.
  */
-let payload: GraphPayload | null = null;
 const rowsByCard = new Map<string, NodeDef[]>();
 const detailEdgesByCard = new Map<string, EdgeDef[]>();
 const cardOfNode = new Map<string, string>(); // row id → card id
@@ -71,12 +69,29 @@ const materialized = new Set<string>();
 const MATERIALIZE_CAP = 30;
 
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
-// vscode-elements web components expose .checked/.value like native inputs
-const checked = (id: string): boolean =>
-  Boolean((el(id) as unknown as { checked?: boolean }).checked);
-const valueOf = (id: string): string =>
-  String((el(id) as unknown as { value?: string }).value ?? "");
-const edgeMode = (): string => valueOf("edge-mode") || "off";
+
+/**
+ * View preferences now live in the EXTENSION (status bar / QuickPicks / title
+ * actions own all chrome). The webview holds a local mirror, updated only via
+ * the `prefs` message, and reads it everywhere the old toolbar controls were
+ * read. `layout: "tree"` maps to the cytoscape layout the old select called
+ * "breadthfirst" — normalized in runLayout().
+ */
+interface Prefs {
+  layout: "grid" | "tree";
+  edgeMode: "off" | "cards" | "all";
+  schemaGroup: boolean;
+  route: boolean;
+  hideIsolated: boolean;
+}
+let prefs: Prefs = {
+  layout: "grid",
+  edgeMode: "off",
+  schemaGroup: true,
+  route: false,
+  hideIsolated: false,
+};
+const edgeMode = (): Prefs["edgeMode"] => prefs.edgeMode;
 
 const isDark = (): boolean =>
   document.body.classList.contains("vscode-dark") ||
@@ -405,10 +420,6 @@ function buildStyle(): cytoscape.StylesheetJson {
 function render(graph: GraphPayload): void {
   el("empty").style.display = "none";
   hideCrumb();
-  if (graph.nodes.length > 600) {
-    el<HTMLInputElement>("flt-isolated").checked = true;
-  }
-  payload = graph;
   rowsByCard.clear();
   detailEdgesByCard.clear();
   cardOfNode.clear();
@@ -506,7 +517,7 @@ function applyFilters(): void {
     else if (mode === "cards") g.edges("[?detail]").addClass("edge-off");
 
     g.nodes().removeClass("isolated-hidden");
-    if (checked("flt-isolated")) {
+    if (prefs.hideIsolated) {
       // keep anything participating in at least one card-level relationship
       const keep = new Set<string>();
       g.edges("[!detail]").forEach((e) => {
@@ -578,7 +589,7 @@ function restackRows(): void {
 function applySchemaGrouping(relayout: boolean): void {
   if (!cy) return;
   exitView(false);
-  const grouped = checked("flt-schemagroup");
+  const grouped = prefs.schemaGroup;
   cy.batch(() => {
     cy!.nodes("[schemaParent]").forEach((n) => {
       const target = grouped ? (n.data("schemaParent") as string) : null;
@@ -899,7 +910,7 @@ function applySegments(
 function routeEdgesAroundCards(): void {
   if (!cy) return;
   clearEdgeRouting();
-  if (!checked("flt-route")) return;
+  if (!prefs.route) return;
   const units = cardUnits();
   const boxes = units.map((u) => {
     const b = u.boundingBox({ includeLabels: true });
@@ -935,7 +946,8 @@ function routeEdgesAroundCards(): void {
 
 function runLayout(): void {
   if (!cy) return;
-  const name = valueOf("layout") || "grid";
+  // prefs.layout "tree" is what layoutTreeCards keys off as "breadthfirst"
+  const name = prefs.layout === "tree" ? "breadthfirst" : "grid";
   // taxi routing has NO parallel-edge separation — multiple edges between the
   // same pair (reads + writes to one table) would coincide exactly. Pairs with
   // more than one card-level edge stay bezier, which fans parallels apart.
@@ -1575,7 +1587,11 @@ function updateStats(): void {
       const name = k.replace(/([A-Z])/g, (m) => ` ${m.toLowerCase()}`);
       return `${n} ${name}${n === 1 || name.endsWith("s") ? "" : "s"}`;
     });
-  el("stats").textContent = `${database ? `${database} · ` : ""}${parts.join(" · ")}`;
+  const text = `${database ? `${database} · ` : ""}${parts.join(" · ")}`;
+  // on-canvas overlay (bottom-right, like the legend)…
+  el("stats").textContent = text;
+  // …and the extension mirrors it into the status bar tooltip
+  vscode.postMessage({ type: "stats", text });
 }
 
 function buildLegend(): void {
@@ -1595,6 +1611,53 @@ function buildLegend(): void {
 /** A reveal that arrived before the graph did — applied right after render. */
 let pendingRevealId: string | null = null;
 
+/**
+ * Apply a prefs update from the extension, doing the minimal cytoscape work
+ * for whatever actually changed (a full re-render is far too heavy for a
+ * single toggle). Diffed against the previous mirror, then the mirror is
+ * advanced.
+ */
+function applyPrefs(next: Prefs): void {
+  const prev = prefs;
+  prefs = next;
+  if (!cy) return;
+  if (next.layout !== prev.layout) runLayout();
+  if (next.edgeMode !== prev.edgeMode) {
+    // leaving "all" with no active view: collapse the rows it force-materialized
+    if (prev.edgeMode === "all" && !view) dematerializeAll();
+    applyFilters();
+    routeEdgesAroundCards();
+  }
+  if (next.schemaGroup !== prev.schemaGroup) applySchemaGrouping(true);
+  if (next.route !== prev.route) routeEdgesAroundCards();
+  if (next.hideIsolated !== prev.hideIsolated) applyFilters();
+}
+
+/** searchGraph picker → light a card and centre on it (selection only, no view). */
+function searchSelect(id: string): void {
+  if (!cy) return;
+  const card = cardOfNode.get(id);
+  if (card && !materialized.has(card) && !view) materializeCard(card);
+  const ele = cy.getElementById(id);
+  if (ele.empty()) return;
+  selectNode(ele as unknown as NodeSingular);
+  cy.animate({ center: { eles: ele }, duration: 200 } as never);
+}
+
+/** tree "Call Tree" → show the call tree for a function/trigger, else focus it. */
+function callTreeById(id: string): void {
+  if (!cy) return;
+  exitView(false);
+  const card = cardOfNode.get(id);
+  if (card && !materialized.has(card)) materializeCard(card);
+  const ele = cy.getElementById(id);
+  if (ele.empty()) return;
+  const node = ele as unknown as NodeSingular;
+  const t = String(node.data("type"));
+  if (t === "function" || t === "trigger") showCallTree(node);
+  else focusNode(node);
+}
+
 window.addEventListener("message", (ev: MessageEvent) => {
   const msg = ev.data;
   if (msg?.type === "graph") {
@@ -1605,15 +1668,21 @@ window.addEventListener("message", (ev: MessageEvent) => {
       pendingRevealId = null;
       jumpToNode(id);
     }
+  } else if (msg?.type === "prefs") {
+    applyPrefs(msg.prefs as Prefs);
   } else if (msg?.type === "reveal") {
     if (cy) jumpToNode(String(msg.id ?? ""));
     else pendingRevealId = String(msg.id ?? "");
-  } else if (msg?.type === "connection") {
-    const connEl = el("conn") as unknown as { value: string };
-    if (!connEl.value) connEl.value = msg.value ?? "";
-    if (!msg.value && !cy) {
-      el("empty").textContent = "Enter a Postgres connection string above and press connect.";
-    }
+  } else if (msg?.type === "searchSelect") {
+    searchSelect(String(msg.id ?? ""));
+  } else if (msg?.type === "callTreeById") {
+    callTreeById(String(msg.id ?? ""));
+  } else if (msg?.type === "fit") {
+    fitView(undefined, 40);
+  } else if (msg?.type === "relayout") {
+    runLayout();
+  } else if (msg?.type === "exitView") {
+    exitView(true);
   } else if (msg?.type === "status") {
     if (!cy) {
       el("empty").style.display = "flex";
@@ -1631,54 +1700,9 @@ window.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") exitView(true);
 });
 
-function doConnect(): void {
-  const value = valueOf("conn").trim();
-  if (!value) return;
-  el("empty").style.display = "flex";
-  el("empty").textContent = "Connecting…";
-  vscode.postMessage({ type: "connect", connectionString: value });
-}
-
-el("connect").addEventListener("click", doConnect);
-el("conn").addEventListener("keydown", (ev) => {
-  if ((ev as KeyboardEvent).key === "Enter") doConnect();
-});
-
-let searchTimer: number | undefined;
-el("search").addEventListener("input", () => {
-  window.clearTimeout(searchTimer);
-  searchTimer = window.setTimeout(() => {
-    if (!cy || !payload) return;
-    const q = valueOf("search").trim().toLowerCase();
-    cy.nodes().removeClass("matched");
-    if (!q) return;
-    // virtual rows live in the payload, not in cy — a column hit lights its card
-    const hitIds = new Set<string>();
-    for (const n of payload.nodes) {
-      if (!String(n.data.label).toLowerCase().includes(q)) continue;
-      hitIds.add(ROW_TYPES.has(n.data.type) ? (cardOfNode.get(n.data.id) ?? n.data.id) : n.data.id);
-    }
-    // class checks, not `.visible()` — computed style can lag the batched
-    // class changes of filters/views and would drop legitimate hits
-    const matched = cy.nodes().filter((n) => hitIds.has(n.id()) && isShown(n));
-    matched.addClass("matched");
-    if (matched.nonempty()) {
-      cy.animate({ fit: { eles: matched, padding: 80 }, duration: 200 } as never);
-    }
-  }, 200);
-});
-
-el("flt-isolated").addEventListener("change", applyFilters);
-el("edge-mode").addEventListener("change", () => {
-  if (edgeMode() !== "all" && !view) dematerializeAll();
-  applyFilters();
-  routeEdgesAroundCards();
-});
-el("flt-route").addEventListener("change", () => routeEdgesAroundCards());
-el("flt-schemagroup").addEventListener("change", () => applySchemaGrouping(true));
-el("layout").addEventListener("change", runLayout);
-el("relayout").addEventListener("click", runLayout);
-el("fit").addEventListener("click", () => fitView(undefined, 40));
+// search / layout / edge-mode / filters / fit / relayout / refresh are all
+// driven natively now — QuickPicks and title-bar actions post messages handled
+// above. The webview only owns the canvas, crumb, legend, details panel.
 
 // side panel resize: drag the left edge (no native webview splitter exists)
 {
@@ -1700,12 +1724,5 @@ el("fit").addEventListener("click", () => fitView(undefined, 40));
     handle.releasePointerCapture(ev.pointerId);
   });
 }
-el("refresh").addEventListener("click", () => {
-  exitView(false);
-  el("empty").style.display = "flex";
-  el("empty").textContent = "Refreshing…";
-  vscode.postMessage({ type: "refresh" });
-});
-
 buildLegend();
 vscode.postMessage({ type: "ready" });

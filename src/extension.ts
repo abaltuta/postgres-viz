@@ -23,6 +23,57 @@ let lastConnection: string | undefined;
 let output: vscode.OutputChannel | undefined;
 /** reveal requested while the webview was still booting — sent after "ready" */
 let pendingReveal: string | null = null;
+/** call-tree requested before the webview was listening — sent after "ready" */
+let pendingCallTree: string | null = null;
+/** search-select requested before the webview was listening — sent after "ready" */
+let pendingSearch: string | null = null;
+
+// ── view preferences (the native chrome owns these; the webview mirrors them) ──
+
+interface Prefs {
+  layout: "grid" | "tree";
+  edgeMode: "off" | "cards" | "all";
+  schemaGroup: boolean;
+  route: boolean;
+  hideIsolated: boolean;
+}
+const DEFAULT_PREFS: Prefs = {
+  layout: "grid",
+  edgeMode: "off",
+  schemaGroup: true,
+  route: false,
+  hideIsolated: false,
+};
+const PREFS_KEY = "postgresViz.prefs";
+/** set once the user touches "hide isolated" — after that we never auto-force it */
+const HIDE_ISOLATED_TOUCHED_KEY = "postgresViz.userTouchedHideIsolated";
+let prefs: Prefs = { ...DEFAULT_PREFS };
+let workspaceState: vscode.Memento | undefined;
+/** latest stats line from the webview — folded into the status bar tooltip */
+let lastStatsText = "";
+
+let statusItem: vscode.StatusBarItem | undefined;
+
+function savePrefs(): void {
+  void workspaceState?.update(PREFS_KEY, prefs);
+}
+
+/** Push the full prefs object to the webview (post-graph, on change, on replay). */
+function postPrefs(): void {
+  panel?.webview.postMessage({ type: "prefs", prefs });
+}
+
+function updateStatusItem(): void {
+  if (!statusItem) return;
+  statusItem.text = currentGraph ? `$(database) ${currentDatabase}` : "$(database) Postgres Viz";
+  const lines = [
+    currentGraph ? `Postgres Viz — ${currentDatabase}` : "Postgres Viz — not connected",
+  ];
+  if (lastStatsText) lines.push(lastStatsText);
+  lines.push("Click for connection actions");
+  statusItem.tooltip = lines.join("\n");
+  statusItem.show();
+}
 
 /**
  * Memory cache for built graphs, alive as long as the extension host is —
@@ -201,6 +252,9 @@ class DbTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     );
     item.id = n.id;
     item.description = n.description;
+    // contextValue drives the view/item/context menus — the node type, except
+    // groups (which carry no actions)
+    if (n.type !== "group") item.contextValue = n.type;
     if (n.type !== "group") item.iconPath = new vscode.ThemeIcon(TREE_ICONS[n.type] ?? "circle");
     if (n.graphId) {
       item.command = {
@@ -408,18 +462,41 @@ class DdlContentProvider implements vscode.TextDocumentContentProvider {
 
 export function activate(context: vscode.ExtensionContext): void {
   hclIndex = new HclIndex(context.subscriptions);
+  workspaceState = context.workspaceState;
+  const saved = context.workspaceState.get<Partial<Prefs>>(PREFS_KEY);
+  prefs = saved ? { ...DEFAULT_PREFS, ...saved } : { ...DEFAULT_PREFS };
+
+  statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusItem.command = "postgresViz.connectionMenu";
+  updateStatusItem();
+
   treeProvider = new DbTreeProvider();
   treeView = vscode.window.createTreeView("postgresVizExplorer", {
     treeDataProvider: treeProvider,
     showCollapseAll: true,
   });
   context.subscriptions.push(
+    statusItem,
     treeView,
     vscode.workspace.registerTextDocumentContentProvider("pgviz", new DdlContentProvider()),
     vscode.languages.registerWorkspaceSymbolProvider(new DbSymbolProvider()),
     vscode.commands.registerCommand("postgresViz.showLogs", () => getOutput().show(true)),
     vscode.commands.registerCommand("postgresViz.visualize", () => visualize(context)),
     vscode.commands.registerCommand("postgresViz.load", () => load(context)),
+    vscode.commands.registerCommand("postgresViz.connectionMenu", () => connectionMenu(context)),
+    vscode.commands.registerCommand("postgresViz.fit", () =>
+      panel?.webview.postMessage({ type: "fit" }),
+    ),
+    vscode.commands.registerCommand("postgresViz.relayout", () =>
+      panel?.webview.postMessage({ type: "relayout" }),
+    ),
+    vscode.commands.registerCommand("postgresViz.refreshGraph", async () => {
+      if (lastConnection) await loadGraph(lastConnection, { force: true });
+    }),
+    vscode.commands.registerCommand("postgresViz.chooseLayout", chooseLayout),
+    vscode.commands.registerCommand("postgresViz.chooseEdgeMode", chooseEdgeMode),
+    vscode.commands.registerCommand("postgresViz.viewOptions", () => viewOptions(context)),
+    vscode.commands.registerCommand("postgresViz.searchGraph", () => searchGraph(context)),
     vscode.commands.registerCommand("postgresViz.revealNode", async (graphId: string) => {
       const hadPanel = Boolean(panel);
       if (!panel) await visualize(context);
@@ -429,6 +506,14 @@ export function activate(context: vscode.ExtensionContext): void {
       if (hadPanel) panel?.webview.postMessage({ type: "reveal", id: graphId });
       else pendingReveal = graphId;
     }),
+    vscode.commands.registerCommand("postgresViz.treeFocus", (n: TreeNode) =>
+      treeFocus(context, n),
+    ),
+    vscode.commands.registerCommand("postgresViz.treeCallTree", (n: TreeNode) =>
+      treeCallTree(context, n),
+    ),
+    vscode.commands.registerCommand("postgresViz.treeGoToDef", (n: TreeNode) => treeGoToDef(n)),
+    vscode.commands.registerCommand("postgresViz.treeOpenDdl", (n: TreeNode) => treeOpenDdl(n)),
   );
   // a stored connection loads in the background at startup — tree + Cmd+T
   // symbols are ready without opening the graph panel
@@ -452,7 +537,7 @@ async function visualize(context: vscode.ExtensionContext): Promise<void> {
     lastConnection = conn;
     await loadGraph(conn);
   }
-  // no stored connection → the webview's connection bar takes over
+  // no stored connection → the status bar item / sidebar drive connecting now
 }
 
 /** Load the graph WITHOUT opening the panel (sidebar welcome button / startup). */
@@ -491,10 +576,9 @@ function ensurePanel(context: vscode.ExtensionContext): void {
     try {
       logLine(`webview → ${String(msg.type)}`);
       if (msg.type === "ready") {
-        const stored = (await context.secrets.get(secretKey())) ?? "";
-        panel?.webview.postMessage({ type: "connection", value: stored });
         // messages posted before the webview JS was listening are dropped —
-        // replay the already-loaded graph (startup/background loads) here
+        // replay the already-loaded graph (startup/background loads) here,
+        // then the current prefs, then any queued navigation
         if (currentGraph) {
           panel?.webview.postMessage({
             type: "graph",
@@ -502,17 +586,22 @@ function ensurePanel(context: vscode.ExtensionContext): void {
             database: currentDatabase,
           });
         }
+        postPrefs();
         if (pendingReveal) {
           panel?.webview.postMessage({ type: "reveal", id: pendingReveal });
           pendingReveal = null;
         }
-      } else if (msg.type === "connect") {
-        const conn = String(msg.connectionString ?? "").trim();
-        if (!conn) return;
-        getOutput().show(true);
-        await context.secrets.store(secretKey(), conn);
-        lastConnection = conn;
-        await loadGraph(conn);
+        if (pendingCallTree) {
+          panel?.webview.postMessage({ type: "callTreeById", id: pendingCallTree });
+          pendingCallTree = null;
+        }
+        if (pendingSearch) {
+          panel?.webview.postMessage({ type: "searchSelect", id: pendingSearch });
+          pendingSearch = null;
+        }
+      } else if (msg.type === "stats") {
+        lastStatsText = String(msg.text ?? "");
+        updateStatusItem();
       } else if (msg.type === "refresh" && lastConnection) {
         await loadGraph(lastConnection, { force: true });
       } else if (msg.type === "openDdl") {
@@ -580,11 +669,14 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
       currentGraph = cached.graph;
       currentDatabase = cached.database;
       treeProvider?.setGraph(cached.graph);
+      applyInitialHideIsolated(cached.graph);
       panel?.webview.postMessage({
         type: "graph",
         graph: cached.graph,
         database: cached.database,
       });
+      postPrefs();
+      updateStatusItem();
       return;
     }
   }
@@ -642,7 +734,10 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
         currentGraph = graph;
         currentDatabase = database;
         treeProvider?.setGraph(graph);
+        applyInitialHideIsolated(graph);
         panel?.webview.postMessage({ type: "graph", graph, database });
+        postPrefs();
+        updateStatusItem();
       },
     );
   } catch (err) {
@@ -750,6 +845,247 @@ function showError(err: unknown): void {
   vscode.window.showErrorMessage(`Postgres Viz: ${message}`);
 }
 
+// ── native chrome: connection menu, layout / edge-mode / view-option pickers ──
+
+/**
+ * Big graphs are unreadable with every isolated node drawn, so the first time
+ * we load a >600-node graph we default "hide isolated" on — but only if the
+ * user has never set it themselves (then their choice always wins).
+ */
+function applyInitialHideIsolated(graph: GraphPayload): void {
+  const touched = workspaceState?.get<boolean>(HIDE_ISOLATED_TOUCHED_KEY) ?? false;
+  if (touched) return;
+  const want = graph.nodes.length > 600;
+  if (prefs.hideIsolated !== want) {
+    prefs = { ...prefs, hideIsolated: want };
+    savePrefs();
+  }
+}
+
+/** Ensure the panel exists and is focused; queue work via pending* when cold. */
+async function ensurePanelRevealed(context: vscode.ExtensionContext): Promise<boolean> {
+  const hadPanel = Boolean(panel);
+  if (!panel) await visualize(context);
+  panel?.reveal(undefined, true);
+  return hadPanel;
+}
+
+async function connectionMenu(context: vscode.ExtensionContext): Promise<void> {
+  const connected = Boolean(lastConnection);
+  type Item = vscode.QuickPickItem & { id: string };
+  const items: Item[] = [
+    { id: "connect", label: "$(plug) Connect / change connection…" },
+    {
+      id: "reload",
+      label: "$(sync) Reload from database",
+      description: connected ? undefined : "connect first",
+    },
+    { id: "open", label: "$(graph) Open graph panel" },
+    { id: "forget", label: "$(trash) Forget stored connection" },
+  ];
+  const pick = await vscode.window.showQuickPick(items, { title: "Postgres Viz" });
+  if (!pick) return;
+  switch (pick.id) {
+    case "connect": {
+      const conn = await vscode.window.showInputBox({
+        title: "Postgres Viz: connect",
+        prompt: "Postgres connection string",
+        placeHolder: "postgres://user:password@localhost:5432/dbname",
+        ignoreFocusOut: true,
+      });
+      if (!conn?.trim()) return;
+      const trimmed = conn.trim();
+      getOutput().show(true);
+      await context.secrets.store(secretKey(), trimmed);
+      lastConnection = trimmed;
+      await loadGraph(trimmed, { force: true });
+      break;
+    }
+    case "reload":
+      if (lastConnection) await loadGraph(lastConnection, { force: true });
+      break;
+    case "open":
+      await visualize(context);
+      break;
+    case "forget": {
+      await context.secrets.delete(secretKey());
+      lastConnection = undefined;
+      currentGraph = null;
+      currentDatabase = "";
+      lastStatsText = "";
+      treeProvider?.setGraph(null);
+      updateStatusItem();
+      break;
+    }
+  }
+}
+
+async function chooseLayout(): Promise<void> {
+  type Item = vscode.QuickPickItem & { value: Prefs["layout"] };
+  const items: Item[] = [
+    { value: "grid", label: "Grid", picked: prefs.layout === "grid" },
+    { value: "tree", label: "Tree", description: "dependency layers", picked: prefs.layout === "tree" },
+  ];
+  const pick = await vscode.window.showQuickPick(items, { title: "Postgres Viz: layout" });
+  if (!pick || pick.value === prefs.layout) return;
+  prefs = { ...prefs, layout: pick.value };
+  savePrefs();
+  postPrefs();
+}
+
+async function chooseEdgeMode(): Promise<void> {
+  type Item = vscode.QuickPickItem & { value: Prefs["edgeMode"] };
+  const items: Item[] = [
+    {
+      value: "off",
+      label: "Off",
+      description: "click a node to reveal its edges",
+      picked: prefs.edgeMode === "off",
+    },
+    {
+      value: "cards",
+      label: "Cards",
+      description: "one rolled-up edge per pair of tables/functions",
+      picked: prefs.edgeMode === "cards",
+    },
+    {
+      value: "all",
+      label: "All",
+      description: "every per-column edge",
+      picked: prefs.edgeMode === "all",
+    },
+  ];
+  const pick = await vscode.window.showQuickPick(items, { title: "Postgres Viz: edges" });
+  if (!pick || pick.value === prefs.edgeMode) return;
+  prefs = { ...prefs, edgeMode: pick.value };
+  savePrefs();
+  postPrefs();
+}
+
+async function viewOptions(context: vscode.ExtensionContext): Promise<void> {
+  type Item = vscode.QuickPickItem & { id: "schemaGroup" | "route" | "hideIsolated" };
+  const items: Item[] = [
+    { id: "schemaGroup", label: "Group by schema", picked: prefs.schemaGroup },
+    {
+      id: "route",
+      label: "Avoid boxes",
+      description: "experimental edge routing",
+      picked: prefs.route,
+    },
+    { id: "hideIsolated", label: "Hide isolated nodes", picked: prefs.hideIsolated },
+  ];
+  const picks = await vscode.window.showQuickPick(items, {
+    title: "Postgres Viz: view options",
+    canPickMany: true,
+  });
+  if (!picks) return; // dismissed — leave prefs untouched
+  const chosen = new Set(picks.map((p) => p.id));
+  const next: Prefs = {
+    ...prefs,
+    schemaGroup: chosen.has("schemaGroup"),
+    route: chosen.has("route"),
+    hideIsolated: chosen.has("hideIsolated"),
+  };
+  // remember that the user has an opinion on hide-isolated — stop auto-forcing it
+  if (next.hideIsolated !== prefs.hideIsolated) {
+    void context.workspaceState.update(HIDE_ISOLATED_TOUCHED_KEY, true);
+  }
+  prefs = next;
+  savePrefs();
+  postPrefs();
+}
+
+/** Parent (table) label of a row node, for qualified row labels in the picker. */
+function labelByGraphId(): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const { data: d } of currentGraph?.nodes ?? []) m.set(d.id, String(d.label));
+  return m;
+}
+
+async function searchGraph(context: vscode.ExtensionContext): Promise<void> {
+  if (!currentGraph) {
+    vscode.window.showInformationMessage("Postgres Viz: connect to a database first.");
+    return;
+  }
+  const ROWS = new Set(["column", "trigger", "constraint", "index"]);
+  const labelOf = labelByGraphId();
+  type Item = vscode.QuickPickItem & { id: string };
+  const items: Item[] = [];
+  for (const { data: d } of currentGraph.nodes) {
+    if (d.type === "schema") continue;
+    const owner = ROWS.has(d.type) ? (labelOf.get(d.parent ?? "") ?? "") : "";
+    const label = owner
+      ? `${d.schema ?? ""}.${owner}.${d.label}`
+      : `${d.schema ?? ""}.${d.label}`;
+    items.push({ id: d.id, label, description: String(d.type) });
+  }
+  const pick = await vscode.window.showQuickPick(items, {
+    title: "Postgres Viz: search graph",
+    placeHolder: "search nodes…",
+    matchOnDescription: true,
+  });
+  if (!pick) return;
+  const hadPanel = await ensurePanelRevealed(context);
+  if (hadPanel) panel?.webview.postMessage({ type: "searchSelect", id: pick.id });
+  else pendingSearch = pick.id;
+}
+
+// ── tree context-menu actions ──
+
+/** The graph node data behind a tree node, if the graph is still loaded. */
+function graphDataOf(graphId: string): GraphNodeData | undefined {
+  for (const { data: d } of currentGraph?.nodes ?? []) if (d.id === graphId) return d;
+  return undefined;
+}
+
+async function treeFocus(context: vscode.ExtensionContext, n: TreeNode): Promise<void> {
+  if (!n.graphId) return;
+  const hadPanel = await ensurePanelRevealed(context);
+  // reveal already enters the focus view in the webview
+  if (hadPanel) panel?.webview.postMessage({ type: "reveal", id: n.graphId });
+  else pendingReveal = n.graphId;
+}
+
+async function treeCallTree(context: vscode.ExtensionContext, n: TreeNode): Promise<void> {
+  if (!n.graphId) return;
+  const hadPanel = await ensurePanelRevealed(context);
+  if (hadPanel) panel?.webview.postMessage({ type: "callTreeById", id: n.graphId });
+  else pendingCallTree = n.graphId;
+}
+
+async function treeGoToDef(n: TreeNode): Promise<void> {
+  const d = n.graphId ? graphDataOf(n.graphId) : undefined;
+  if (!d) return;
+  const owner = ownerLabelOf(d);
+  await openDefinition(
+    d.type,
+    d.oid,
+    d.schema ?? undefined,
+    d.label,
+    owner || undefined,
+    `${d.schema ?? ""}.${d.label}`,
+  );
+}
+
+async function treeOpenDdl(n: TreeNode): Promise<void> {
+  const d = n.graphId ? graphDataOf(n.graphId) : undefined;
+  if (!d) return;
+  // a column's DDL is its parent table's column listing — resolve the parent
+  if (d.type === "column") {
+    const parent = d.parent ? graphDataOf(d.parent) : undefined;
+    if (parent) await openDdl(parent.type, parent.oid, `${parent.schema ?? ""}.${parent.label}`);
+    return;
+  }
+  await openDdl(d.type, d.oid, `${d.schema ?? ""}.${d.label}`);
+}
+
+/** For row nodes, the owning table's label (owner arg for HCL lookups). */
+function ownerLabelOf(d: GraphNodeData): string {
+  const ROWS = new Set(["column", "trigger", "constraint", "index"]);
+  if (!ROWS.has(d.type) || !d.parent) return "";
+  return graphDataOf(d.parent)?.label ?? "";
+}
+
 function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "webview.js"));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "style.css"));
@@ -763,41 +1099,16 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   <title>Postgres Viz</title>
 </head>
 <body>
-  <div id="connbar">
-    <vscode-textfield id="conn" spellcheck="false"
-           placeholder="postgres://user:password@localhost:5432/dbname"></vscode-textfield>
-    <vscode-button id="connect">connect</vscode-button>
-  </div>
-  <div id="toolbar">
-    <vscode-textfield id="search" placeholder="search nodes…"></vscode-textfield>
-    <vscode-single-select id="layout" title="layout">
-      <vscode-option value="grid" selected>grid</vscode-option>
-      <vscode-option value="breadthfirst">tree</vscode-option>
-    </vscode-single-select>
-    <vscode-checkbox id="flt-schemagroup" checked>schemas</vscode-checkbox>
-    <label class="select-label" title="cards: one rolled-up edge per pair of tables/functions; all: every per-column edge; off: click a node to reveal">edges
-      <vscode-single-select id="edge-mode">
-        <vscode-option value="off" selected>off</vscode-option>
-        <vscode-option value="cards">cards</vscode-option>
-        <vscode-option value="all">all</vscode-option>
-      </vscode-single-select>
-    </label>
-    <vscode-checkbox id="flt-route" title="experimental: re-route blocked edges around cards via the outer corridor">avoid boxes</vscode-checkbox>
-    <vscode-checkbox id="flt-isolated">hide isolated</vscode-checkbox>
-    <vscode-button id="relayout" secondary>layout</vscode-button>
-    <vscode-button id="fit" secondary>fit</vscode-button>
-    <vscode-button id="refresh" secondary>refresh</vscode-button>
-    <span id="stats"></span>
-  </div>
   <div id="content">
     <div id="cy"></div>
     <div id="crumb" class="hidden"></div>
     <div id="legend"></div>
+    <div id="stats"></div>
     <aside id="panel" class="hidden">
       <div id="panel-resize" title="drag to resize"></div>
       <div id="panel-body"></div>
     </aside>
-    <div id="empty">Connecting to the database…</div>
+    <div id="empty">No connection — use the Postgres Viz status bar item or the sidebar to connect.</div>
   </div>
   <script src="${scriptUri}"></script>
 </body>

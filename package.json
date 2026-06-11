@@ -47,8 +47,90 @@
           "when": "view == postgresVizExplorer",
           "group": "navigation"
         }
+      ],
+      "editor/title": [
+        {
+          "command": "postgresViz.searchGraph",
+          "when": "activeWebviewPanelId == 'postgresViz'",
+          "group": "navigation@1"
+        },
+        {
+          "command": "postgresViz.chooseEdgeMode",
+          "when": "activeWebviewPanelId == 'postgresViz'",
+          "group": "navigation@2"
+        },
+        {
+          "command": "postgresViz.viewOptions",
+          "when": "activeWebviewPanelId == 'postgresViz'",
+          "group": "navigation@3"
+        },
+        {
+          "command": "postgresViz.chooseLayout",
+          "when": "activeWebviewPanelId == 'postgresViz'",
+          "group": "navigation@4"
+        },
+        {
+          "command": "postgresViz.fit",
+          "when": "activeWebviewPanelId == 'postgresViz'",
+          "group": "navigation@5"
+        },
+        {
+          "command": "postgresViz.relayout",
+          "when": "activeWebviewPanelId == 'postgresViz'",
+          "group": "navigation@6"
+        },
+        {
+          "command": "postgresViz.refreshGraph",
+          "when": "activeWebviewPanelId == 'postgresViz'",
+          "group": "navigation@7"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "postgresViz.treeFocus",
+          "when": "view == postgresVizExplorer && viewItem =~ /^(table|view|matview|foreign|function|column|trigger|constraint|index|schema)$/",
+          "group": "inline"
+        },
+        {
+          "command": "postgresViz.treeFocus",
+          "when": "view == postgresVizExplorer && viewItem =~ /^(table|view|matview|foreign|function|column|trigger|constraint|index|schema)$/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "postgresViz.treeCallTree",
+          "when": "view == postgresVizExplorer && viewItem =~ /^(function|trigger)$/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "postgresViz.treeGoToDef",
+          "when": "view == postgresVizExplorer && viewItem =~ /^(table|view|matview|foreign|function|column|trigger|constraint|index)$/",
+          "group": "navigation@3"
+        },
+        {
+          "command": "postgresViz.treeOpenDdl",
+          "when": "view == postgresVizExplorer && viewItem =~ /^(table|view|matview|foreign|function|column|trigger|constraint|index)$/",
+          "group": "navigation@4"
+        }
       ]
     },
+    "keybindings": [
+      {
+        "command": "postgresViz.searchGraph",
+        "key": "ctrl+f",
+        "mac": "cmd+f",
+        "when": "activeWebviewPanelId == 'postgresViz'"
+      },
+      {
+        "command": "postgresViz.fit",
+        "key": "alt+f",
+        "when": "activeWebviewPanelId == 'postgresViz'"
+      },
+      {
+        "command": "postgresViz.relayout",
+        "key": "alt+l",
+        "when": "activeWebviewPanelId == 'postgresViz'"
+      }
+    ],
     "commands": [
       {
         "command": "postgresViz.visualize",
@@ -63,6 +145,66 @@
       {
         "command": "postgresViz.showLogs",
         "title": "Postgres Viz: Show Logs"
+      },
+      {
+        "command": "postgresViz.connectionMenu",
+        "title": "Postgres Viz: Connection Actions",
+        "icon": "$(database)"
+      },
+      {
+        "command": "postgresViz.searchGraph",
+        "title": "Postgres Viz: Search Graph",
+        "icon": "$(search)"
+      },
+      {
+        "command": "postgresViz.chooseEdgeMode",
+        "title": "Postgres Viz: Edge Mode",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "postgresViz.viewOptions",
+        "title": "Postgres Viz: View Options",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "postgresViz.chooseLayout",
+        "title": "Postgres Viz: Choose Layout",
+        "icon": "$(layout)"
+      },
+      {
+        "command": "postgresViz.fit",
+        "title": "Postgres Viz: Fit Graph",
+        "icon": "$(screen-full)"
+      },
+      {
+        "command": "postgresViz.relayout",
+        "title": "Postgres Viz: Re-run Layout",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "postgresViz.refreshGraph",
+        "title": "Postgres Viz: Refresh From Database",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "postgresViz.treeFocus",
+        "title": "Focus",
+        "icon": "$(target)"
+      },
+      {
+        "command": "postgresViz.treeCallTree",
+        "title": "Call Tree",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "postgresViz.treeGoToDef",
+        "title": "Go to Definition",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "postgresViz.treeOpenDdl",
+        "title": "Open DDL",
+        "icon": "$(file-code)"
       }
     ],
     "configuration": {
