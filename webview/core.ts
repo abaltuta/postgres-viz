@@ -8,12 +8,123 @@
  */
 import type { CollectionReturnValue, Core, NodeSingular } from "cytoscape";
 
+// ── class-group ownership ──
+// Every cytoscape class belongs to exactly ONE group; a function may only
+// write classes of the group it owns. This is the structural fix for the
+// "state gets messed up on view swap" family of bugs.
+
+/** whether an element renders at all (read via isShownByClasses) */
 export const HIDE_CLASSES = [
-  "hidden-el",
-  "isolated-hidden",
-  "focus-hidden",
-  "untouched-hidden",
+  "hidden-el", // owned by filters / schema grouping
+  "isolated-hidden", // owned by the "hide isolated" filter
+  "focus-hidden", // owned by views
+  "untouched-hidden", // owned by views
 ] as const;
+
+/** visual weight of an already-visible element — owned by views/selection */
+export const HIGHLIGHT_CLASSES = [
+  "dimmed",
+  "revealed",
+  "hot",
+  "agg-suppressed",
+  "hover-reveal",
+  "matched",
+] as const;
+
+/** rendering form — owned by materialization (virtual-card) and edge config */
+export const STRUCTURE_CLASSES = ["virtual-card", "edge-off", "ortho"] as const;
+
+/** everything a view may have touched — stripped when (re)entering base state */
+export const VIEW_OWNED_CLASSES = ["focus-hidden", "untouched-hidden", ...HIGHLIGHT_CLASSES];
+
+/** Return ALL elements to the canonical base: no view masks, no highlights.
+ *  Filter classes (hidden-el, isolated-hidden) and structure classes are
+ *  owned elsewhere and deliberately survive. */
+export function resetViewState(cy: Core): void {
+  cy.batch(() => {
+    cy.elements().removeClass(VIEW_OWNED_CLASSES.join(" "));
+  });
+}
+
+// ── position snapshot/restore across views ──
+
+export type PositionSnapshot = Map<string, { x: number; y: number }>;
+
+/** Snapshot every node — compound parents store their DERIVED center, so a
+ *  card that was materialized before a view isn't lost (the drift bug:
+ *  skipping parents stranded them at the view layout's position forever). */
+export function snapshotPositions(cy: Core): PositionSnapshot {
+  const saved: PositionSnapshot = new Map();
+  cy.nodes().forEach((n) => {
+    if (n.isParent()) {
+      // midpoint of child positions, not boundingBox — deterministic in
+      // headless tests and unaffected by label/style sizing
+      let x1 = Infinity;
+      let y1 = Infinity;
+      let x2 = -Infinity;
+      let y2 = -Infinity;
+      n.children().forEach((k) => {
+        const p = k.position();
+        x1 = Math.min(x1, p.x);
+        y1 = Math.min(y1, p.y);
+        x2 = Math.max(x2, p.x);
+        y2 = Math.max(y2, p.y);
+      });
+      saved.set(n.id(), { x: (x1 + x2) / 2, y: (y1 + y2) / 2 });
+    } else {
+      saved.set(n.id(), { ...n.position() });
+    }
+  });
+  return saved;
+}
+
+/** Restore by id. Only childless elements accept a position (compound
+ *  positions are derived) — call AFTER dematerializing, when former parents
+ *  are plain nodes again. Ids that no longer exist are skipped. */
+export function restorePositions(cy: Core, saved: PositionSnapshot): void {
+  cy.batch(() => {
+    saved.forEach((pos, id) => {
+      const n = cy.getElementById(id);
+      if (n.nonempty() && n.isNode() && !n.isParent()) n.position(pos);
+    });
+  });
+}
+
+// ── focus/call-tree keep mask ──
+
+/** Every card/standalone unit (children of schemas or roots), never rows. */
+export function allCardUnits(cy: Core): NodeSingular[] {
+  const out: NodeSingular[] = [];
+  cy.nodes().forEach((n) => {
+    if (n.data("type") === "schema") return;
+    const p = n.parent().first();
+    if (p.empty() || p.data("type") === "schema") out.push(n as NodeSingular);
+  });
+  return out;
+}
+
+/** Hide every unit outside `keep` (with its rows), then schema compounds left
+ *  with no visible child. Writes ONLY focus-hidden. */
+export function applyKeepMask(cy: Core, keep: ReadonlySet<string>): void {
+  cy.batch(() => {
+    for (const u of allCardUnits(cy)) {
+      if (!keep.has(u.id())) u.union(u.descendants()).addClass("focus-hidden");
+    }
+    cy.nodes('[type="schema"]').forEach((s) => {
+      let anyVisible = false;
+      s.children().forEach((d) => {
+        if (
+          !d.hasClass("focus-hidden") &&
+          !d.hasClass("hidden-el") &&
+          !d.hasClass("isolated-hidden")
+        ) {
+          anyVisible = true;
+        }
+      });
+      if (!anyVisible) s.addClass("focus-hidden");
+    });
+  });
+}
 
 /** Visibility from classes on self + ancestors (see module doc). */
 export function isShownByClasses(n: NodeSingular): boolean {

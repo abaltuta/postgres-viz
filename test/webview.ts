@@ -14,9 +14,14 @@
 import assert from "node:assert/strict";
 import cytoscape, { Core, NodeSingular } from "cytoscape";
 import {
+  allCardUnits,
+  applyKeepMask,
   callTreeClosure,
   fitTarget,
   isShownByClasses,
+  resetViewState,
+  restorePositions,
+  snapshotPositions,
   suppressRedundantAggs,
   unitOf,
 } from "../webview/core";
@@ -149,4 +154,96 @@ function build(): Core {
   );
 }
 
-console.log("webview OK — call-tree closure, stale-row re-resolution, fit, panel agg dedupe");
+// ── 5. view-state class ownership: reset strips ONLY view-owned classes ──
+{
+  const cy = build();
+  const n = cy.getElementById("orders");
+  n.addClass("focus-hidden untouched-hidden dimmed revealed hot hover-reveal matched");
+  n.addClass("hidden-el isolated-hidden virtual-card"); // filter/structure-owned
+  const e = cy.getElementById("e2");
+  e.addClass("revealed agg-suppressed edge-off ortho");
+  resetViewState(cy);
+  for (const owned of ["focus-hidden", "untouched-hidden", "dimmed", "revealed", "hot"]) {
+    assert.ok(!n.hasClass(owned), `view-owned class ${owned} stripped`);
+  }
+  assert.ok(!n.hasClass("hover-reveal") && !n.hasClass("matched"), "highlight layer stripped");
+  assert.ok(!e.hasClass("revealed") && !e.hasClass("agg-suppressed"), "edge highlights stripped");
+  for (const kept of ["hidden-el", "isolated-hidden", "virtual-card"]) {
+    assert.ok(n.hasClass(kept), `filter/structure class ${kept} survives a view reset`);
+  }
+  assert.ok(e.hasClass("edge-off") && e.hasClass("ortho"), "edge structure classes survive");
+}
+
+// ── 6. position snapshot/restore survives the dematerialize round-trip ──
+// (the drift bug: parents weren't saved, so cards materialized BEFORE a view
+// were stranded at the view layout's position on exit)
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "card" } },
+        { data: { id: "r1", parent: "card" } },
+        { data: { id: "r2", parent: "card" } },
+        { data: { id: "fn" } },
+      ],
+      edges: [],
+    },
+  });
+  // def-level positions are ignored in the {nodes, edges} init form — set them
+  cy.getElementById("r1").position({ x: 90, y: 190 });
+  cy.getElementById("r2").position({ x: 110, y: 210 });
+  cy.getElementById("fn").position({ x: 500, y: 500 });
+  const saved = snapshotPositions(cy);
+  assert.ok(saved.has("card"), "compound parents ARE snapshotted (their derived center)");
+  const center = saved.get("card")!;
+  assert.ok(Math.abs(center.x - 100) < 1 && Math.abs(center.y - 200) < 1, "center of children");
+  // a view now moves everything, then dematerializes the card's rows
+  cy.getElementById("fn").position({ x: -50, y: -60 });
+  cy.nodes("[parent]").forEach((r) => {
+    r.position({ x: 999, y: 999 });
+  });
+  cy.remove(cy.getElementById("card").children()); // demat: card becomes childless
+  cy.getElementById("card").position({ x: 777, y: 777 }); // stranded at view position
+  restorePositions(cy, saved);
+  const c = cy.getElementById("card").position();
+  assert.ok(Math.abs(c.x - 100) < 1 && Math.abs(c.y - 200) < 1, "card restored to base center");
+  const f = cy.getElementById("fn").position();
+  assert.equal(`${f.x},${f.y}`, "500,500", "standalone node restored");
+}
+
+// ── 7. keep-mask: non-keep units hidden with descendants, empty schemas hidden ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "s1", type: "schema" } },
+        { data: { id: "a", type: "table", parent: "s1" } },
+        { data: { id: "a_col", type: "column", parent: "a" } },
+        { data: { id: "b", type: "table", parent: "s1" } },
+        { data: { id: "s2", type: "schema" } },
+        { data: { id: "c", type: "table", parent: "s2" } },
+        { data: { id: "f1", type: "function" } },
+      ],
+      edges: [],
+    },
+  });
+  const units = allCardUnits(cy).map((u) => u.id());
+  assert.deepEqual(units.sort(), ["a", "b", "c", "f1"], "units = cards + standalones, no rows");
+  applyKeepMask(cy, new Set(["a", "f1"]));
+  assert.ok(!cy.getElementById("a").hasClass("focus-hidden"), "kept card visible");
+  assert.ok(!cy.getElementById("a_col").hasClass("focus-hidden"), "kept card's rows visible");
+  assert.ok(cy.getElementById("b").hasClass("focus-hidden"), "non-keep card hidden");
+  assert.ok(cy.getElementById("c").hasClass("focus-hidden"), "non-keep card in s2 hidden");
+  assert.ok(
+    cy.getElementById("s2").hasClass("focus-hidden"),
+    "schema with no visible child hidden",
+  );
+  assert.ok(!cy.getElementById("s1").hasClass("focus-hidden"), "schema with a kept child stays");
+  assert.ok(!cy.getElementById("f1").hasClass("focus-hidden"), "kept standalone stays");
+}
+
+console.log(
+  "webview OK — closure, stale-row, fit, agg dedupe, class ownership, positions, keep-mask",
+);
