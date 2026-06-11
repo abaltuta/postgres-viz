@@ -2,10 +2,16 @@ import "@vscode-elements/elements/dist/bundled.js";
 import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import type { GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
 import {
+  allCardUnits as coreCardUnits,
+  applyKeepMask,
   callTreeClosure,
   DATA_KINDS,
   fitTarget,
   isShownByClasses,
+  type PositionSnapshot,
+  resetViewState,
+  restorePositions,
+  snapshotPositions,
   suppressRedundantAggs,
   unitOf,
 } from "./core";
@@ -459,7 +465,13 @@ function render(graph: GraphPayload): void {
   cy.nodes().forEach((n) => {
     if (rowsByCard.has(n.id())) n.addClass("virtual-card");
   });
-  viewState = null;
+  // a graph push while a view was active must clear EVERYTHING the view
+  // owned: the spec, the canvas tint, the pending zoom nudge, the panel
+  view = null;
+  window.clearTimeout(zoomNudge);
+  hoverUnit = null;
+  el("content").classList.remove("view-focus", "view-calltree");
+  el("panel").classList.add("hidden");
   lastStats = graph.stats;
   applySchemaGrouping(false);
   applyFilters();
@@ -468,7 +480,7 @@ function render(graph: GraphPayload): void {
   cy.on("tap", "node", (ev) => {
     const n = ev.target as NodeSingular;
     const unit = unitOf(n);
-    if (rowsByCard.has(unit.id()) && !materialized.has(unit.id()) && !viewState) {
+    if (rowsByCard.has(unit.id()) && !materialized.has(unit.id()) && !view) {
       materializeNeighborhood(unit.id());
       applyFilters();
     }
@@ -484,7 +496,7 @@ function render(graph: GraphPayload): void {
 function applyFilters(): void {
   if (!cy) return;
   const g = cy;
-  if (edgeMode() === "all" && materialized.size < rowsByCard.size && !viewState) {
+  if (edgeMode() === "all" && materialized.size < rowsByCard.size && !view) {
     materializeAll();
   }
   g.batch(() => {
@@ -610,21 +622,9 @@ function fitView(eles?: cytoscape.CollectionArgument, padding = 50): void {
 // visibility/unit helpers live in core.ts so headless tests can cover them
 const isShown = isShownByClasses;
 
-/** Every card/standalone unit, regardless of current visibility. */
-function allCardUnits(): NodeSingular[] {
-  const out: NodeSingular[] = [];
-  cy!.nodes().forEach((n) => {
-    if (n.data("type") === "schema") return;
-    if (ROW_TYPES.has(String(n.data("type")))) return;
-    const p = n.parent().first();
-    if (p.empty() || p.data("type") === "schema") out.push(n as NodeSingular);
-  });
-  return out;
-}
-
 /** Layout units: the currently shown cards and standalone nodes. */
 function cardUnits(): NodeSingular[] {
-  return allCardUnits().filter((n) => isShown(n));
+  return coreCardUnits(cy!).filter((n) => isShown(n));
 }
 
 function shiftUnit(u: NodeSingular, dx: number, dy: number): void {
@@ -964,6 +964,16 @@ function runLayout(): void {
 
 function selectNode(node: NodeSingular): void {
   if (!cy) return;
+  // the call tree OWNS its revealed/agg-suppressed coating — selection only
+  // drives the hot layer and the panel there (one stray tap used to wipe
+  // every visible edge of the chain)
+  if (view?.mode === "calltree") {
+    cy.edges().removeClass("hot");
+    const unit = unitOf(node);
+    unit.union(unit.descendants()).connectedEdges(".revealed").addClass("hot");
+    renderPanel(node);
+    return;
+  }
   cy.edges().removeClass("hot revealed agg-suppressed");
   const core = node.union(node.descendants());
   const detailEdges = core.connectedEdges("[?detail]");
@@ -993,10 +1003,23 @@ function selectNode(node: NodeSingular): void {
 
 function clearSelection(): void {
   if (!cy) return;
+  if (view?.mode === "calltree") {
+    cy.edges().removeClass("hot");
+    el("panel").classList.add("hidden");
+    return;
+  }
+  if (view?.mode === "focus") {
+    // background tap re-selects the origin instead of blanking the view
+    const root = cy.getElementById(view.rootId);
+    if (root.nonempty()) {
+      selectNode(root as unknown as NodeSingular);
+      return;
+    }
+  }
   cy.elements().removeClass("dimmed");
   cy.edges().removeClass("hot revealed agg-suppressed");
   el("panel").classList.add("hidden");
-  if (!viewState && edgeMode() !== "all") {
+  if (!view && edgeMode() !== "all") {
     dematerializeAll();
     restackRows();
   }
@@ -1004,30 +1027,75 @@ function clearSelection(): void {
 }
 
 // ── focus mode & call tree ──
+//
+// Views are DECLARATIVE: a ViewSpec describes the whole view, and entering
+// one always goes base → spec (leaveToBase first), never diffing one view
+// against another. That, plus class-group ownership in core.ts, is the fix
+// for the "swapping focus corrupts state" family of bugs.
 
-interface ViewState {
-  saved: Map<string, { x: number; y: number }>;
+/** Declarative description of the active isolated view. */
+interface ViewSpec {
   mode: "focus" | "calltree";
   /** the node the view was opened from — its panel button renders pressed */
   rootId: string;
-  /** row ids the call chain actually touches (others hideable) */
+  keep: Set<string>;
+  crumb: string;
+  /** base-state positions, snapshotted BEFORE the view mutated anything */
+  saved: PositionSnapshot;
+  /** call tree only */
+  fns?: Set<string>;
+  levels?: number;
   touchedRows?: Set<string>;
+  onlyTouched?: boolean;
 }
-let viewState: ViewState | null = null;
+let view: ViewSpec | null = null;
+/** the one pending readable-zoom nudge — re-entering a view cancels it */
+let zoomNudge: number | undefined;
 
-function showCrumb(text: string, extraHtml = ""): void {
+/** Crumb bar rendered FROM the spec; listeners dispatch by rootId, never
+ *  through captured elements (stale after dematerialize/materialize). */
+function renderCrumb(): void {
   const crumb = el("crumb");
+  if (!view) {
+    crumb.classList.add("hidden");
+    return;
+  }
   crumb.classList.remove("hidden");
-  crumb.innerHTML = `<span>${esc(text)}</span>${extraHtml}<button id="crumb-back">back</button>`;
+  const stepper =
+    view.mode === "calltree"
+      ? `<span class="crumb-opt">levels
+           <button class="lvl-btn" id="crumb-lvl-dn" title="fewer levels">−</button>
+           <span class="lvl-val">${view.levels ?? 2}</span>
+           <button class="lvl-btn" id="crumb-lvl-up" title="more levels">+</button>
+         </span>
+         <label class="crumb-opt"><input type="checkbox" id="crumb-cols" ${
+           view.onlyTouched !== false ? "checked" : ""
+         } />touched columns only</label>`
+      : "";
+  crumb.innerHTML = `<span>${esc(view.crumb)}</span>${stepper}<button id="crumb-back">back</button>`;
   crumb.querySelector("#crumb-back")?.addEventListener("click", () => exitView(true));
+  crumb.querySelector("#crumb-lvl-dn")?.addEventListener("click", () => {
+    if (view && (view.levels ?? 2) > 1) showCallTreeById(view.rootId, (view.levels ?? 2) - 1);
+  });
+  crumb.querySelector("#crumb-lvl-up")?.addEventListener("click", () => {
+    if (view) showCallTreeById(view.rootId, (view.levels ?? 2) + 1);
+  });
+  crumb.querySelector("#crumb-cols")?.addEventListener("change", (ev) => {
+    if (view?.mode !== "calltree") return;
+    view.onlyTouched = (ev.target as HTMLInputElement).checked;
+    applyCallTreePresentation();
+  });
+}
+
+function hideCrumb(): void {
+  el("crumb").classList.add("hidden");
 }
 
 /** Call-tree neatness: hide rows the chain doesn't touch (crumb toggle). */
 function applyCallTreeColumnFilter(): void {
-  if (!cy || !viewState || viewState.mode !== "calltree") return;
-  const box = document.getElementById("crumb-cols") as HTMLInputElement | null;
-  const onlyTouched = box?.checked ?? true;
-  const touched = viewState.touchedRows ?? new Set<string>();
+  if (!cy || view?.mode !== "calltree") return;
+  const onlyTouched = view.onlyTouched !== false;
+  const touched = view.touchedRows ?? new Set<string>();
   cy.batch(() => {
     cy!.nodes(':parent[type != "schema"]').forEach((p) => {
       p.children().forEach((r) => {
@@ -1037,67 +1105,39 @@ function applyCallTreeColumnFilter(): void {
   });
 }
 
-function hideCrumb(): void {
-  el("crumb").classList.add("hidden");
-}
-
-function enterIsolatedView(
-  keepUnits: Set<string>,
-  crumb: string,
-  mode: "focus" | "calltree",
-  rootId: string,
-): void {
-  if (!cy) return;
-  exitView(false);
-  const saved = new Map<string, { x: number; y: number }>();
-  cy.nodes().forEach((n) => {
-    if (!n.isParent()) saved.set(n.id(), { ...n.position() });
-  });
-  cy.batch(() => {
-    cy!.elements().removeClass("dimmed");
-    cy!.edges().removeClass("revealed hot agg-suppressed");
-    // ALL units, not just the visible ones — the keep set was computed from the
-    // full graph, so the hide pass must cover the full graph too
-    for (const u of allCardUnits()) {
-      if (!keepUnits.has(u.id())) u.union(u.descendants()).addClass("focus-hidden");
-    }
-  });
-  // class checks, not :visible — style state is stale inside the batch above
-  cy.nodes('[type="schema"]').forEach((s) => {
-    let anyVisible = false;
-    s.children().forEach((d) => {
-      if (
-        !d.hasClass("focus-hidden") &&
-        !d.hasClass("hidden-el") &&
-        !d.hasClass("isolated-hidden")
-      ) {
-        anyVisible = true;
-      }
-    });
-    if (!anyVisible) s.addClass("focus-hidden");
-  });
-  viewState = { saved, mode, rootId };
-  el("content").classList.add(`view-${mode}`);
-  showCrumb(crumb);
+/** Return to the canonical base state (no refit) — safe from any state. */
+function leaveToBase(): void {
+  if (!cy || !view) return;
+  const { saved } = view;
+  view = null;
+  window.clearTimeout(zoomNudge);
+  el("content").classList.remove("view-focus", "view-calltree");
+  dematerializeAll();
+  resetViewState(cy);
+  restorePositions(cy, saved);
+  hideCrumb();
+  // re-establish what the view bypassed: edge-mode "all" re-materializes,
+  // the isolated mask recomputes, stale view-anchored routing is replaced
+  applyFilters();
+  routeEdgesAroundCards();
 }
 
 function exitView(refit: boolean): void {
-  if (!cy || !viewState) return;
-  const { saved } = viewState;
-  viewState = null;
-  el("content").classList.remove("view-focus", "view-calltree");
-  dematerializeAll();
-  cy.batch(() => {
-    cy!.elements().removeClass("focus-hidden dimmed untouched-hidden");
-    cy!.edges().removeClass("revealed hot agg-suppressed");
-    saved.forEach((pos, id) => {
-      const n = cy!.getElementById(id);
-      if (n.nonempty() && !n.isParent()) n.position(pos);
-    });
-  });
-  hideCrumb();
-  restackRows();
+  if (!view) return;
+  leaveToBase();
   if (refit) fitView();
+}
+
+/** Enter (or switch to) an isolated view: always base → spec. */
+function enterView(spec: Omit<ViewSpec, "saved">): void {
+  if (!cy) return;
+  leaveToBase(); // no-op when already in base
+  const saved = snapshotPositions(cy); // TRUE base positions, pre-mutation
+  view = { ...spec, saved };
+  resetViewState(cy); // strip selection highlights left in base
+  applyKeepMask(cy, view.keep);
+  el("content").classList.add(`view-${view.mode}`);
+  renderCrumb();
 }
 
 /** 1-hop card neighborhood, isolated, re-laid-out, with the origin selected. */
@@ -1111,7 +1151,7 @@ function focusNode(node: NodeSingular): void {
     if (e.target().id() === unit.id()) keep.add(e.source().id());
   });
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
-  enterIsolatedView(keep, `Focused: ${label} · 1 hop`, "focus", node.id());
+  enterView({ mode: "focus", rootId: node.id(), keep, crumb: `Focused: ${label} · 1 hop` });
   materializeCard(unit.id());
   applyFilters();
   // the focused ITEM is the star: when it's a row, collapse its (possibly
@@ -1133,32 +1173,21 @@ function focusNode(node: NodeSingular): void {
     });
   }
   runLayout();
-  // exitView (inside enterIsolatedView) dematerializes rows: the clicked row
-  // node may have been REMOVED and re-added — a stale reference has no edges,
-  // so the panel would render "no connections". Re-resolve by id.
+  // leaveToBase (inside enterView) dematerializes rows: the clicked row node
+  // may have been REMOVED and re-added — a stale reference has no edges, so
+  // the panel would render "no connections". Re-resolve by id.
   const live = cy.getElementById(node.id());
   selectNode((live.nonempty() ? live : unit) as unknown as NodeSingular);
 }
 
-/**
- * Call tree: from a trigger/function, follow executes/calls transitively, plus
- * the root's direct callers for context, plus every table the closure touches.
- */
-function showCallTree(node: NodeSingular, levels = 2): void {
-  if (!cy) return;
-  const { fns, keep } = callTreeClosure(cy, node, levels);
-  const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
-  enterIsolatedView(keep, `Call tree: ${label}`, "calltree", node.id());
-  showCrumb(
-    `Call tree: ${label}`,
-    `<span class="crumb-opt">levels
-       <button class="lvl-btn" id="crumb-lvl-dn" title="fewer levels">−</button>
-       <span class="lvl-val">${levels}</span>
-       <button class="lvl-btn" id="crumb-lvl-up" title="more levels">+</button>
-     </span>
-     <label class="crumb-opt"><input type="checkbox" id="crumb-cols" checked />touched columns only</label>`,
-  );
-
+/** Rebuild the call-tree presentation from the current spec — the crumb's
+ *  column toggle re-runs this; the depth stepper re-enters the whole view. */
+function applyCallTreePresentation(): void {
+  if (!cy || view?.mode !== "calltree") return;
+  const spec = view;
+  const keep = spec.keep;
+  const fns = spec.fns ?? new Set<string>();
+  const onlyTouched = spec.onlyTouched !== false;
   const onChain = (kind: string, srcUnit: string, tgtUnit: string, tgtId: string): boolean => {
     if (!keep.has(srcUnit) || !keep.has(tgtUnit)) return false;
     if (kind === "executes") return fns.has(tgtId) || fns.has(tgtUnit);
@@ -1167,97 +1196,108 @@ function showCallTree(node: NodeSingular, levels = 2): void {
     return false;
   };
 
-  /** (Re)build the whole presentation — also runs when the crumb toggles. */
-  const apply = (onlyTouched: boolean): void => {
-    if (!cy) return;
-    // make the chain's column detail available, then reveal ONLY the chain
-    for (const id of keep) materializeCard(id);
-    applyFilters();
-    cy.edges().removeClass("revealed agg-suppressed");
+  // make the chain's column detail available, then reveal ONLY the chain
+  for (const id of keep) materializeCard(id);
+  applyFilters();
+  cy.edges().removeClass("revealed agg-suppressed hot");
 
-    // which rows the chain touches — collected BEFORE any reveal classes
-    const touchedRows = new Set<string>();
-    cy.edges("[?detail]").forEach((e) => {
-      const su = unitOf(e.source() as NodeSingular).id();
-      const tu = unitOf(e.target() as NodeSingular).id();
-      if (!onChain(String(e.data("kind")), su, tu, e.target().id())) return;
-      for (const end of [e.source(), e.target()]) {
-        if (ROW_TYPES.has(String(end.data("type")))) touchedRows.add(end.id());
-      }
-    });
-
-    // tables the chain touches only at WHOLE-TABLE level (no column detail —
-    // think regex-fallback inserts/deletes) have zero touched rows; hiding
-    // all rows makes their compound render as NOTHING. Collapse them back to
-    // compact virtual cards instead — the agg pass below still draws their
-    // edges because no detail pair survives to suppress it.
-    if (onlyTouched) {
-      const touchedCards = new Set<string>();
-      for (const id of touchedRows) {
-        const c = cardOfNode.get(id);
-        if (c) touchedCards.add(c);
-      }
-      cy.batch(() => {
-        for (const id of keep) {
-          if (materialized.has(id) && !touchedCards.has(id)) dematerializeCard(id);
-        }
-      });
+  // which rows the chain touches — collected BEFORE any reveal classes
+  const touchedRows = new Set<string>();
+  cy.edges("[?detail]").forEach((e) => {
+    const su = unitOf(e.source() as NodeSingular).id();
+    const tu = unitOf(e.target() as NodeSingular).id();
+    if (!onChain(String(e.data("kind")), su, tu, e.target().id())) return;
+    for (const end of [e.source(), e.target()]) {
+      if (ROW_TYPES.has(String(end.data("type")))) touchedRows.add(end.id());
     }
+  });
 
-    const revealedPairs = new Set<string>();
-    cy.edges("[?detail]").forEach((e) => {
-      const su = unitOf(e.source() as NodeSingular).id();
-      const tu = unitOf(e.target() as NodeSingular).id();
-      const k = String(e.data("kind"));
-      if (!onChain(k, su, tu, e.target().id())) return;
-      e.addClass("revealed");
-      revealedPairs.add(`${k}|${su}|${tu}`);
+  // tables the chain touches only at WHOLE-TABLE level (no column detail —
+  // think regex-fallback inserts/deletes) have zero touched rows; hiding
+  // all rows makes their compound render as NOTHING. Collapse them back to
+  // compact virtual cards instead — the agg pass below still draws their
+  // edges because no detail pair survives to suppress it.
+  if (onlyTouched) {
+    const touchedCards = new Set<string>();
+    for (const id of touchedRows) {
+      const c = cardOfNode.get(id);
+      if (c) touchedCards.add(c);
+    }
+    cy.batch(() => {
+      for (const id of keep) {
+        if (materialized.has(id) && !touchedCards.has(id)) dematerializeCard(id);
+      }
     });
-    cy.edges("[!detail]").forEach((e) => {
-      const su = e.source().id();
-      const tu = e.target().id();
-      const k = String(e.data("kind"));
-      if (!onChain(k, su, tu, tu)) return;
-      if (e.data("agg") && revealedPairs.has(`${k}|${su}|${tu}`)) e.addClass("agg-suppressed");
-      else e.addClass("revealed");
-    });
+  }
 
-    if (viewState) viewState.touchedRows = touchedRows;
-    applyCallTreeColumnFilter();
-    restackRows();
-    layoutTreeCards(cardUnits());
-    routeEdgesAroundCards();
-    fitView();
-  };
+  const revealedPairs = new Set<string>();
+  cy.edges("[?detail]").forEach((e) => {
+    const su = unitOf(e.source() as NodeSingular).id();
+    const tu = unitOf(e.target() as NodeSingular).id();
+    const k = String(e.data("kind"));
+    if (!onChain(k, su, tu, e.target().id())) return;
+    e.addClass("revealed");
+    revealedPairs.add(`${k}|${su}|${tu}`);
+  });
+  cy.edges("[!detail]").forEach((e) => {
+    const su = e.source().id();
+    const tu = e.target().id();
+    const k = String(e.data("kind"));
+    if (!onChain(k, su, tu, tu)) return;
+    if (e.data("agg") && revealedPairs.has(`${k}|${su}|${tu}`)) e.addClass("agg-suppressed");
+    else e.addClass("revealed");
+  });
 
-  apply(true);
-  // same stale-reference hazard as focusNode: exitView (inside
-  // enterIsolatedView) may have removed and re-created the clicked row —
-  // re-resolve so selection/panel/zoom see the live node, not a detached one
+  spec.touchedRows = touchedRows;
+  applyCallTreeColumnFilter();
+  restackRows();
+  layoutTreeCards(cardUnits());
+  routeEdgesAroundCards();
+  fitView();
+}
+
+/** Crumb stepper entry point — resolves the live root by id. */
+function showCallTreeById(id: string, levels: number): void {
+  const n = cy?.getElementById(id);
+  if (n && n.nonempty()) showCallTree(n as unknown as NodeSingular, levels);
+}
+
+/**
+ * Call tree: from a trigger/function, follow executes/calls up to `levels`
+ * deep, plus the root's direct callers for context, plus every table the
+ * closure touches.
+ */
+function showCallTree(node: NodeSingular, levels = 2): void {
+  if (!cy) return;
+  const { fns, keep } = callTreeClosure(cy, node, levels);
+  const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
+  // re-entering the same root (depth stepper) keeps the column-filter choice
+  const onlyTouched =
+    view?.mode === "calltree" && view.rootId === node.id() ? view.onlyTouched !== false : true;
+  enterView({
+    mode: "calltree",
+    rootId: node.id(),
+    keep,
+    fns,
+    levels,
+    onlyTouched,
+    crumb: `Call tree: ${label}`,
+  });
+  applyCallTreePresentation();
+  // leaveToBase (inside enterView) may have removed and re-created the
+  // clicked row — re-resolve so panel/zoom see the live node
   const live = cy.getElementById(node.id());
   if (live.nonempty()) node = live as unknown as NodeSingular;
 
-  el("crumb")
-    .querySelector("#crumb-cols")
-    ?.addEventListener("change", () => {
-      const box = document.getElementById("crumb-cols") as HTMLInputElement | null;
-      apply(box?.checked ?? true);
-    });
-  // depth stepper: a different level means a different closure — full re-run
-  el("crumb")
-    .querySelector("#crumb-lvl-dn")
-    ?.addEventListener("click", () => {
-      if (levels > 1) showCallTree(node, levels - 1);
-    });
-  el("crumb")
-    .querySelector("#crumb-lvl-up")
-    ?.addEventListener("click", () => {
-      showCallTree(node, levels + 1);
-    });
-  // wide trees fit to specks — guarantee a readable zoom centered on the root
-  window.setTimeout(() => {
-    if (cy && viewState && cy.zoom() < 0.3) {
-      cy.animate({ zoom: 0.5, center: { eles: node }, duration: 200 } as never);
+  // wide trees fit to specks — one readable-zoom nudge; entering any other
+  // view first cancels it (stored handle + rootId guard)
+  window.clearTimeout(zoomNudge);
+  const rootId = node.id();
+  zoomNudge = window.setTimeout(() => {
+    if (!cy || view?.rootId !== rootId || cy.zoom() >= 0.3) return;
+    const root = cy.getElementById(rootId);
+    if (root.nonempty()) {
+      cy.animate({ zoom: 0.5, center: { eles: root }, duration: 200 } as never);
     }
   }, 300);
   renderPanel(node);
@@ -1404,8 +1444,8 @@ function renderPanel(node: NodeSingular): void {
     ${d.detail ? `<p class="detail">${esc(d.detail)}</p>` : ""}
     <div class="actions">
       ${d.type === "schema" ? "" : '<button id="def-btn" title="jump to the .hcl definition (DDL when none exists)">Go to definition</button><button id="ddl-btn">Open DDL</button>'}
-      <button id="focus-btn" class="${viewState?.mode === "focus" && viewState.rootId === node.id() ? "active-focus" : ""}">Focus</button>
-      ${canCallTree ? `<button id="calltree-btn" class="${viewState?.mode === "calltree" && viewState.rootId === node.id() ? "active-calltree" : ""}">Call tree</button>` : ""}
+      <button id="focus-btn" class="${view?.mode === "focus" && view.rootId === node.id() ? "active-focus" : ""}">Focus</button>
+      ${canCallTree ? `<button id="calltree-btn" class="${view?.mode === "calltree" && view.rootId === node.id() ? "active-calltree" : ""}">Call tree</button>` : ""}
     </div>
     ${outRows.length > 0 ? `<details open><summary>Uses (${outRows.length})</summary><ul class="edge-list">${outRows.join("")}</ul></details>` : ""}
     ${inRows.length > 0 ? `<details open><summary>Used by (${inRows.length})</summary><ul class="edge-list">${inRows.join("")}</ul></details>` : ""}
@@ -1433,27 +1473,44 @@ function renderPanel(node: NodeSingular): void {
       label: `${d.schema ?? ""}.${d.label}`,
     });
   });
+  // exiting/entering a view removes and re-adds row nodes — every handler
+  // must re-resolve by id, never act on the node captured at render time
+  const liveNode = (id: string): NodeSingular | null => {
+    const direct = cy?.getElementById(id);
+    if (direct && direct.nonempty()) return direct as unknown as NodeSingular;
+    const card = cardOfNode.get(id);
+    const fallback = card ? cy?.getElementById(card) : undefined;
+    return fallback && fallback.nonempty() ? (fallback as unknown as NodeSingular) : null;
+  };
   // toggles: pressing the active view's button on its origin node exits it
   panel.querySelector("#focus-btn")?.addEventListener("click", () => {
-    if (viewState?.mode === "focus" && viewState.rootId === node.id()) {
+    const id = node.id();
+    if (view?.mode === "focus" && view.rootId === id) {
       exitView(true);
-      selectNode(node);
+      const live = liveNode(id);
+      if (live) selectNode(live);
     } else {
-      focusNode(node);
+      const live = liveNode(id);
+      if (live) focusNode(live);
     }
   });
   panel.querySelector("#calltree-btn")?.addEventListener("click", () => {
-    if (viewState?.mode === "calltree" && viewState.rootId === node.id()) {
+    const id = node.id();
+    if (view?.mode === "calltree" && view.rootId === id) {
       exitView(true);
-      selectNode(node);
+      const live = liveNode(id);
+      if (live) selectNode(live);
     } else {
-      showCallTree(node);
+      const live = liveNode(id);
+      if (live) showCallTree(live);
     }
   });
   panel.querySelectorAll<HTMLElement>("li[data-node]").forEach((li) => {
     li.addEventListener("click", () => {
       const other = cy?.getElementById(li.dataset.node!);
-      if (other && other.nonempty()) {
+      // never navigate to a node the current view hides — the camera would
+      // fly to its off-view saved position and show blank space
+      if (other && other.nonempty() && isShown(other as unknown as NodeSingular)) {
         selectNode(other as unknown as NodeSingular);
         cy?.animate({ center: { eles: other }, duration: 200 } as never);
       }
@@ -1471,10 +1528,10 @@ function focusSchema(s: NodeSingular): void {
   if (!cy) return;
   const name = String(s.data("label"));
   const keep = new Set<string>();
-  for (const u of allCardUnits()) {
+  for (const u of coreCardUnits(cy)) {
     if (String(u.data("schema") ?? "") === name) keep.add(u.id());
   }
-  enterIsolatedView(keep, `Schema: ${name}`, "focus", s.id());
+  enterView({ mode: "focus", rootId: s.id(), keep, crumb: `Schema: ${name}` });
   applyFilters();
   runLayout();
 }
@@ -1596,7 +1653,7 @@ el("search").addEventListener("input", () => {
 
 el("flt-isolated").addEventListener("change", applyFilters);
 el("edge-mode").addEventListener("change", () => {
-  if (edgeMode() !== "all" && !viewState) dematerializeAll();
+  if (edgeMode() !== "all" && !view) dematerializeAll();
   applyFilters();
   routeEdgesAroundCards();
 });
