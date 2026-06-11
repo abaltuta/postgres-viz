@@ -256,6 +256,23 @@ body {
   font-size: 12px;
 }
 
+/* unmistakable mode indicator: tinted canvas frame + matching crumb accent */
+#content.view-focus #cy {
+  box-shadow: inset 0 0 0 3px #4c9aff88;
+}
+
+#content.view-calltree #cy {
+  box-shadow: inset 0 0 0 3px #ffab0088;
+}
+
+#content.view-focus #crumb {
+  border-color: #4c9aff;
+}
+
+#content.view-calltree #crumb {
+  border-color: #ffab00;
+}
+
 #crumb.hidden {
   display: none;
 }

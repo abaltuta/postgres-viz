@@ -596,16 +596,38 @@ function fitView(eles?: cytoscape.CollectionArgument, padding = 50): void {
   } as never);
 }
 
-/** Layout units: whole cards and standalone nodes. */
-function cardUnits(): NodeSingular[] {
+/**
+ * Visibility derived from classes (self + ancestors), never from `:visible` —
+ * computed style is stale right after batched class changes, which made
+ * stacked views (Focus → Call tree) inherit leftovers of the previous view.
+ */
+function isShown(n: NodeSingular): boolean {
+  let e: NodeSingular = n;
+  for (;;) {
+    if (e.hasClass("hidden-el") || e.hasClass("isolated-hidden") || e.hasClass("focus-hidden")) {
+      return false;
+    }
+    const p = e.parent().first();
+    if (p.empty()) return true;
+    e = p as NodeSingular;
+  }
+}
+
+/** Every card/standalone unit, regardless of current visibility. */
+function allCardUnits(): NodeSingular[] {
   const out: NodeSingular[] = [];
-  cy!.nodes(":visible").forEach((n) => {
+  cy!.nodes().forEach((n) => {
     if (n.data("type") === "schema") return;
     if (ROW_TYPES.has(String(n.data("type")))) return;
     const p = n.parent().first();
     if (p.empty() || p.data("type") === "schema") out.push(n as NodeSingular);
   });
   return out;
+}
+
+/** Layout units: the currently shown cards and standalone nodes. */
+function cardUnits(): NodeSingular[] {
+  return allCardUnits().filter((n) => isShown(n));
 }
 
 /** The card a node belongs to (columns/triggers/constraints → their table). */
@@ -969,6 +991,7 @@ function clearSelection(): void {
 
 interface ViewState {
   saved: Map<string, { x: number; y: number }>;
+  mode: "focus" | "calltree";
 }
 let viewState: ViewState | null = null;
 
@@ -983,7 +1006,11 @@ function hideCrumb(): void {
   el("crumb").classList.add("hidden");
 }
 
-function enterIsolatedView(keepUnits: Set<string>, crumb: string): void {
+function enterIsolatedView(
+  keepUnits: Set<string>,
+  crumb: string,
+  mode: "focus" | "calltree",
+): void {
   if (!cy) return;
   exitView(false);
   const saved = new Map<string, { x: number; y: number }>();
@@ -993,7 +1020,9 @@ function enterIsolatedView(keepUnits: Set<string>, crumb: string): void {
   cy.batch(() => {
     cy!.elements().removeClass("dimmed");
     cy!.edges().removeClass("revealed hot agg-suppressed");
-    for (const u of cardUnits()) {
+    // ALL units, not just the visible ones — the keep set was computed from the
+    // full graph, so the hide pass must cover the full graph too
+    for (const u of allCardUnits()) {
       if (!keepUnits.has(u.id())) u.union(u.descendants()).addClass("focus-hidden");
     }
   });
@@ -1011,7 +1040,8 @@ function enterIsolatedView(keepUnits: Set<string>, crumb: string): void {
     });
     if (!anyVisible) s.addClass("focus-hidden");
   });
-  viewState = { saved };
+  viewState = { saved, mode };
+  el("content").classList.add(`view-${mode}`);
   showCrumb(crumb);
 }
 
@@ -1019,6 +1049,7 @@ function exitView(refit: boolean): void {
   if (!cy || !viewState) return;
   const { saved } = viewState;
   viewState = null;
+  el("content").classList.remove("view-focus", "view-calltree");
   dematerializeAll();
   cy.batch(() => {
     cy!.elements().removeClass("focus-hidden dimmed");
@@ -1044,7 +1075,7 @@ function focusNode(node: NodeSingular): void {
     if (e.target().id() === unit.id()) keep.add(e.source().id());
   });
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
-  enterIsolatedView(keep, `Focused: ${label} · 1 hop`);
+  enterIsolatedView(keep, `Focused: ${label} · 1 hop`, "focus");
   materializeCard(unit.id());
   applyFilters();
   runLayout();
@@ -1086,7 +1117,7 @@ function showCallTree(node: NodeSingular): void {
     if (roots.has(e.target().id())) keep.add(e.source().id());
   });
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
-  enterIsolatedView(keep, `Call tree: ${label}`);
+  enterIsolatedView(keep, `Call tree: ${label}`, "calltree");
 
   // make the chain's column detail available, then reveal ONLY the chain
   for (const id of keep) materializeCard(id);
