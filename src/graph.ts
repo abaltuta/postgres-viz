@@ -6,6 +6,7 @@ const colId = (relOid: number, attnum: number): string => `c${relOid}_${attnum}`
 const fnId = (oid: number): string => `f${oid}`;
 const trgId = (oid: number): string => `g${oid}`;
 const conId = (oid: number): string => `k${oid}`;
+const idxId = (oid: number): string => `i${oid}`;
 
 const CONTYPE_LABEL: Record<string, string> = {
   c: "CHECK",
@@ -181,6 +182,15 @@ export function buildGraph(
     }
   }
 
+  // 7b. Indexes → the key columns they cover (intra-card detail, like constrains).
+  for (const ix of catalog.indexes) {
+    if (!relByOid.has(ix.relOid)) continue;
+    for (const att of ix.cols) {
+      const cid = colNode(ix.relOid, att);
+      if (cid) addEdge("indexes", idxId(ix.oid), cid);
+    }
+  }
+
   // 8. Column defaults / generated columns.
   for (const d of catalog.defaultDeps) {
     const src = relByOid.has(d.relOid) ? colNode(d.relOid, d.attnum) : null;
@@ -276,6 +286,26 @@ export function buildGraph(
         oid: con.oid,
         detail: con.def ?? CONTYPE_LABEL[con.contype] ?? "constraint",
         ord: 20_000,
+      },
+    });
+  }
+  for (const ix of catalog.indexes) {
+    const rel = relByOid.get(ix.relOid);
+    if (!rel) continue;
+    unitOfId.set(idxId(ix.oid), relId(ix.relOid));
+    // "CREATE [UNIQUE] INDEX … USING btree (col)" → "[UNIQUE] btree (col)"
+    const using = ix.def?.match(/USING\s+(.+)$/is)?.[1];
+    const unique = /^CREATE\s+UNIQUE/i.test(ix.def ?? "") ? "UNIQUE " : "";
+    nodes.push({
+      data: {
+        id: idxId(ix.oid),
+        label: ix.name,
+        type: "index",
+        parent: relId(ix.relOid),
+        schema: rel.schema,
+        oid: ix.oid,
+        detail: using ? `${unique}${using}` : "index",
+        ord: 30_000,
       },
     });
   }

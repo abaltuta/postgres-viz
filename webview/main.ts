@@ -1,9 +1,6 @@
 import "@vscode-elements/elements/dist/bundled.js";
 import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
-import fcose from "cytoscape-fcose";
 import type { GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
-
-cytoscape.use(fcose);
 
 const vscode = acquireVsCodeApi();
 
@@ -16,6 +13,7 @@ const NODE_COLORS: Record<string, string> = {
   function: "#FFAB00",
   trigger: "#FF5630",
   constraint: "#6554C0",
+  index: "#84CC16",
   schema: "#57606A",
 };
 
@@ -31,10 +29,11 @@ const EDGE_COLORS: Record<string, string> = {
   "update-of": "#FF8F73",
   fk: "#8993A4",
   constrains: "#6554C0",
+  indexes: "#84CC16",
   default: "#998DD9",
 };
 
-const ROW_TYPES = new Set(["column", "trigger", "constraint"]);
+const ROW_TYPES = new Set(["column", "trigger", "constraint", "index"]);
 
 type NodeDef = { data: GraphNodeData };
 type EdgeDef = { data: GraphEdgeData };
@@ -86,8 +85,7 @@ function cardDims(label: string, rows: NodeDef[]): { w: number; h: number } {
 }
 
 function buildCardArt(card: NodeDef): void {
-  const showCols = checked("flt-columns");
-  const rows = showCols ? (rowsByCard.get(card.data.id) ?? []) : [];
+  const rows = rowsByCard.get(card.data.id) ?? [];
   const { w, h } = cardDims(card.data.label, rows);
   const dark = isDark();
   const textColor = dark ? "#9fadbc" : "#57606a";
@@ -116,20 +114,6 @@ function buildCardArt(card: NodeDef): void {
   card.data.svg = `data:image/svg+xml;utf8,${encodeURIComponent(parts.join(""))}`;
   card.data.cardW = w;
   card.data.cardH = h;
-}
-
-function refreshCardArt(): void {
-  if (!cy || !payload) return;
-  cy.batch(() => {
-    for (const n of payload!.nodes) {
-      if (!rowsByCard.has(n.data.id) || materialized.has(n.data.id)) continue;
-      buildCardArt(n);
-      const ele = cy!.getElementById(n.data.id);
-      if (ele.nonempty()) {
-        ele.data({ svg: n.data.svg, cardW: n.data.cardW, cardH: n.data.cardH });
-      }
-    }
-  });
 }
 
 // ── materialization: swap a card's SVG rows for real nodes + detail edges ──
@@ -248,7 +232,7 @@ function buildStyle(): cytoscape.StylesheetJson {
       },
     },
     {
-      selector: 'node[type="trigger"], node[type="constraint"]',
+      selector: 'node[type="trigger"], node[type="constraint"], node[type="index"]',
       style: {
         "font-size": 8,
         "min-zoomed-font-size": 8,
@@ -482,13 +466,6 @@ function applyFilters(): void {
     materializeAll();
   }
   g.batch(() => {
-    g.nodes('[type="column"]').toggleClass("hidden-el", !checked("flt-columns"));
-    g.nodes('[type="view"], [type="matview"]').toggleClass("hidden-el", !checked("flt-views"));
-    g.nodes('[type="function"]').toggleClass("hidden-el", !checked("flt-functions"));
-    g.nodes('[type="trigger"]').toggleClass("hidden-el", !checked("flt-triggers"));
-    g.nodes('[type="constraint"]').toggleClass("hidden-el", !checked("flt-constraints"));
-    g.edges('[kind="fk"]').toggleClass("hidden-el", !checked("flt-fk"));
-
     const mode = edgeMode();
     g.edges().removeClass("edge-off");
     if (mode === "off") g.edges().addClass("edge-off");
@@ -496,8 +473,7 @@ function applyFilters(): void {
 
     g.nodes().removeClass("isolated-hidden");
     if (checked("flt-isolated")) {
-      // isolation is about having relationships at all — endpoints hidden by a
-      // TYPE filter still count, so hiding functions can't nuke their tables
+      // keep anything participating in at least one card-level relationship
       const keep = new Set<string>();
       g.edges("[!detail]").forEach((e) => {
         if (e.hasClass("hidden-el")) return;
@@ -758,53 +734,6 @@ function layoutGridCards(units: NodeSingular[]): void {
   }
 }
 
-/**
- * Push overlapping cards apart (organic layouts can collide after row
- * restacking changes card sizes). Pairwise separation along the axis of least
- * penetration, O(n²) per iteration with local bbox mutation so later pairs in
- * the same sweep see earlier pushes; converges or gives up after 10 rounds.
- */
-function resolveOverlaps(units: NodeSingular[]): void {
-  const MARGIN = 24;
-  const boxes = units.map((u) => {
-    const b = u.boundingBox({ includeLabels: true });
-    return { x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 };
-  });
-  for (let iter = 0; iter < 10; iter++) {
-    let moved = false;
-    for (let i = 0; i < units.length; i++) {
-      for (let j = i + 1; j < units.length; j++) {
-        const a = boxes[i]!;
-        const b = boxes[j]!;
-        const ox = Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1);
-        const oy = Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1);
-        if (ox <= 0 || oy <= 0) continue;
-        moved = true;
-        const apply = (idx: number, u: NodeSingular, dx: number, dy: number): void => {
-          shiftUnit(u, dx, dy);
-          const box = boxes[idx]!;
-          box.x1 += dx;
-          box.x2 += dx;
-          box.y1 += dy;
-          box.y2 += dy;
-        };
-        if (ox < oy) {
-          const push = (ox + MARGIN) / 2;
-          const dir = (a.x1 + a.x2) / 2 <= (b.x1 + b.x2) / 2 ? 1 : -1;
-          apply(i, units[i]!, -dir * push, 0);
-          apply(j, units[j]!, dir * push, 0);
-        } else {
-          const push = (oy + MARGIN) / 2;
-          const dir = (a.y1 + a.y2) / 2 <= (b.y1 + b.y2) / 2 ? 1 : -1;
-          apply(i, units[i]!, 0, -dir * push);
-          apply(j, units[j]!, 0, dir * push);
-        }
-      }
-    }
-    if (!moved) break;
-  }
-}
-
 /** Unit-level adjacency from card-level edges (aggregates + real unit edges). */
 function unitAdjacency(units: NodeSingular[]): {
   out: Map<string, Set<string>>;
@@ -874,33 +803,6 @@ function layoutTreeCards(units: NodeSingular[]): void {
       .get(lv)!
       .sort((a, b) => (degree.get(b.id()) ?? 0) - (degree.get(a.id()) ?? 0));
     y += packShelf(row, 0, y, maxW, GAP) + GAP * 2;
-  }
-}
-
-function layoutConcentricCards(units: NodeSingular[]): void {
-  const { degree } = unitAdjacency(units);
-  const sorted = [...units].sort((a, b) => (degree.get(b.id()) ?? 0) - (degree.get(a.id()) ?? 0));
-  const boxes = sorted.map((u) => u.boundingBox({ includeLabels: true }));
-  const maxDim = boxes.reduce((m, b) => Math.max(m, b.w, b.h), 60);
-  const avgW = boxes.reduce((s, b) => s + b.w, 0) / Math.max(1, boxes.length);
-  let i = 0;
-  let ring = 0;
-  while (i < sorted.length) {
-    if (ring === 0) {
-      moveUnitTo(sorted[0]!, 0, 0);
-      i = 1;
-      ring = 1;
-      continue;
-    }
-    const radius = ring * (maxDim + GAP);
-    const capacity = Math.max(4, Math.floor((2 * Math.PI * radius) / (avgW + GAP)));
-    const count = Math.min(capacity, sorted.length - i);
-    for (let k = 0; k < count; k++) {
-      const angle = (2 * Math.PI * k) / count + (ring % 2) * 0.3;
-      moveUnitTo(sorted[i + k]!, radius * Math.cos(angle), radius * Math.sin(angle));
-    }
-    i += count;
-    ring++;
   }
 }
 
@@ -1040,7 +942,6 @@ function runLayout(): void {
   // taxi routing has NO parallel-edge separation — multiple edges between the
   // same pair (reads + writes to one table) would coincide exactly. Pairs with
   // more than one card-level edge stay bezier, which fans parallels apart.
-  const structured = name === "breadthfirst" || name === "grid";
   const pairCount = new Map<string, number>();
   const pairKey = (e: EdgeSingular): string => {
     const a = e.source().id();
@@ -1052,41 +953,11 @@ function runLayout(): void {
     pairCount.set(k, (pairCount.get(k) ?? 0) + 1);
   });
   cy.edges("[!detail]").forEach((e) => {
-    e.toggleClass("ortho", structured && (pairCount.get(pairKey(e)) ?? 0) === 1);
+    e.toggleClass("ortho", (pairCount.get(pairKey(e)) ?? 0) === 1);
   });
-  if (name === "fcose") {
-    const eles = cy
-      .elements(":visible")
-      .union(cy.edges("[!detail]").filter((e) => e.source().visible() && e.target().visible()));
-    const layout = eles.layout({
-      name: "fcose",
-      animate: false,
-      quality: "proof",
-      randomize: true,
-      nodeSeparation: 160,
-      idealEdgeLength: 160,
-      edgeElasticity: 0.45,
-      nodeRepulsion: 50000,
-      nestingFactor: 0.1,
-      gravity: 0.2,
-      gravityCompound: 1.5,
-      numIter: 2500,
-      tile: true,
-      packComponents: true,
-    } as cytoscape.LayoutOptions);
-    layout.one("layoutstop", () => {
-      restackRows();
-      resolveOverlaps(cardUnits());
-      routeEdgesAroundCards();
-      fitView();
-    });
-    layout.run();
-    return;
-  }
   restackRows();
   const units = cardUnits();
   if (name === "breadthfirst") layoutTreeCards(units);
-  else if (name === "concentric") layoutConcentricCards(units);
   else layoutGridCards(units);
   routeEdgesAroundCards();
   fitView();
@@ -1422,6 +1293,7 @@ const PASSIVE_KIND: Record<string, string> = {
   selects: "selected by",
   fk: "referenced by",
   constrains: "constrained by",
+  indexes: "indexed by",
   "update-of": "update-of by",
   default: "default of",
 };
@@ -1519,19 +1391,34 @@ function syncExplorerSelection(id: string): void {
   vscode.postMessage({ type: "nodeSelected", id });
 }
 
-/** Select + center a node (from the native tree), materializing as needed. */
+/** Isolate one schema's tables/views/functions (clicking a schema in the tree). */
+function focusSchema(s: NodeSingular): void {
+  if (!cy) return;
+  const name = String(s.data("label"));
+  const keep = new Set<string>();
+  for (const u of allCardUnits()) {
+    if (String(u.data("schema") ?? "") === name) keep.add(u.id());
+  }
+  enterIsolatedView(keep, `Schema: ${name}`, "focus", s.id());
+  applyFilters();
+  runLayout();
+}
+
+/** Tree click → focus view on that node (schemas isolate the whole schema). */
 function jumpToNode(id: string): void {
   if (!cy) return;
-  const card = cardOfNode.get(id);
-  if (card && !materialized.has(card) && !viewState) {
-    materializeNeighborhood(card);
-    applyFilters();
+  const target = cy.getElementById(id);
+  if (target.nonempty() && target.data("type") === "schema") {
+    focusSchema(target as unknown as NodeSingular);
+    return;
   }
+  exitView(false);
+  // virtual rows only exist in cy once their card is materialized
+  const card = cardOfNode.get(id);
+  if (card && !materialized.has(card)) materializeCard(card);
   const ele = cy.getElementById(id);
   if (ele.empty()) return;
-  selectNode(ele as unknown as NodeSingular);
-  const zoom = Math.max(cy.zoom(), 0.8);
-  cy.animate({ center: { eles: ele }, zoom, duration: 200 } as never);
+  focusNode(ele as unknown as NodeSingular);
 }
 
 function updateStats(): void {
@@ -1622,21 +1509,7 @@ el("search").addEventListener("input", () => {
   }, 200);
 });
 
-for (const id of [
-  "flt-views",
-  "flt-functions",
-  "flt-triggers",
-  "flt-constraints",
-  "flt-fk",
-  "flt-isolated",
-]) {
-  el(id).addEventListener("change", applyFilters);
-}
-el("flt-columns").addEventListener("change", () => {
-  refreshCardArt();
-  applyFilters();
-  runLayout();
-});
+el("flt-isolated").addEventListener("change", applyFilters);
 el("edge-mode").addEventListener("change", () => {
   if (edgeMode() !== "all" && !viewState) dematerializeAll();
   applyFilters();

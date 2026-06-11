@@ -4,6 +4,7 @@ import type {
   CatalogCol,
   CatalogConstraint,
   CatalogFunc,
+  CatalogIndex,
   CatalogRel,
   CatalogTrigger,
   ConstraintFuncDep,
@@ -216,6 +217,29 @@ export async function introspect(
       `(${countBy(constraints, (c) => conNames[c.contype] ?? c.contype)}) — ${took()}`,
   );
 
+  // Plain indexes. Constraint-backed ones (PK/UNIQUE/EXCLUDE) are skipped —
+  // they already appear as constraint rows.
+  const indexes: CatalogIndex[] = (
+    await client.query(
+      `SELECT i.indexrelid AS oid, ic.relname AS name, i.indrelid AS rel_oid,
+              i.indkey::int2[] AS cols, pg_get_indexdef(i.indexrelid, 0, true) AS def
+       FROM pg_index i
+       JOIN pg_class ic ON ic.oid = i.indexrelid
+       JOIN pg_class c ON c.oid = i.indrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE ${schemaPred("n.nspname")}
+         AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.indexrelid)`,
+      params,
+    )
+  ).rows.map((r) => ({
+    oid: Number(r.oid),
+    name: String(r.name),
+    relOid: Number(r.rel_oid),
+    cols: ((r.cols ?? []) as unknown[]).map(Number).filter((a) => a > 0),
+    def: r.def === null || r.def === undefined ? null : String(r.def),
+  }));
+  log(`pg_index: ${indexes.length} plain indexes (constraint-backed excluded) — ${took()}`);
+
   // Functions referenced by constraint expressions (CHECK (my_fn(col)) …) — exact, from pg_depend.
   const constraintFuncDeps: ConstraintFuncDep[] = (
     await client.query(
@@ -319,6 +343,7 @@ export async function introspect(
     fks,
     constraints,
     constraintFuncDeps,
+    indexes,
     sqlBodyDeps,
     defaultDeps,
   };

@@ -84,6 +84,9 @@ CREATE FUNCTION non_negative(n numeric) RETURNS boolean IMMUTABLE LANGUAGE sql
   AS 'SELECT n >= 0';
 ALTER TABLE orders ADD CONSTRAINT total_non_negative CHECK (non_negative(total));
 
+-- plain index (multi-column) — PK/UNIQUE-backed indexes must NOT reappear
+CREATE INDEX orders_customer_created_idx ON orders (customer_id, created_at);
+
 -- alias gauntlet: CTE with column-list rename, named CTE outputs, derived-table
 -- alias, and a correlated subquery referencing both
 CREATE FUNCTION alias_gauntlet() RETURNS SETOF text LANGUAGE plpgsql AS $$
@@ -353,6 +356,21 @@ async function main(): Promise<void> {
     assertEdge(g, "constrains", customersPk, customersId, "PK constrains customers.id");
     assertEdge(g, "constrains", checkCon, ordersTotal, "CHECK constrains orders.total");
     assertEdge(g, "calls", checkCon, nonNegative, "CHECK calls non_negative()");
+
+    // ── indexes: plain ones become rows, constraint-backed ones stay hidden ──
+    const ordersIdx = nodeId(g, "index", "orders_customer_created_idx", orders);
+    assertEdge(g, "indexes", ordersIdx, ordersCustomerId, "index covers orders.customer_id");
+    assertEdge(
+      g,
+      "indexes",
+      ordersIdx,
+      nodeId(g, "column", "created_at", orders),
+      "index covers orders.created_at",
+    );
+    assert.ok(
+      !g.nodes.some((n) => n.data.type === "index" && n.data.label === "orders_pkey"),
+      "PK-backed index is not duplicated as an index node",
+    );
 
     // ── alias gauntlet: provenance through CTEs, derived tables, correlation ──
     const gauntlet = nodeId(g, "function", "alias_gauntlet()");

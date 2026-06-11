@@ -78,6 +78,7 @@ const TREE_ICONS: Record<string, string> = {
   column: "symbol-field",
   trigger: "zap",
   constraint: "lock",
+  index: "key",
 };
 
 class DbTreeProvider implements vscode.TreeDataProvider<TreeNode> {
@@ -98,7 +99,13 @@ class DbTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 
   private build(graph: GraphPayload): void {
-    const ROWS = new Set(["column", "trigger", "constraint"]);
+    const ROWS = new Set(["column", "trigger", "constraint", "index"]);
+    // schema graph nodes exist in the payload — clicking a schema in the tree
+    // focuses that schema in the graph
+    const schemaGraphIds = new Map<string, string>();
+    for (const { data: d } of graph.nodes) {
+      if (d.type === "schema") schemaGraphIds.set(String(d.label), d.id);
+    }
     const node = (
       label: string,
       type: string,
@@ -126,7 +133,7 @@ class DbTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       const key = String(d.schema ?? "");
       let s = bySchema.get(key);
       if (!s) {
-        s = node(key, "schema", undefined);
+        s = node(key, "schema", undefined, schemaGraphIds.get(key));
         bySchema.set(key, s);
         this.roots.push(s);
       }
@@ -419,6 +426,11 @@ async function openDdl(nodeType: NodeType, oid: number, label: string): Promise<
           .rows[0]?.def;
         return `-- ${label}\n${def ?? ""}`;
       }
+      case "index": {
+        const def = (await client.query("SELECT pg_get_indexdef($1::oid, 0, true) AS def", [oid]))
+          .rows[0]?.def;
+        return `${def ?? ""};`;
+      }
       default: {
         const rows = (
           await client.query(
@@ -475,17 +487,9 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     <vscode-textfield id="search" placeholder="search nodes…"></vscode-textfield>
     <vscode-single-select id="layout" title="layout">
       <vscode-option value="grid" selected>grid</vscode-option>
-      <vscode-option value="fcose">organic</vscode-option>
       <vscode-option value="breadthfirst">tree</vscode-option>
-      <vscode-option value="concentric">concentric</vscode-option>
     </vscode-single-select>
     <vscode-checkbox id="flt-schemagroup" checked>schemas</vscode-checkbox>
-    <vscode-checkbox id="flt-columns" checked>columns</vscode-checkbox>
-    <vscode-checkbox id="flt-views" checked>views</vscode-checkbox>
-    <vscode-checkbox id="flt-functions" checked>functions</vscode-checkbox>
-    <vscode-checkbox id="flt-triggers" checked>triggers</vscode-checkbox>
-    <vscode-checkbox id="flt-constraints" checked>constraints</vscode-checkbox>
-    <vscode-checkbox id="flt-fk" checked>FKs</vscode-checkbox>
     <label class="select-label" title="cards: one rolled-up edge per pair of tables/functions; all: every per-column edge; off: click a node to reveal">edges
       <vscode-single-select id="edge-mode">
         <vscode-option value="off" selected>off</vscode-option>

@@ -75,6 +75,16 @@ export interface ConstraintFuncDep {
   funcOid: number;
 }
 
+/** Plain index (constraint-backed indexes are surfaced as constraints instead). */
+export interface CatalogIndex {
+  oid: number;
+  name: string;
+  relOid: number;
+  /** key column attnums; 0 entries (expression keys) are skipped */
+  cols: number[];
+  def: string | null;
+}
+
 /** Function → relation dependency recorded by Postgres for BEGIN ATOMIC SQL bodies. */
 export interface SqlBodyDep {
   funcOid: number;
@@ -101,11 +111,19 @@ export interface Catalog {
   fks: Fk[];
   constraints: CatalogConstraint[];
   constraintFuncDeps: ConstraintFuncDep[];
+  indexes: CatalogIndex[];
   sqlBodyDeps: SqlBodyDep[];
   defaultDeps: DefaultDep[];
 }
 
-export type NodeType = RelKind | "column" | "function" | "trigger" | "constraint" | "schema";
+export type NodeType =
+  | RelKind
+  | "column"
+  | "function"
+  | "trigger"
+  | "constraint"
+  | "index"
+  | "schema";
 
 export type EdgeKind =
   | "selects"
@@ -119,6 +137,7 @@ export type EdgeKind =
   | "update-of"
   | "fk"
   | "constrains"
+  | "indexes"
   | "default";
 
 export interface GraphNodeData {
