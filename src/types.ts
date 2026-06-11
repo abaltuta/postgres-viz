@@ -132,6 +132,7 @@ export type EdgeKind =
   | "updates"
   | "deletes"
   | "writes"
+  | "modifies"
   | "calls"
   | "executes"
   | "update-of"

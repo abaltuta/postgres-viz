@@ -13,8 +13,10 @@ export interface FuncRefs {
   inserts: Map<number, Set<number>>;
   updates: Map<number, Set<number>>;
   deletes: Map<number, Set<number>>;
-  /** writes not attributable to one operation (MERGE, NEW.col := …, fallback) */
+  /** writes not attributable to one operation (MERGE, fallback) */
   writes: Map<number, Set<number>>;
+  /** trigger NEW.col := … row mutations — not DML issued BY the function */
+  modifies: Map<number, Set<number>>;
   calls: Set<number>;
   /** true when the real Postgres parser was used; false = regex fallback */
   parsed: boolean;
@@ -868,9 +870,11 @@ async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
  * SQL parser never sees, and bodies using an untyped `record` variable don't even
  * parse as PL/pgSQL (the plpgsql parser rejects `_new."x"` with "not a known
  * variable"), so the AST route is a dead end for exactly these functions. Scan
- * the source text instead and attribute the write to EVERY table whose trigger
- * executes the function — one generic fn attached to 100 tables gets 100 write
- * edges, which is the desired blast-radius answer. Statement-start anchors
+ * the source text instead and attribute a MODIFIES (not a write — mutating NEW
+ * in a BEFORE trigger changes the in-flight row, the function issues no DML) to
+ * EVERY table whose trigger executes the function — one generic fn attached to
+ * 100 tables gets 100 edges, which is the desired blast-radius answer.
+ * Statement-start anchors
  * (`;`, BEGIN, THEN, ELSE, LOOP) keep `IF NEW.x = 1` comparisons from matching,
  * and the `(?![=<>])` tail keeps `!=`, `<=`, `>=` out.
  */
@@ -882,7 +886,7 @@ function triggerAssignWrites(src: string, ctx: BodyCtx): void {
   for (const m of src.matchAll(TRIGGER_ASSIGN_RE)) {
     for (const rel of ctx.triggerRels) {
       const col = ctx.resolver.col(rel.oid, m[2]!);
-      if (col) add(ctx.refs.writes, rel.oid, col.attnum);
+      if (col) add(ctx.refs.modifies, rel.oid, col.attnum);
     }
   }
 }
@@ -946,6 +950,7 @@ export async function analyzeFunc(
     updates: new Map(),
     deletes: new Map(),
     writes: new Map(),
+    modifies: new Map(),
     calls: new Set(),
     parsed: false,
   };
@@ -1026,7 +1031,7 @@ export async function analyzeAll(
       `[${done}/${candidates.length}] ${fn.schema}.${fn.name}(): ` +
         `${refs.parsed ? "parsed" : "regex fallback"} — ` +
         `${refs.reads.size} read rels, ${refs.inserts.size + refs.updates.size + refs.deletes.size + refs.writes.size} write rels, ` +
-        `${refs.calls.size} calls (${Date.now() - start} ms)`,
+        `${refs.modifies.size} modified rels, ${refs.calls.size} calls (${Date.now() - start} ms)`,
     );
   }
   return out;

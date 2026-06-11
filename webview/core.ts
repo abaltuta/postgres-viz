@@ -45,7 +45,7 @@ export function fitTarget(cy: Core): CollectionReturnValue {
 }
 
 /** Edge kinds that mean "this function touches that table's data". */
-export const DATA_KINDS = new Set(["reads", "inserts", "updates", "deletes", "writes"]);
+export const DATA_KINDS = new Set(["reads", "inserts", "updates", "deletes", "writes", "modifies"]);
 
 /**
  * Call-tree closure from a trigger/function node: a trigger seeds with the

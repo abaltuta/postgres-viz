@@ -159,8 +159,25 @@ CREATE TABLE payroll.payrun (
 CREATE TABLE payroll.instruction (
   id bigint PRIMARY KEY,
   recurring_payrun_id bigint,
-  status text
+  status text,
+  proration boolean
 );
+
+-- BEFORE trigger that SELECTs and mutates NEW — this MODIFIES the row, it
+-- must NOT count as the function writing the table (it issues no DML)
+CREATE FUNCTION payroll.enforce_proration() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE supports boolean;
+BEGIN
+  SELECT i.status IS NOT NULL INTO supports
+  FROM payroll.instruction i WHERE i.id = NEW.id;
+  IF NOT supports AND NEW.proration = true THEN
+    NEW.proration := false;
+  END IF;
+  RETURN NEW;
+END $fn$;
+
+CREATE TRIGGER enforce_proration_trigger BEFORE INSERT OR UPDATE ON payroll.instruction
+  FOR EACH ROW EXECUTE FUNCTION payroll.enforce_proration();
 
 CREATE FUNCTION payroll.entry_amount(entry payroll.report_entry)
   RETURNS numeric IMMUTABLE LANGUAGE sql AS 'SELECT entry.amount';
@@ -415,14 +432,14 @@ async function main(): Promise<void> {
     assertEdge(g, "reads", touch, customersName, "tgt.name read via target alias");
     assertEdge(g, "reads", touch, customersId, "tgt.id read via target alias");
 
-    // generic trigger fn: assignment-target write lands on the attached table
+    // generic trigger fn: assignment targets MODIFY the attached table's row
     const setUpdatedAt = nodeId(g, "function", "set_current_timestamp_updated_at()");
     assertEdge(
       g,
-      "writes",
+      "modifies",
       setUpdatedAt,
       nodeId(g, "column", "updated_at", customers),
-      "set_current_timestamp_updated_at writes customers.updated_at via trigger attachment",
+      "set_current_timestamp_updated_at modifies customers.updated_at via trigger attachment",
     );
 
     // ── real-world payroll shapes (BPO/EOR style) ──
@@ -509,6 +526,23 @@ async function main(): Promise<void> {
       payrunStatus,
       nodeId(g, "column", "status", instruction),
       "i.status read inside EXISTS",
+    );
+
+    // BEFORE trigger mutating NEW: a MODIFIES edge, never a write — the
+    // function only SELECTs (user-reported false positive)
+    const enforce = nodeId(g, "function", "enforce_proration()");
+    const proration = nodeId(g, "column", "proration", instruction);
+    assertEdge(g, "modifies", enforce, proration, "NEW.proration := … modifies the column");
+    assertEdge(g, "reads", enforce, nodeId(g, "column", "id", instruction), "i.id read");
+    const wrongWrites = g.edges.filter(
+      (e) =>
+        ["writes", "inserts", "updates", "deletes"].includes(e.data.kind) &&
+        e.data.source === enforce,
+    );
+    assert.deepEqual(
+      wrongWrites,
+      [],
+      "a SELECT-only BEFORE trigger fn must have no write-family edges",
     );
 
     console.log(
