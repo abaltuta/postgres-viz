@@ -1,6 +1,7 @@
 import "@vscode-elements/elements/dist/bundled.js";
 import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import type { GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
+import { callTreeClosure, DATA_KINDS, fitTarget, isShownByClasses, unitOf } from "./core";
 
 const vscode = acquireVsCodeApi();
 
@@ -574,34 +575,19 @@ function canvasAspect(): number {
 function fitView(eles?: cytoscape.CollectionArgument, padding = 50): void {
   if (!cy) return;
   cy.stop();
+  // class-derived shown set, never `:visible` — computed style is stale right
+  // after the batched class changes of focus/call-tree, so `:visible` fits
+  // would cover the long-hidden full-graph extent and zoom way out
+  const target = eles ?? fitTarget(cy);
   cy.animate({
-    fit: { eles: (eles ?? cy.elements(":visible")) as never, padding },
+    fit: { eles: target as never, padding },
     duration: 250,
     easing: "ease-in-out-cubic",
   } as never);
 }
 
-/**
- * Visibility derived from classes (self + ancestors), never from `:visible` —
- * computed style is stale right after batched class changes, which made
- * stacked views (Focus → Call tree) inherit leftovers of the previous view.
- */
-function isShown(n: NodeSingular): boolean {
-  let e: NodeSingular = n;
-  for (;;) {
-    if (
-      e.hasClass("hidden-el") ||
-      e.hasClass("isolated-hidden") ||
-      e.hasClass("focus-hidden") ||
-      e.hasClass("untouched-hidden")
-    ) {
-      return false;
-    }
-    const p = e.parent().first();
-    if (p.empty()) return true;
-    e = p as NodeSingular;
-  }
-}
+// visibility/unit helpers live in core.ts so headless tests can cover them
+const isShown = isShownByClasses;
 
 /** Every card/standalone unit, regardless of current visibility. */
 function allCardUnits(): NodeSingular[] {
@@ -618,16 +604,6 @@ function allCardUnits(): NodeSingular[] {
 /** Layout units: the currently shown cards and standalone nodes. */
 function cardUnits(): NodeSingular[] {
   return allCardUnits().filter((n) => isShown(n));
-}
-
-/** The card a node belongs to (columns/triggers/constraints → their table). */
-function unitOf(n: NodeSingular): NodeSingular {
-  let u: NodeSingular = n;
-  for (;;) {
-    const p = u.parent().first();
-    if (p.empty() || p.data("type") === "schema") return u;
-    u = p as NodeSingular;
-  }
 }
 
 function shiftUnit(u: NodeSingular, dx: number, dy: number): void {
@@ -1118,7 +1094,11 @@ function focusNode(node: NodeSingular): void {
   materializeCard(unit.id());
   applyFilters();
   runLayout();
-  selectNode(node);
+  // exitView (inside enterIsolatedView) dematerializes rows: the clicked row
+  // node may have been REMOVED and re-added — a stale reference has no edges,
+  // so the panel would render "no connections". Re-resolve by id.
+  const live = cy.getElementById(node.id());
+  selectNode((live.nonempty() ? live : unit) as unknown as NodeSingular);
 }
 
 /**
@@ -1127,37 +1107,7 @@ function focusNode(node: NodeSingular): void {
  */
 function showCallTree(node: NodeSingular): void {
   if (!cy) return;
-  const startUnit = unitOf(node);
-  const fns = new Set<string>();
-  const queue: string[] = [];
-  if (node.data("type") === "trigger") {
-    node.connectedEdges('[kind="executes"]').forEach((e) => {
-      queue.push(e.target().id());
-    });
-  } else {
-    queue.push(startUnit.id());
-  }
-  const roots = new Set(queue);
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    if (fns.has(id)) continue;
-    fns.add(id);
-    cy.edges('[!detail][kind="calls"], [!detail][kind="executes"]').forEach((e) => {
-      if (e.source().id() === id && !fns.has(e.target().id())) queue.push(e.target().id());
-    });
-  }
-  const keep = new Set<string>(fns);
-  keep.add(startUnit.id());
-  const DATA_KINDS = new Set(["reads", "inserts", "updates", "deletes", "writes"]);
-  cy.edges("[!detail]").forEach((e) => {
-    if (DATA_KINDS.has(String(e.data("kind"))) && fns.has(e.source().id())) {
-      keep.add(e.target().id());
-    }
-  });
-  // context: who calls / fires the root
-  cy.edges('[!detail][kind="calls"], [!detail][kind="executes"]').forEach((e) => {
-    if (roots.has(e.target().id())) keep.add(e.source().id());
-  });
+  const { fns, keep } = callTreeClosure(cy, node);
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
   enterIsolatedView(keep, `Call tree: ${label}`, "calltree", node.id());
   showCrumb(
@@ -1168,6 +1118,11 @@ function showCallTree(node: NodeSingular): void {
   // make the chain's column detail available, then reveal ONLY the chain
   for (const id of keep) materializeCard(id);
   applyFilters();
+  // same stale-reference hazard as focusNode: exitView (inside
+  // enterIsolatedView) may have removed and re-created the clicked row —
+  // re-resolve so selection/panel/zoom see the live node, not a detached one
+  const live = cy.getElementById(node.id());
+  if (live.nonempty()) node = live as unknown as NodeSingular;
 
   const onChain = (kind: string, srcUnit: string, tgtUnit: string, tgtId: string): boolean => {
     if (!keep.has(srcUnit) || !keep.has(tgtUnit)) return false;
