@@ -508,8 +508,8 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
       <div id="panel-resize" title="drag to resize"></div>
       <div id="panel-body"></div>
     </aside>
+    <div id="empty">Connecting to the database…</div>
   </div>
-  <div id="empty">Connecting to the database…</div>
   <script src="${scriptUri}"></script>
 </body>
 </html>`;

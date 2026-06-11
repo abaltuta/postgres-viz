@@ -10,6 +10,11 @@ body {
   font-size: 12px;
 }
 
+body {
+  display: flex;
+  flex-direction: column;
+}
+
 #connbar {
   display: flex;
   align-items: center;
@@ -50,13 +55,11 @@ body {
 
 #toolbar {
   display: flex;
+  flex-wrap: wrap; /* never a horizontal scrollbar — controls flow to the next line */
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   padding: 4px 8px;
-  height: 30px;
   border-bottom: 1px solid var(--vscode-panel-border, #444);
-  white-space: nowrap;
-  overflow-x: auto;
 }
 
 #toolbar vscode-textfield {
@@ -116,14 +119,13 @@ body {
   margin-left: auto;
   opacity: 0.6;
   font-size: 11px;
+  white-space: normal;
 }
 
 #content {
-  position: absolute;
-  top: 76px;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  position: relative;
+  flex: 1;
+  min-height: 0;
   display: flex;
 }
 
@@ -374,7 +376,7 @@ body {
 
 #empty {
   position: absolute;
-  inset: 76px 0 0 0;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
