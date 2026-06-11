@@ -2,10 +2,20 @@ import * as vscode from "vscode";
 import { Client } from "pg";
 import { analyzeAll, disposeParser } from "./analyze";
 import { buildGraph } from "./graph";
+import { indexEntries, keyVariants, type LocatedEntry, parseHclSymbols } from "./hcl";
 import { introspect } from "./introspect";
 import type { GraphNodeData, GraphPayload, NodeType } from "./types";
 
 const SECRET_KEY = "postgresViz.connectionString";
+
+/**
+ * Connection strings are saved PER WORKSPACE FOLDER — opening an unrelated
+ * folder must not auto-connect to (or even know about) another project's db.
+ */
+function secretKey(): string {
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.toString() ?? "no-folder";
+  return `${SECRET_KEY}:${folder}`;
+}
 
 let panel: vscode.WebviewPanel | undefined;
 let lastConnection: string | undefined;
@@ -211,10 +221,92 @@ class DbTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 let treeProvider: DbTreeProvider | undefined;
 let treeView: vscode.TreeView<TreeNode> | undefined;
 
+// ── jump-to-definition into Atlas .hcl schema files ──
+//
+// GP/BPO defines its schema in Atlas HCL; when a matching block exists in the
+// workspace, symbols and "Open DDL" link straight to it. Databases without
+// HCL (EOR/Hasura) fall back to the generated-DDL virtual document.
+
+interface HclLoc {
+  uri: vscode.Uri;
+  line: number;
+  col: number;
+}
+
+const HCL_KINDS: Partial<Record<NodeType, string[]>> = {
+  table: ["table"],
+  foreign: ["table"],
+  view: ["view"],
+  matview: ["materialized", "view"],
+  function: ["function", "procedure"],
+  trigger: ["trigger"],
+  index: ["index"],
+  constraint: ["check", "unique", "foreign_key", "index"],
+  column: ["column"],
+};
+
+class HclIndex {
+  private map: Promise<Map<string, LocatedEntry>> | null = null;
+
+  constructor(subscriptions: { dispose(): unknown }[]) {
+    const watcher = vscode.workspace.createFileSystemWatcher("**/*.hcl");
+    const invalidate = (): void => {
+      this.map = null;
+    };
+    watcher.onDidChange(invalidate);
+    watcher.onDidCreate(invalidate);
+    watcher.onDidDelete(invalidate);
+    subscriptions.push(watcher);
+  }
+
+  /** Where `schema.label` (owned by `owner`, for rows) is defined, if anywhere. */
+  async find(
+    type: NodeType,
+    schema: string | undefined,
+    label: string,
+    owner?: string,
+  ): Promise<HclLoc | undefined> {
+    const kinds = HCL_KINDS[type];
+    if (!kinds) return undefined;
+    const name = type === "function" ? label.replace(/\(\)$/, "") : label;
+    const map = await (this.map ??= this.build());
+    for (const kind of kinds) {
+      for (const key of keyVariants(kind, schema, owner, name)) {
+        const hit = map.get(key);
+        if (hit) return { uri: vscode.Uri.parse(hit.file), line: hit.line, col: hit.col };
+      }
+    }
+    return undefined;
+  }
+
+  private async build(): Promise<Map<string, LocatedEntry>> {
+    const all: LocatedEntry[] = [];
+    const files = await vscode.workspace.findFiles(
+      "**/*.hcl",
+      "{**/node_modules/**,**/.git/**}",
+      500,
+    );
+    for (const uri of files) {
+      let text: string;
+      try {
+        text = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+      } catch {
+        continue;
+      }
+      for (const e of parseHclSymbols(text)) all.push({ ...e, file: uri.toString() });
+    }
+    logLine(`hcl: indexed ${all.length} symbols from ${files.length} file(s)`);
+    return indexEntries(all);
+  }
+}
+
+let hclIndex: HclIndex | undefined;
+
 // ── workspace symbols: every db object reachable from Cmd+T ──
 
 /** the most recently loaded graph — backs the symbol provider */
 let currentGraph: GraphPayload | null = null;
+let currentDatabase = "";
 
 const SYMBOL_KINDS: Partial<Record<NodeType, vscode.SymbolKind>> = {
   table: vscode.SymbolKind.Class,
@@ -240,7 +332,7 @@ function ddlUri(type: NodeType, oid: number, label: string): vscode.Uri {
 }
 
 class DbSymbolProvider implements vscode.WorkspaceSymbolProvider {
-  provideWorkspaceSymbols(query: string): vscode.SymbolInformation[] {
+  async provideWorkspaceSymbols(query: string): Promise<vscode.SymbolInformation[]> {
     if (!currentGraph) return [];
     const q = query.toLowerCase();
     const labelOf = new Map<string, string>();
@@ -253,16 +345,14 @@ class DbSymbolProvider implements vscode.WorkspaceSymbolProvider {
       const owner = isRow ? (labelOf.get(d.parent ?? "") ?? "") : "";
       const container = isRow ? `${d.schema ?? ""}.${owner}` : (d.schema ?? "");
       if (q && !`${container}.${d.label}`.toLowerCase().includes(q)) continue;
+      // prefer the Atlas HCL definition site; fall back to the DDL document
+      const hcl = await hclIndex?.find(d.type, d.schema, d.label, isRow ? owner : undefined);
       // a column's DDL doc is its table's column listing (oid is the rel's)
       const docLabel = d.type === "column" ? container : `${d.schema ?? ""}.${d.label}`;
-      out.push(
-        new vscode.SymbolInformation(
-          d.label,
-          kind,
-          container,
-          new vscode.Location(ddlUri(d.type, d.oid, docLabel), new vscode.Position(0, 0)),
-        ),
-      );
+      const location = hcl
+        ? new vscode.Location(hcl.uri, new vscode.Position(hcl.line, hcl.col))
+        : new vscode.Location(ddlUri(d.type, d.oid, docLabel), new vscode.Position(0, 0));
+      out.push(new vscode.SymbolInformation(d.label, kind, container, location));
       if (out.length >= SYMBOL_CAP) break;
     }
     return out;
@@ -282,6 +372,7 @@ class DdlContentProvider implements vscode.TextDocumentContentProvider {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  hclIndex = new HclIndex(context.subscriptions);
   treeProvider = new DbTreeProvider();
   treeView = vscode.window.createTreeView("postgresVizExplorer", {
     treeDataProvider: treeProvider,
@@ -302,7 +393,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   // a stored connection loads in the background at startup — tree + Cmd+T
   // symbols are ready without opening the graph panel
-  void context.secrets.get(SECRET_KEY).then((conn) => {
+  void context.secrets.get(secretKey()).then((conn) => {
     if (conn) {
       lastConnection = conn;
       logLine(`startup: loading ${redact(conn)} in the background`);
@@ -317,7 +408,7 @@ export function deactivate(): void {
 
 async function visualize(context: vscode.ExtensionContext): Promise<void> {
   ensurePanel(context);
-  const conn = await context.secrets.get(SECRET_KEY);
+  const conn = await context.secrets.get(secretKey());
   if (conn) {
     lastConnection = conn;
     await loadGraph(conn);
@@ -327,7 +418,7 @@ async function visualize(context: vscode.ExtensionContext): Promise<void> {
 
 /** Load the graph WITHOUT opening the panel (sidebar welcome button / startup). */
 async function load(context: vscode.ExtensionContext): Promise<void> {
-  let conn = await context.secrets.get(SECRET_KEY);
+  let conn = await context.secrets.get(secretKey());
   if (!conn) {
     conn = await vscode.window.showInputBox({
       title: "Postgres Viz: connect",
@@ -337,7 +428,7 @@ async function load(context: vscode.ExtensionContext): Promise<void> {
     });
     if (!conn?.trim()) return;
     conn = conn.trim();
-    await context.secrets.store(SECRET_KEY, conn);
+    await context.secrets.store(secretKey(), conn);
   }
   lastConnection = conn;
   await loadGraph(conn);
@@ -361,13 +452,22 @@ function ensurePanel(context: vscode.ExtensionContext): void {
     try {
       logLine(`webview → ${String(msg.type)}`);
       if (msg.type === "ready") {
-        const stored = (await context.secrets.get(SECRET_KEY)) ?? "";
+        const stored = (await context.secrets.get(secretKey())) ?? "";
         panel?.webview.postMessage({ type: "connection", value: stored });
+        // messages posted before the webview JS was listening are dropped —
+        // replay the already-loaded graph (startup/background loads) here
+        if (currentGraph) {
+          panel?.webview.postMessage({
+            type: "graph",
+            graph: currentGraph,
+            database: currentDatabase,
+          });
+        }
       } else if (msg.type === "connect") {
         const conn = String(msg.connectionString ?? "").trim();
         if (!conn) return;
         getOutput().show(true);
-        await context.secrets.store(SECRET_KEY, conn);
+        await context.secrets.store(secretKey(), conn);
         lastConnection = conn;
         await loadGraph(conn);
       } else if (msg.type === "refresh" && lastConnection) {
@@ -426,6 +526,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
       const age = Math.round((Date.now() - cached.builtAt) / 1000);
       logLine(`cache hit — serving graph built ${age}s ago (refresh to rebuild)`);
       currentGraph = cached.graph;
+      currentDatabase = cached.database;
       treeProvider?.setGraph(cached.graph);
       panel?.webview.postMessage({
         type: "graph",
@@ -487,6 +588,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
           if (oldest !== undefined) graphCache.delete(oldest);
         }
         currentGraph = graph;
+        currentDatabase = database;
         treeProvider?.setGraph(graph);
         panel?.webview.postMessage({ type: "graph", graph, database });
       },
@@ -505,6 +607,20 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
 
 async function openDdl(nodeType: NodeType, oid: number, label: string): Promise<void> {
   if (!lastConnection || !Number.isFinite(oid)) return;
+  // an Atlas HCL definition in the workspace beats generated DDL
+  const dot = label.indexOf(".");
+  const schema = dot > 0 ? label.slice(0, dot) : undefined;
+  const name = dot > 0 ? label.slice(dot + 1) : label;
+  const hcl = await hclIndex?.find(nodeType, schema, name);
+  if (hcl) {
+    const pos = new vscode.Position(hcl.line, hcl.col);
+    await vscode.window.showTextDocument(hcl.uri, {
+      viewColumn: vscode.ViewColumn.Beside,
+      preview: true,
+      selection: new vscode.Range(pos, pos),
+    });
+    return;
+  }
   const content = await fetchDdl(nodeType, oid, label);
   const doc = await vscode.workspace.openTextDocument({ language: "sql", content });
   await vscode.window.showTextDocument(doc, {

@@ -45,7 +45,7 @@ const webview = {
 };
 
 const smokeTest = {
-  entryPoints: ["test/smoke.ts", "test/integration.ts", "test/webview.ts"],
+  entryPoints: ["test/smoke.ts", "test/integration.ts", "test/webview.ts", "test/hcl.ts"],
   bundle: true,
   platform: "node",
   format: "cjs",
