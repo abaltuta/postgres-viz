@@ -1,3 +1,4 @@
+import "@vscode-elements/elements/dist/bundled.js";
 import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import fcose from "cytoscape-fcose";
 import type { GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
@@ -53,8 +54,12 @@ const materialized = new Set<string>();
 const MATERIALIZE_CAP = 30;
 
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
-const checked = (id: string): boolean => el<HTMLInputElement>(id).checked;
-const edgeMode = (): string => el<HTMLSelectElement>("edge-mode").value;
+// vscode-elements web components expose .checked/.value like native inputs
+const checked = (id: string): boolean =>
+  Boolean((el(id) as unknown as { checked?: boolean }).checked);
+const valueOf = (id: string): string =>
+  String((el(id) as unknown as { value?: string }).value ?? "");
+const edgeMode = (): string => valueOf("edge-mode") || "off";
 
 const isDark = (): boolean =>
   document.body.classList.contains("vscode-dark") ||
@@ -447,7 +452,6 @@ function render(graph: GraphPayload): void {
   });
   viewState = null;
   lastStats = graph.stats;
-  buildExplorer();
   applySchemaGrouping(false);
   applyFilters();
   runLayout();
@@ -1029,7 +1033,7 @@ function routeEdgesAroundCards(): void {
 
 function runLayout(): void {
   if (!cy) return;
-  const name = el<HTMLSelectElement>("layout").value;
+  const name = valueOf("layout") || "grid";
   // taxi routing has NO parallel-edge separation — multiple edges between the
   // same pair (reads + writes to one table) would coincide exactly. Pairs with
   // more than one card-level edge stay bezier, which fans parallels apart.
@@ -1501,94 +1505,12 @@ function renderPanel(node: NodeSingular): void {
   });
 }
 
-/** Highlight + reveal the selected node in the explorer list. */
+/** The explorer is a native VS Code TreeView now — sync selection to it. */
 function syncExplorerSelection(id: string): void {
-  const tree = el("explorer-tree");
-  tree.querySelector(".active")?.classList.remove("active");
-  const item = tree.querySelector<HTMLElement>(`[data-node="${CSS.escape(id)}"]`);
-  if (!item) return;
-  item.classList.add("active");
-  let p = item.parentElement;
-  while (p && p !== tree) {
-    if (p instanceof HTMLDetailsElement) p.open = true;
-    p = p.parentElement;
-  }
-  item.scrollIntoView({ block: "nearest" });
+  vscode.postMessage({ type: "nodeSelected", id });
 }
 
-// ── explorer: structured schema → object → column list ──
-
-function explorerDot(type: string): string {
-  return `<i class="dot" style="background:${NODE_COLORS[type] ?? "#888"}"></i>`;
-}
-
-function buildExplorer(): void {
-  if (!payload) return;
-  const bySchema = new Map<string, Map<string, NodeDef[]>>();
-  for (const n of payload.nodes) {
-    const t = n.data.type;
-    if (t === "schema" || ROW_TYPES.has(t)) continue;
-    const schema = String(n.data.schema ?? "");
-    if (!bySchema.has(schema)) bySchema.set(schema, new Map());
-    const byType = bySchema.get(schema)!;
-    if (!byType.has(t)) byType.set(t, []);
-    byType.get(t)!.push(n);
-  }
-  const byLabel = (a: NodeDef, b: NodeDef): number =>
-    String(a.data.label).localeCompare(String(b.data.label));
-  const relEntry = (rel: NodeDef): string => {
-    const rows = rowsByCard.get(rel.data.id) ?? [];
-    const parts = [
-      `<details><summary class="obj" data-node="${esc(rel.data.id)}">${explorerDot(rel.data.type)}${esc(rel.data.label)}</summary><ul>`,
-    ];
-    for (const r of rows) {
-      parts.push(
-        `<li data-node="${esc(r.data.id)}">${explorerDot(r.data.type)}${esc(r.data.label)}<small>${esc(r.data.detail ?? r.data.type)}</small></li>`,
-      );
-    }
-    parts.push("</ul></details>");
-    return parts.join("");
-  };
-  const GROUPS: [string, string][] = [
-    ["table", "tables"],
-    ["view", "views"],
-    ["matview", "materialized views"],
-    ["foreign", "foreign tables"],
-    ["function", "functions"],
-  ];
-  const html: string[] = [];
-  for (const schema of [...bySchema.keys()].sort()) {
-    const byType = bySchema.get(schema)!;
-    const total = [...byType.values()].reduce((s, list) => s + list.length, 0);
-    html.push(
-      `<details open><summary>${explorerDot("schema")}<b>${esc(schema)}</b><small>${total}</small></summary>`,
-    );
-    for (const [type, title] of GROUPS) {
-      const list = byType.get(type);
-      if (!list || list.length === 0) continue;
-      list.sort(byLabel);
-      html.push(
-        `<details ${type === "table" ? "open" : ""}><summary>${explorerDot(type)}<small>${esc(title)} (${list.length})</small></summary>`,
-      );
-      if (type === "function") {
-        html.push("<ul>");
-        for (const f of list) {
-          html.push(
-            `<li data-node="${esc(f.data.id)}">${explorerDot("function")}${esc(f.data.label)}</li>`,
-          );
-        }
-        html.push("</ul>");
-      } else {
-        for (const rel of list) html.push(relEntry(rel));
-      }
-      html.push("</details>");
-    }
-    html.push("</details>");
-  }
-  el("explorer-tree").innerHTML = html.join("");
-}
-
-/** Select + center a node from the explorer (materializing its card if needed). */
+/** Select + center a node (from the native tree), materializing as needed. */
 function jumpToNode(id: string): void {
   if (!cy) return;
   const card = cardOfNode.get(id);
@@ -1601,86 +1523,6 @@ function jumpToNode(id: string): void {
   selectNode(ele as unknown as NodeSingular);
   const zoom = Math.max(cy.zoom(), 0.8);
   cy.animate({ center: { eles: ele }, zoom, duration: 200 } as never);
-}
-
-el("explorer-tree").addEventListener("click", (ev) => {
-  const target = (ev.target as HTMLElement).closest<HTMLElement>("[data-node]");
-  if (target?.dataset.node) {
-    jumpToNode(target.dataset.node);
-    ev.preventDefault();
-  }
-});
-
-let explorerFilterTimer: number | undefined;
-el<HTMLInputElement>("explorer-filter").addEventListener("input", () => {
-  window.clearTimeout(explorerFilterTimer);
-  explorerFilterTimer = window.setTimeout(() => {
-    const q = el<HTMLInputElement>("explorer-filter").value.trim().toLowerCase();
-    const tree = el("explorer-tree");
-    tree.querySelectorAll<HTMLElement>("li, details").forEach((node) => {
-      node.classList.remove("f-hide");
-    });
-    if (!q) return;
-    // hide non-matching leaves; open + keep ancestors of matches
-    tree.querySelectorAll<HTMLElement>("li").forEach((li) => {
-      if (!li.textContent?.toLowerCase().includes(q)) li.classList.add("f-hide");
-    });
-    tree.querySelectorAll<HTMLDetailsElement>("details").forEach((d) => {
-      const summaryText = d.querySelector(":scope > summary")?.textContent?.toLowerCase() ?? "";
-      const hasVisibleLeaf = [...d.querySelectorAll("li")].some(
-        (li) => !li.classList.contains("f-hide"),
-      );
-      if (summaryText.includes(q)) {
-        // summary matches → show all its leaves
-        d.querySelectorAll("li").forEach((li) => {
-          li.classList.remove("f-hide");
-        });
-        d.open = true;
-      } else if (hasVisibleLeaf) {
-        d.open = true;
-      } else {
-        d.classList.add("f-hide");
-      }
-    });
-    // un-hide ancestor chains of anything still visible
-    tree.querySelectorAll<HTMLElement>("details:not(.f-hide)").forEach((d) => {
-      let p = d.parentElement;
-      while (p && p !== tree) {
-        p.classList.remove("f-hide");
-        if (p instanceof HTMLDetailsElement) p.open = true;
-        p = p.parentElement;
-      }
-    });
-  }, 150);
-});
-
-el("flt-explorer").addEventListener("change", () => {
-  const on = checked("flt-explorer");
-  el("explorer").classList.toggle("hidden", !on);
-  el("legend").style.left = on ? `${el("explorer").offsetWidth + 8}px` : "8px";
-});
-
-// explorer resize: drag the right edge (mirrors the side panel's handle)
-{
-  const explorerEl = el("explorer");
-  const handle = el("explorer-resize");
-  let resizing = false;
-  handle.addEventListener("pointerdown", (ev) => {
-    resizing = true;
-    handle.setPointerCapture(ev.pointerId);
-    ev.preventDefault();
-  });
-  handle.addEventListener("pointermove", (ev) => {
-    if (!resizing) return;
-    const left = explorerEl.getBoundingClientRect().left;
-    const width = Math.min(520, Math.max(170, ev.clientX - left));
-    explorerEl.style.width = `${width}px`;
-    el("legend").style.left = `${width + 8}px`;
-  });
-  handle.addEventListener("pointerup", (ev) => {
-    resizing = false;
-    handle.releasePointerCapture(ev.pointerId);
-  });
 }
 
 function updateStats(): void {
@@ -1711,8 +1553,10 @@ window.addEventListener("message", (ev: MessageEvent) => {
   if (msg?.type === "graph") {
     database = msg.database ?? "";
     render(msg.graph as GraphPayload);
+  } else if (msg?.type === "reveal") {
+    jumpToNode(String(msg.id ?? ""));
   } else if (msg?.type === "connection") {
-    const connEl = el<HTMLInputElement>("conn");
+    const connEl = el("conn") as unknown as { value: string };
     if (!connEl.value) connEl.value = msg.value ?? "";
     if (!msg.value && !cy) {
       el("empty").textContent = "Enter a Postgres connection string above and press connect.";
@@ -1735,7 +1579,7 @@ window.addEventListener("keydown", (ev) => {
 });
 
 function doConnect(): void {
-  const value = el<HTMLInputElement>("conn").value.trim();
+  const value = valueOf("conn").trim();
   if (!value) return;
   el("empty").style.display = "flex";
   el("empty").textContent = "Connecting…";
@@ -1743,16 +1587,16 @@ function doConnect(): void {
 }
 
 el("connect").addEventListener("click", doConnect);
-el<HTMLInputElement>("conn").addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter") doConnect();
+el("conn").addEventListener("keydown", (ev) => {
+  if ((ev as KeyboardEvent).key === "Enter") doConnect();
 });
 
 let searchTimer: number | undefined;
-el<HTMLInputElement>("search").addEventListener("input", () => {
+el("search").addEventListener("input", () => {
   window.clearTimeout(searchTimer);
   searchTimer = window.setTimeout(() => {
     if (!cy || !payload) return;
-    const q = el<HTMLInputElement>("search").value.trim().toLowerCase();
+    const q = valueOf("search").trim().toLowerCase();
     cy.nodes().removeClass("matched");
     if (!q) return;
     // virtual rows live in the payload, not in cy — a column hit lights its card

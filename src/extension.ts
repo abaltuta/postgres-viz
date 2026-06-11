@@ -3,7 +3,7 @@ import { Client } from "pg";
 import { analyzeAll, disposeParser } from "./analyze";
 import { buildGraph } from "./graph";
 import { introspect } from "./introspect";
-import type { GraphPayload, NodeType } from "./types";
+import type { GraphNodeData, GraphPayload, NodeType } from "./types";
 
 const SECRET_KEY = "postgresViz.connectionString";
 
@@ -55,10 +55,170 @@ function redact(conn: string): string {
   }
 }
 
+// ── native explorer: a real TreeView in the activity bar ──
+
+interface TreeNode {
+  id: string;
+  label: string;
+  type: string;
+  description?: string;
+  children: TreeNode[];
+  parent?: TreeNode;
+  /** graph node id to reveal in the webview (groups have none) */
+  graphId?: string;
+}
+
+const TREE_ICONS: Record<string, string> = {
+  schema: "database",
+  table: "symbol-structure",
+  view: "eye",
+  matview: "symbol-interface",
+  foreign: "link-external",
+  function: "symbol-method",
+  column: "symbol-field",
+  trigger: "zap",
+  constraint: "lock",
+};
+
+class DbTreeProvider implements vscode.TreeDataProvider<TreeNode> {
+  private roots: TreeNode[] = [];
+  private byGraphId = new Map<string, TreeNode>();
+  private readonly emitter = new vscode.EventEmitter<void>();
+  readonly onDidChangeTreeData = this.emitter.event;
+
+  setGraph(graph: GraphPayload | null): void {
+    this.roots = [];
+    this.byGraphId.clear();
+    if (graph) this.build(graph);
+    this.emitter.fire();
+  }
+
+  find(graphId: string): TreeNode | undefined {
+    return this.byGraphId.get(graphId);
+  }
+
+  private build(graph: GraphPayload): void {
+    const ROWS = new Set(["column", "trigger", "constraint"]);
+    const node = (
+      label: string,
+      type: string,
+      parent: TreeNode | undefined,
+      graphId?: string,
+      description?: string,
+    ): TreeNode => {
+      const n: TreeNode = {
+        id: graphId ?? `grp:${parent?.id ?? ""}:${label}`,
+        label,
+        type,
+        description,
+        children: [],
+        parent,
+        graphId,
+      };
+      if (parent) parent.children.push(n);
+      if (graphId) this.byGraphId.set(graphId, n);
+      return n;
+    };
+    const bySchema = new Map<string, TreeNode>();
+    const relNodes = new Map<string, TreeNode>();
+    const rows: GraphNodeData[] = [];
+    const schemaOf = (d: GraphNodeData): TreeNode => {
+      const key = String(d.schema ?? "");
+      let s = bySchema.get(key);
+      if (!s) {
+        s = node(key, "schema", undefined);
+        bySchema.set(key, s);
+        this.roots.push(s);
+      }
+      return s;
+    };
+    const groups = new Map<string, TreeNode>();
+    const groupOf = (schema: TreeNode, type: string, title: string): TreeNode => {
+      const key = `${schema.id}:${type}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = node(title, "group", schema);
+        groups.set(key, g);
+      }
+      return g;
+    };
+    const sorted = [...graph.nodes].sort((a, b) =>
+      String(a.data.label).localeCompare(String(b.data.label)),
+    );
+    for (const { data: d } of sorted) {
+      if (d.type === "schema") continue;
+      if (ROWS.has(d.type)) {
+        rows.push(d);
+        continue;
+      }
+      const schema = schemaOf(d);
+      const title =
+        d.type === "function"
+          ? "functions"
+          : d.type === "table"
+            ? "tables"
+            : d.type === "view"
+              ? "views"
+              : d.type === "matview"
+                ? "materialized views"
+                : "foreign tables";
+      const rel = node(d.label, d.type, groupOf(schema, d.type, title), d.id);
+      relNodes.set(d.id, rel);
+    }
+    for (const d of rows) {
+      const parent = relNodes.get(d.parent ?? "");
+      if (parent) node(d.label, d.type, parent, d.id, d.detail);
+    }
+    this.roots.sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  getTreeItem(n: TreeNode): vscode.TreeItem {
+    const item = new vscode.TreeItem(
+      n.label,
+      n.children.length > 0
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None,
+    );
+    item.id = n.id;
+    item.description = n.description;
+    if (n.type !== "group") item.iconPath = new vscode.ThemeIcon(TREE_ICONS[n.type] ?? "circle");
+    if (n.graphId) {
+      item.command = {
+        command: "postgresViz.revealNode",
+        title: "Reveal in graph",
+        arguments: [n.graphId],
+      };
+    }
+    return item;
+  }
+
+  getChildren(n?: TreeNode): TreeNode[] {
+    return n ? n.children : this.roots;
+  }
+
+  getParent(n: TreeNode): TreeNode | undefined {
+    return n.parent;
+  }
+}
+
+let treeProvider: DbTreeProvider | undefined;
+let treeView: vscode.TreeView<TreeNode> | undefined;
+
 export function activate(context: vscode.ExtensionContext): void {
+  treeProvider = new DbTreeProvider();
+  treeView = vscode.window.createTreeView("postgresVizExplorer", {
+    treeDataProvider: treeProvider,
+    showCollapseAll: true,
+  });
   context.subscriptions.push(
+    treeView,
     vscode.commands.registerCommand("postgresViz.showLogs", () => getOutput().show(true)),
     vscode.commands.registerCommand("postgresViz.visualize", () => visualize(context)),
+    vscode.commands.registerCommand("postgresViz.revealNode", async (graphId: string) => {
+      if (!panel) await visualize(context);
+      panel?.reveal(undefined, true);
+      panel?.webview.postMessage({ type: "reveal", id: graphId });
+    }),
   );
 }
 
@@ -107,6 +267,13 @@ function ensurePanel(context: vscode.ExtensionContext): void {
         await loadGraph(lastConnection, { force: true });
       } else if (msg.type === "openDdl") {
         await openDdl(msg.nodeType as NodeType, Number(msg.oid), String(msg.label ?? ""));
+      } else if (msg.type === "nodeSelected") {
+        const item = treeProvider?.find(String(msg.id));
+        if (item && treeView?.visible) {
+          treeView
+            .reveal(item, { select: true, focus: false, expand: true })
+            .then(undefined, () => {});
+        }
       }
     } catch (err) {
       showError(err);
@@ -151,6 +318,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
     if (cached) {
       const age = Math.round((Date.now() - cached.builtAt) / 1000);
       logLine(`cache hit — serving graph built ${age}s ago (refresh to rebuild)`);
+      treeProvider?.setGraph(cached.graph);
       panel?.webview.postMessage({
         type: "graph",
         graph: cached.graph,
@@ -210,6 +378,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
           const oldest = graphCache.keys().next().value;
           if (oldest !== undefined) graphCache.delete(oldest);
         }
+        treeProvider?.setGraph(graph);
         panel?.webview.postMessage({ type: "graph", graph, database });
       },
     );
@@ -298,46 +467,40 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </head>
 <body>
   <div id="connbar">
-    <input id="conn" type="text" spellcheck="false"
-           placeholder="postgres://user:password@localhost:5432/dbname" />
-    <button id="connect">connect</button>
+    <vscode-textfield id="conn" spellcheck="false"
+           placeholder="postgres://user:password@localhost:5432/dbname"></vscode-textfield>
+    <vscode-button id="connect">connect</vscode-button>
   </div>
   <div id="toolbar">
-    <input id="search" type="text" placeholder="search nodes…" />
-    <select id="layout" title="layout">
-      <option value="grid" selected>grid</option>
-      <option value="fcose">organic</option>
-      <option value="breadthfirst">tree</option>
-      <option value="concentric">concentric</option>
-    </select>
-    <label><input type="checkbox" id="flt-explorer" checked />list</label>
-    <label><input type="checkbox" id="flt-schemagroup" checked />schemas</label>
-    <label><input type="checkbox" id="flt-columns" checked />columns</label>
-    <label><input type="checkbox" id="flt-views" checked />views</label>
-    <label><input type="checkbox" id="flt-functions" checked />functions</label>
-    <label><input type="checkbox" id="flt-triggers" checked />triggers</label>
-    <label><input type="checkbox" id="flt-constraints" checked />constraints</label>
-    <label><input type="checkbox" id="flt-fk" checked />FKs</label>
-    <label title="cards: one rolled-up edge per pair of tables/functions; all: every per-column edge; off: click a node to reveal">edges
-      <select id="edge-mode">
-        <option value="off" selected>off</option>
-        <option value="cards">cards</option>
-        <option value="all">all</option>
-      </select>
+    <vscode-textfield id="search" placeholder="search nodes…"></vscode-textfield>
+    <vscode-single-select id="layout" title="layout">
+      <vscode-option value="grid" selected>grid</vscode-option>
+      <vscode-option value="fcose">organic</vscode-option>
+      <vscode-option value="breadthfirst">tree</vscode-option>
+      <vscode-option value="concentric">concentric</vscode-option>
+    </vscode-single-select>
+    <vscode-checkbox id="flt-schemagroup" checked>schemas</vscode-checkbox>
+    <vscode-checkbox id="flt-columns" checked>columns</vscode-checkbox>
+    <vscode-checkbox id="flt-views" checked>views</vscode-checkbox>
+    <vscode-checkbox id="flt-functions" checked>functions</vscode-checkbox>
+    <vscode-checkbox id="flt-triggers" checked>triggers</vscode-checkbox>
+    <vscode-checkbox id="flt-constraints" checked>constraints</vscode-checkbox>
+    <vscode-checkbox id="flt-fk" checked>FKs</vscode-checkbox>
+    <label class="select-label" title="cards: one rolled-up edge per pair of tables/functions; all: every per-column edge; off: click a node to reveal">edges
+      <vscode-single-select id="edge-mode">
+        <vscode-option value="off" selected>off</vscode-option>
+        <vscode-option value="cards">cards</vscode-option>
+        <vscode-option value="all">all</vscode-option>
+      </vscode-single-select>
     </label>
-    <label title="experimental: re-route blocked edges around cards via the outer corridor"><input type="checkbox" id="flt-route" />avoid boxes</label>
-    <label><input type="checkbox" id="flt-isolated" />hide isolated</label>
-    <button id="relayout">layout</button>
-    <button id="fit">fit</button>
-    <button id="refresh">refresh</button>
+    <vscode-checkbox id="flt-route" title="experimental: re-route blocked edges around cards via the outer corridor">avoid boxes</vscode-checkbox>
+    <vscode-checkbox id="flt-isolated">hide isolated</vscode-checkbox>
+    <vscode-button id="relayout" secondary>layout</vscode-button>
+    <vscode-button id="fit" secondary>fit</vscode-button>
+    <vscode-button id="refresh" secondary>refresh</vscode-button>
     <span id="stats"></span>
   </div>
   <div id="content">
-    <aside id="explorer">
-      <input id="explorer-filter" type="text" placeholder="filter objects…" spellcheck="false" />
-      <div id="explorer-tree"></div>
-      <div id="explorer-resize" title="drag to resize"></div>
-    </aside>
     <div id="cy"></div>
     <div id="crumb" class="hidden"></div>
     <div id="legend"></div>

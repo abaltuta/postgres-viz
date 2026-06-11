@@ -15,8 +15,13 @@ body {
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  height: 24px;
+  height: 28px;
   border-bottom: 1px solid var(--vscode-panel-border, #444);
+}
+
+#connbar vscode-textfield {
+  flex: 1;
+  min-width: 0;
 }
 
 #connbar input {
@@ -48,10 +53,25 @@ body {
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
-  height: 26px;
+  height: 30px;
   border-bottom: 1px solid var(--vscode-panel-border, #444);
   white-space: nowrap;
   overflow-x: auto;
+}
+
+#toolbar vscode-textfield {
+  width: 160px;
+}
+
+#toolbar vscode-single-select {
+  width: 110px;
+}
+
+#toolbar .select-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0.9;
 }
 
 #toolbar input[type='text'] {
@@ -100,7 +120,7 @@ body {
 
 #content {
   position: absolute;
-  top: 68px;
+  top: 76px;
   bottom: 0;
   left: 0;
   right: 0;
@@ -112,107 +132,21 @@ body {
   min-width: 0;
 }
 
-#explorer {
-  position: relative;
-  width: 250px;
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--vscode-panel-border, #444);
-  background: var(--vscode-sideBar-background, transparent);
-  font-size: 12px;
-}
 
-#explorer-resize {
-  position: absolute;
-  right: -3px;
-  top: 0;
-  bottom: 0;
-  width: 7px;
-  cursor: ew-resize;
-  z-index: 4;
-}
 
-#explorer-resize:hover {
-  background: var(--vscode-focusBorder, #007fd4);
-  opacity: 0.4;
-}
 
-#explorer.hidden {
-  display: none;
-}
 
-#explorer-filter {
-  margin: 6px;
-  background: var(--vscode-input-background);
-  color: var(--vscode-input-foreground);
-  border: 1px solid var(--vscode-input-border, transparent);
-  border-radius: 2px;
-  padding: 2px 6px;
-}
 
-#explorer-tree {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 4px 8px;
-}
 
-#explorer-tree details {
-  padding-left: 10px;
-}
 
-#explorer-tree summary {
-  cursor: pointer;
-  padding: 1px 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
-#explorer-tree summary:hover,
-#explorer-tree li:hover {
-  background: var(--vscode-list-hoverBackground, #ffffff14);
-}
 
-#explorer-tree ul {
-  list-style: none;
-  margin: 0;
-  padding-left: 18px;
-}
 
-#explorer-tree li {
-  cursor: pointer;
-  padding: 0 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
 
-#explorer-tree small {
-  opacity: 0.55;
-  margin-left: 4px;
-}
 
-#explorer-tree .obj {
-  cursor: pointer;
-}
 
-#explorer-tree .dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  margin-right: 5px;
-}
 
-#explorer-tree .f-hide {
-  display: none;
-}
 
-#explorer-tree .active {
-  background: var(--vscode-list-activeSelectionBackground, #094771);
-  color: var(--vscode-list-activeSelectionForeground, #fff);
-  border-radius: 2px;
-}
 
 #panel {
   position: absolute;
@@ -411,7 +345,7 @@ body {
 #legend {
   position: absolute;
   bottom: 6px;
-  left: 258px; /* clears the explorer; collapses to 8px when it's hidden */
+  left: 8px;
   display: flex;
   flex-wrap: wrap;
   gap: 4px 10px;
@@ -421,9 +355,6 @@ body {
   pointer-events: none;
 }
 
-#explorer.hidden ~ #legend {
-  left: 8px;
-}
 
 #legend .dot {
   display: inline-block;
@@ -443,7 +374,7 @@ body {
 
 #empty {
   position: absolute;
-  inset: 68px 0 0 0;
+  inset: 76px 0 0 0;
   display: flex;
   align-items: center;
   justify-content: center;
