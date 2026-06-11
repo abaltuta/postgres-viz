@@ -1114,6 +1114,7 @@ function leaveToBase(): void {
   el("content").classList.remove("view-focus", "view-calltree");
   dematerializeAll();
   resetViewState(cy);
+  hoverUnit = null; // hover-reveal was just stripped — the guard must not skip the re-add
   restorePositions(cy, saved);
   hideCrumb();
   // re-establish what the view bypassed: edge-mode "all" re-materializes,
@@ -1135,6 +1136,7 @@ function enterView(spec: Omit<ViewSpec, "saved">): void {
   const saved = snapshotPositions(cy); // TRUE base positions, pre-mutation
   view = { ...spec, saved };
   resetViewState(cy); // strip selection highlights left in base
+  hoverUnit = null; // hover-reveal was just stripped — the guard must not skip the re-add
   applyKeepMask(cy, view.keep);
   el("content").classList.add(`view-${view.mode}`);
   renderCrumb();
@@ -1450,10 +1452,23 @@ function renderPanel(node: NodeSingular): void {
     ${outRows.length > 0 ? `<details open><summary>Uses (${outRows.length})</summary><ul class="edge-list">${outRows.join("")}</ul></details>` : ""}
     ${inRows.length > 0 ? `<details open><summary>Used by (${inRows.length})</summary><ul class="edge-list">${inRows.join("")}</ul></details>` : ""}
     ${outRows.length === 0 && inRows.length === 0 ? "<h3>No connections</h3>" : ""}`;
-  panel.querySelector("#panel-close")?.addEventListener("click", () => clearSelection());
+  panel.querySelector("#panel-close")?.addEventListener("click", () => {
+    if (view) {
+      // keep the view, just dismiss the panel — clearSelection in focus mode
+      // re-selects the origin, which would immediately reopen it
+      cy?.edges().removeClass("hot");
+      el("panel").classList.add("hidden");
+    } else {
+      clearSelection();
+    }
+  });
 
+  // parent lookups resolved NOW, while the node is live — the panel outlives
+  // view transitions that remove row nodes, and traversal on a removed
+  // element returns nothing
+  const ddlTarget = d.type === "column" ? (node.parent().first().data() as GraphNodeData) : d;
   panel.querySelector("#ddl-btn")?.addEventListener("click", () => {
-    const td = d.type === "column" ? (node.parent().first().data() as GraphNodeData) : d;
+    const td = ddlTarget;
     vscode.postMessage({
       type: "openDdl",
       nodeType: td.type,
@@ -1462,7 +1477,7 @@ function renderPanel(node: NodeSingular): void {
     });
   });
   panel.querySelector("#def-btn")?.addEventListener("click", () => {
-    const owner = ROW_TYPES.has(d.type) ? String(node.parent().first().data("label") ?? "") : "";
+    const owner = ownerTable; // resolved at render time — see ddlTarget note
     vscode.postMessage({
       type: "openDefinition",
       nodeType: d.type,
@@ -1643,7 +1658,9 @@ el("search").addEventListener("input", () => {
       if (!String(n.data.label).toLowerCase().includes(q)) continue;
       hitIds.add(ROW_TYPES.has(n.data.type) ? (cardOfNode.get(n.data.id) ?? n.data.id) : n.data.id);
     }
-    const matched = cy.nodes().filter((n) => hitIds.has(n.id()) && n.visible());
+    // class checks, not `.visible()` — computed style can lag the batched
+    // class changes of filters/views and would drop legitimate hits
+    const matched = cy.nodes().filter((n) => hitIds.has(n.id()) && isShown(n));
     matched.addClass("matched");
     if (matched.nonempty()) {
       cy.animate({ fit: { eles: matched, padding: 80 }, duration: 200 } as never);
