@@ -68,10 +68,37 @@ const notifyFn: CatalogFunc = {
   hasSqlBody: false,
 };
 
+// SELECT-only BEFORE trigger fn that mutates NEW — must yield a MODIFIES
+// attribution and zero write-family attributions (it issues no DML)
+const PRORATION_FN = 2003;
+const prorationBody = `
+DECLARE
+  supports boolean;
+BEGIN
+  SELECT o.total > 0 INTO supports FROM orders o WHERE o.id = NEW.id;
+  IF NOT supports AND NEW.total = 0 THEN
+    NEW.total := 1;
+  END IF;
+  RETURN NEW;
+END;
+`;
+const prorationFn: CatalogFunc = {
+  oid: PRORATION_FN,
+  schema: "public",
+  name: "enforce_proration",
+  language: "plpgsql",
+  kind: "f",
+  args: "",
+  returns: "trigger",
+  src: prorationBody,
+  def: `CREATE OR REPLACE FUNCTION public.enforce_proration() RETURNS trigger LANGUAGE plpgsql AS $fn$${prorationBody}$fn$;`,
+  hasSqlBody: false,
+};
+
 const catalog: Pick<Catalog, "rels" | "cols" | "funcs"> = {
   rels,
   cols,
-  funcs: [logOrderFn, notifyFn],
+  funcs: [logOrderFn, notifyFn, prorationFn],
 };
 
 const ordersRel = rels[0]!;
@@ -97,6 +124,16 @@ async function main(): Promise<void> {
   assert.ok(refs.updates.get(CUSTOMERS)!.has(2), "customers.name should be updated");
 
   assert.ok(refs.calls.has(NOTIFY_FN), "notify_stats() call should be detected");
+
+  // ── trigger NEW-assignment: modifies, never a write ──
+  const proration = await analyzeFunc(prorationFn, resolver, [ordersRel], parser);
+  assert.ok(proration.modifies.has(ORDERS), "NEW.total := … modifies orders");
+  assert.ok(proration.modifies.get(ORDERS)!.has(2), "…specifically orders.total");
+  assert.equal(proration.writes.size, 0, "SELECT-only trigger fn has no generic writes");
+  assert.equal(proration.updates.size, 0, "…no updates");
+  assert.equal(proration.inserts.size, 0, "…no inserts");
+  assert.equal(proration.deletes.size, 0, "…no deletes");
+  assert.ok(proration.reads.has(ORDERS), "the SELECT still reads orders");
 
   // ── regex fallback path ──
   const fallback = await analyzeFunc(logOrderFn, resolver, [ordersRel], null);
