@@ -325,6 +325,7 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
         <option value="all">all</option>
       </select>
     </label>
+    <label title="experimental: re-route blocked edges around cards via the outer corridor"><input type="checkbox" id="flt-route" />avoid boxes</label>
     <label><input type="checkbox" id="flt-isolated" />hide isolated</label>
     <button id="relayout">layout</button>
     <button id="fit">fit</button>

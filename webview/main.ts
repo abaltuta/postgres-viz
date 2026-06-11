@@ -897,6 +897,136 @@ function layoutConcentricCards(units: NodeSingular[]): void {
   }
 }
 
+// ── obstacle-avoiding edge routing (toggleable heuristic) ──
+//
+// Cytoscape has no built-in router that avoids node boxes. Since the card
+// layouts are ours, a deterministic detour is enough: if an edge's straight
+// line crosses any card, re-draw it as Manhattan segments that exit the
+// source, run along the outer-left "bus" (always clear of cards), and enter
+// the target from its open side. Routed edges use per-edge style bypasses
+// (curve-style: segments), cleared and recomputed after every layout/reveal.
+
+interface Box {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** Liang-Barsky style segment-vs-rect test. */
+function segmentHitsBox(ax: number, ay: number, bx: number, by: number, r: Box): boolean {
+  let t0 = 0;
+  let t1 = 1;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const clip = (p: number, q: number): boolean => {
+    if (p === 0) return q >= 0;
+    const t = q / p;
+    if (p < 0) {
+      if (t > t1) return false;
+      if (t > t0) t0 = t;
+    } else {
+      if (t < t0) return false;
+      if (t < t1) t1 = t;
+    }
+    return true;
+  };
+  return (
+    clip(-dx, ax - r.x1) &&
+    clip(dx, r.x2 - ax) &&
+    clip(-dy, ay - r.y1) &&
+    clip(dy, r.y2 - ay) &&
+    t0 <= t1
+  );
+}
+
+/** True when an edge is actually being drawn right now (class-derived). */
+function edgeShownForRouting(e: EdgeSingular): boolean {
+  if (e.hasClass("agg-suppressed") || e.hasClass("hidden-el")) return false;
+  const revealed = e.hasClass("revealed") || e.hasClass("hover-reveal");
+  if (!revealed) {
+    const mode = edgeMode();
+    if (mode === "off") return false;
+    if (mode === "cards" && e.data("detail")) return false;
+  }
+  return isShown(e.source() as NodeSingular) && isShown(e.target() as NodeSingular);
+}
+
+const routedEdges = new Set<string>();
+
+function clearEdgeRouting(): void {
+  if (!cy) return;
+  for (const id of routedEdges) {
+    const e = cy.getElementById(id);
+    if (e.nonempty()) e.removeStyle("curve-style segment-weights segment-distances");
+  }
+  routedEdges.clear();
+}
+
+/** Absolute waypoints → cytoscape's relative segment-weights/-distances. */
+function applySegments(
+  e: EdgeSingular,
+  s: { x: number; y: number },
+  t: { x: number; y: number },
+  pts: { x: number; y: number }[],
+): void {
+  const dx = t.x - s.x;
+  const dy = t.y - s.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1) return;
+  const ws: number[] = [];
+  const ds: number[] = [];
+  for (const p of pts) {
+    const px = p.x - s.x;
+    const py = p.y - s.y;
+    ws.push((px * dx + py * dy) / len2);
+    ds.push((px * dy - py * dx) / Math.sqrt(len2));
+  }
+  e.style({
+    "curve-style": "segments",
+    "segment-weights": ws.join(" "),
+    "segment-distances": ds.join(" "),
+  });
+  routedEdges.add(e.id());
+}
+
+function routeEdgesAroundCards(): void {
+  if (!cy) return;
+  clearEdgeRouting();
+  if (!checked("flt-route")) return;
+  const units = cardUnits();
+  const boxes = units.map((u) => {
+    const b = u.boundingBox({ includeLabels: true });
+    return { id: u.id(), box: { x1: b.x1 - 10, y1: b.y1 - 10, x2: b.x2 + 10, y2: b.y2 + 10 } };
+  });
+  if (boxes.length === 0) return;
+  const busX = Math.min(...boxes.map((b) => b.box.x1)) - 60;
+  cy.edges().forEach((edge) => {
+    const e = edge as EdgeSingular;
+    if (!edgeShownForRouting(e)) return;
+    const sU = unitOf(e.source() as NodeSingular).id();
+    const tU = unitOf(e.target() as NodeSingular).id();
+    if (sU === tU) return;
+    const sp = e.source().position();
+    const tp = e.target().position();
+    const blocked = boxes.some(
+      (b) => b.id !== sU && b.id !== tU && segmentHitsBox(sp.x, sp.y, tp.x, tp.y, b.box),
+    );
+    if (!blocked) return;
+    const sBox = boxes.find((b) => b.id === sU)?.box;
+    const tBox = boxes.find((b) => b.id === tU)?.box;
+    const down = tp.y >= sp.y;
+    const outY = down ? (sBox?.y2 ?? sp.y) + 6 : (sBox?.y1 ?? sp.y) - 6;
+    const inY = down ? (tBox?.y1 ?? tp.y) - 6 : (tBox?.y2 ?? tp.y) + 6;
+    applySegments(e, sp, tp, [
+      { x: sp.x, y: outY },
+      { x: busX, y: outY },
+      { x: busX, y: inY },
+      { x: tp.x, y: inY },
+    ]);
+  });
+}
+
 function runLayout(): void {
   if (!cy) return;
   const name = el<HTMLSelectElement>("layout").value;
@@ -940,6 +1070,7 @@ function runLayout(): void {
     layout.one("layoutstop", () => {
       restackRows();
       resolveOverlaps(cardUnits());
+      routeEdgesAroundCards();
       fitView();
     });
     layout.run();
@@ -950,6 +1081,7 @@ function runLayout(): void {
   if (name === "breadthfirst") layoutTreeCards(units);
   else if (name === "concentric") layoutConcentricCards(units);
   else layoutGridCards(units);
+  routeEdgesAroundCards();
   fitView();
 }
 
@@ -980,6 +1112,7 @@ function selectNode(node: NodeSingular): void {
   const withParents = hood.union(hood.nodes().ancestors());
   cy.elements().addClass("dimmed");
   withParents.removeClass("dimmed");
+  routeEdgesAroundCards();
   renderPanel(node);
 }
 
@@ -992,6 +1125,7 @@ function clearSelection(): void {
     dematerializeAll();
     restackRows();
   }
+  routeEdgesAroundCards();
 }
 
 // ── focus mode & call tree ──
@@ -1191,11 +1325,13 @@ function showCallTree(node: NodeSingular): void {
       applyCallTreeColumnFilter();
       restackRows();
       layoutTreeCards(cardUnits());
+      routeEdgesAroundCards();
       fitView();
     });
 
   restackRows();
   layoutTreeCards(cardUnits());
+  routeEdgesAroundCards();
   fitView();
   // wide trees fit to specks — guarantee a readable zoom centered on the root
   window.setTimeout(() => {
@@ -1626,7 +1762,9 @@ el("flt-columns").addEventListener("change", () => {
 el("edge-mode").addEventListener("change", () => {
   if (edgeMode() !== "all" && !viewState) dematerializeAll();
   applyFilters();
+  routeEdgesAroundCards();
 });
+el("flt-route").addEventListener("change", () => routeEdgesAroundCards());
 el("flt-schemagroup").addEventListener("change", () => applySchemaGrouping(true));
 el("layout").addEventListener("change", runLayout);
 el("relayout").addEventListener("click", runLayout);
