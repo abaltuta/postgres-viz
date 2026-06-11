@@ -211,6 +211,76 @@ class DbTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 let treeProvider: DbTreeProvider | undefined;
 let treeView: vscode.TreeView<TreeNode> | undefined;
 
+// ── workspace symbols: every db object reachable from Cmd+T ──
+
+/** the most recently loaded graph — backs the symbol provider */
+let currentGraph: GraphPayload | null = null;
+
+const SYMBOL_KINDS: Partial<Record<NodeType, vscode.SymbolKind>> = {
+  table: vscode.SymbolKind.Class,
+  foreign: vscode.SymbolKind.Class,
+  view: vscode.SymbolKind.Interface,
+  matview: vscode.SymbolKind.Interface,
+  function: vscode.SymbolKind.Function,
+  column: vscode.SymbolKind.Field,
+  trigger: vscode.SymbolKind.Event,
+  constraint: vscode.SymbolKind.Key,
+  index: vscode.SymbolKind.Key,
+};
+
+const SYMBOL_ROWS = new Set<string>(["column", "trigger", "constraint", "index"]);
+const SYMBOL_CAP = 2000;
+
+/** Virtual document a symbol points at; the content provider serves its DDL. */
+function ddlUri(type: NodeType, oid: number, label: string): vscode.Uri {
+  return vscode.Uri.from({
+    scheme: "pgviz",
+    path: `/${type}/${oid}/${encodeURIComponent(label)}.sql`,
+  });
+}
+
+class DbSymbolProvider implements vscode.WorkspaceSymbolProvider {
+  provideWorkspaceSymbols(query: string): vscode.SymbolInformation[] {
+    if (!currentGraph) return [];
+    const q = query.toLowerCase();
+    const labelOf = new Map<string, string>();
+    for (const { data: d } of currentGraph.nodes) labelOf.set(d.id, String(d.label));
+    const out: vscode.SymbolInformation[] = [];
+    for (const { data: d } of currentGraph.nodes) {
+      const kind = SYMBOL_KINDS[d.type];
+      if (!kind) continue; // schemas have no DDL document of their own
+      const isRow = SYMBOL_ROWS.has(d.type);
+      const owner = isRow ? (labelOf.get(d.parent ?? "") ?? "") : "";
+      const container = isRow ? `${d.schema ?? ""}.${owner}` : (d.schema ?? "");
+      if (q && !`${container}.${d.label}`.toLowerCase().includes(q)) continue;
+      // a column's DDL doc is its table's column listing (oid is the rel's)
+      const docLabel = d.type === "column" ? container : `${d.schema ?? ""}.${d.label}`;
+      out.push(
+        new vscode.SymbolInformation(
+          d.label,
+          kind,
+          container,
+          new vscode.Location(ddlUri(d.type, d.oid, docLabel), new vscode.Position(0, 0)),
+        ),
+      );
+      if (out.length >= SYMBOL_CAP) break;
+    }
+    return out;
+  }
+}
+
+class DdlContentProvider implements vscode.TextDocumentContentProvider {
+  async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
+    const [, type, oid, file] = uri.path.split("/");
+    const label = decodeURIComponent(file ?? "").replace(/\.sql$/, "");
+    try {
+      return await fetchDdl(type as NodeType, Number(oid), label);
+    } catch (err) {
+      return `-- failed to load DDL for ${label}: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   treeProvider = new DbTreeProvider();
   treeView = vscode.window.createTreeView("postgresVizExplorer", {
@@ -219,14 +289,26 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   context.subscriptions.push(
     treeView,
+    vscode.workspace.registerTextDocumentContentProvider("pgviz", new DdlContentProvider()),
+    vscode.languages.registerWorkspaceSymbolProvider(new DbSymbolProvider()),
     vscode.commands.registerCommand("postgresViz.showLogs", () => getOutput().show(true)),
     vscode.commands.registerCommand("postgresViz.visualize", () => visualize(context)),
+    vscode.commands.registerCommand("postgresViz.load", () => load(context)),
     vscode.commands.registerCommand("postgresViz.revealNode", async (graphId: string) => {
       if (!panel) await visualize(context);
       panel?.reveal(undefined, true);
       panel?.webview.postMessage({ type: "reveal", id: graphId });
     }),
   );
+  // a stored connection loads in the background at startup — tree + Cmd+T
+  // symbols are ready without opening the graph panel
+  void context.secrets.get(SECRET_KEY).then((conn) => {
+    if (conn) {
+      lastConnection = conn;
+      logLine(`startup: loading ${redact(conn)} in the background`);
+      return loadGraph(conn);
+    }
+  });
 }
 
 export function deactivate(): void {
@@ -241,6 +323,24 @@ async function visualize(context: vscode.ExtensionContext): Promise<void> {
     await loadGraph(conn);
   }
   // no stored connection → the webview's connection bar takes over
+}
+
+/** Load the graph WITHOUT opening the panel (sidebar welcome button / startup). */
+async function load(context: vscode.ExtensionContext): Promise<void> {
+  let conn = await context.secrets.get(SECRET_KEY);
+  if (!conn) {
+    conn = await vscode.window.showInputBox({
+      title: "Postgres Viz: connect",
+      prompt: "Postgres connection string",
+      placeHolder: "postgres://user:password@localhost:5432/dbname",
+      ignoreFocusOut: true,
+    });
+    if (!conn?.trim()) return;
+    conn = conn.trim();
+    await context.secrets.store(SECRET_KEY, conn);
+  }
+  lastConnection = conn;
+  await loadGraph(conn);
 }
 
 function ensurePanel(context: vscode.ExtensionContext): void {
@@ -325,6 +425,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
     if (cached) {
       const age = Math.round((Date.now() - cached.builtAt) / 1000);
       logLine(`cache hit — serving graph built ${age}s ago (refresh to rebuild)`);
+      currentGraph = cached.graph;
       treeProvider?.setGraph(cached.graph);
       panel?.webview.postMessage({
         type: "graph",
@@ -385,6 +486,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
           const oldest = graphCache.keys().next().value;
           if (oldest !== undefined) graphCache.delete(oldest);
         }
+        currentGraph = graph;
         treeProvider?.setGraph(graph);
         panel?.webview.postMessage({ type: "graph", graph, database });
       },
@@ -403,7 +505,19 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
 
 async function openDdl(nodeType: NodeType, oid: number, label: string): Promise<void> {
   if (!lastConnection || !Number.isFinite(oid)) return;
-  const content = await withClient(lastConnection, async (client) => {
+  const content = await fetchDdl(nodeType, oid, label);
+  const doc = await vscode.workspace.openTextDocument({ language: "sql", content });
+  await vscode.window.showTextDocument(doc, {
+    viewColumn: vscode.ViewColumn.Beside,
+    preview: true,
+  });
+}
+
+async function fetchDdl(nodeType: NodeType, oid: number, label: string): Promise<string> {
+  if (!lastConnection || !Number.isFinite(oid)) {
+    return `-- ${label}: connect in the Postgres Viz panel first`;
+  }
+  return withClient(lastConnection, async (client) => {
     switch (nodeType) {
       case "view":
       case "matview": {
@@ -452,11 +566,6 @@ async function openDdl(nodeType: NodeType, oid: number, label: string): Promise<
         return `-- ${label} (columns)\nCREATE TABLE ${label} (\n${body}\n);`;
       }
     }
-  });
-  const doc = await vscode.workspace.openTextDocument({ language: "sql", content });
-  await vscode.window.showTextDocument(doc, {
-    viewColumn: vscode.ViewColumn.Beside,
-    preview: true,
   });
 }
 

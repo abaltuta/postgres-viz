@@ -2,7 +2,7 @@
   "name": "postgres-viz",
   "displayName": "Postgres Viz",
   "description": "Call-graph & dependency visualizer for PostgreSQL: triggers, views, PL/pgSQL functions, tables and columns.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "baltuta",
   "private": true,
   "engines": {
@@ -12,7 +12,9 @@
     "Visualization"
   ],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -32,10 +34,36 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "postgresVizExplorer",
+        "contents": "No database loaded yet.\n[Connect / Load](command:postgresViz.load)\nIntrospects the database and fills this tree and workspace symbols — without opening the graph.\n[Open Graph](command:postgresViz.visualize)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "postgresViz.load",
+          "when": "view == postgresVizExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "postgresViz.visualize",
+          "when": "view == postgresVizExplorer",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "postgresViz.visualize",
-        "title": "Postgres Viz: Visualize Database"
+        "title": "Postgres Viz: Visualize Database",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "postgresViz.load",
+        "title": "Postgres Viz: Connect / Load Database",
+        "icon": "$(plug)"
       },
       {
         "command": "postgresViz.showLogs",
@@ -77,7 +105,7 @@
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
     "lint": "oxlint src webview test",
     "format": "oxfmt src webview test esbuild.mjs",
-    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js",
+    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/webview.js",
     "test:db": "node esbuild.mjs --smoke && node dist-test/integration.js",
     "package": "pnpm build && vsce package --no-dependencies"
   },
