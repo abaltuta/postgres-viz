@@ -307,10 +307,10 @@ async function main(): Promise<void> {
       ordersCustomerId,
       "log_order reads orders.customer_id (incl. NEW.…)",
     );
-    assertEdge(g, "writes", logOrder, auditLog, "log_order writes audit_log");
-    assertEdge(g, "writes", logOrder, auditTableName, "log_order writes audit_log.table_name");
-    assertEdge(g, "writes", logOrder, auditPayload, "log_order writes audit_log.payload");
-    assertEdge(g, "writes", logOrder, customersName, "log_order writes customers.name");
+    assertEdge(g, "inserts", logOrder, auditLog, "log_order inserts into audit_log");
+    assertEdge(g, "inserts", logOrder, auditTableName, "log_order inserts audit_log.table_name");
+    assertEdge(g, "inserts", logOrder, auditPayload, "log_order inserts audit_log.payload");
+    assertEdge(g, "updates", logOrder, customersName, "log_order updates customers.name");
     assertEdge(g, "calls", logOrder, notifyStats, "log_order calls notify_stats");
 
     // BEGIN ATOMIC SQL function → exact deps from pg_depend
@@ -333,7 +333,7 @@ async function main(): Promise<void> {
     assert.equal(fkAgg!.data.count, 1, "fk aggregate counts its member edges");
     assert.ok(fkAgg!.data.label, "fk aggregate carries the constraint name");
     const writesAgg = g.edges.find(
-      (e) => e.data.kind === "writes" && e.data.source === logOrder && e.data.target === auditLog,
+      (e) => e.data.kind === "inserts" && e.data.source === logOrder && e.data.target === auditLog,
     );
     assert.ok(writesAgg?.data.agg, "log_order→audit_log card edge is an aggregate");
     assert.equal(writesAgg!.data.count, 2, "aggregate counts table_name + payload writes");
@@ -389,10 +389,10 @@ async function main(): Promise<void> {
     const touch = nodeId(g, "function", "touch_customer()");
     assertEdge(
       g,
-      "writes",
+      "updates",
       touch,
       customersEmail,
-      "UPDATE … AS tgt SET email writes customers.email",
+      "UPDATE … AS tgt SET email updates customers.email",
     );
     assertEdge(g, "reads", touch, customersName, "tgt.name read via target alias");
     assertEdge(g, "reads", touch, customersId, "tgt.id read via target alias");
@@ -418,13 +418,13 @@ async function main(): Promise<void> {
     const payrunStatus = nodeId(g, "function", "payrun_status()");
 
     // LANGUAGE sql body with a data-modifying CTE + aggregation
-    assertEdge(g, "writes", recalc, totalsTable, "DELETE inside CTE writes employee_totals");
+    assertEdge(g, "deletes", recalc, totalsTable, "DELETE inside CTE deletes from employee_totals");
     assertEdge(
       g,
-      "writes",
+      "inserts",
       recalc,
       nodeId(g, "column", "computed_total", totalsTable),
-      "INSERT column list writes employee_totals.computed_total",
+      "INSERT column list inserts employee_totals.computed_total",
     );
     assertEdge(g, "reads", recalc, entryTable, "reads report_entry");
     assertEdge(

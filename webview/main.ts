@@ -22,6 +22,9 @@ const NODE_COLORS: Record<string, string> = {
 const EDGE_COLORS: Record<string, string> = {
   selects: "#36B37E",
   reads: "#4C9AFF",
+  inserts: "#4CC38A",
+  updates: "#FFA657",
+  deletes: "#F85149",
   writes: "#FF5630",
   calls: "#FFAB00",
   executes: "#FF7452",
@@ -1274,8 +1277,11 @@ function showCallTree(node: NodeSingular): void {
   }
   const keep = new Set<string>(fns);
   keep.add(startUnit.id());
-  cy.edges('[!detail][kind="reads"], [!detail][kind="writes"]').forEach((e) => {
-    if (fns.has(e.source().id())) keep.add(e.target().id());
+  const DATA_KINDS = new Set(["reads", "inserts", "updates", "deletes", "writes"]);
+  cy.edges("[!detail]").forEach((e) => {
+    if (DATA_KINDS.has(String(e.data("kind"))) && fns.has(e.source().id())) {
+      keep.add(e.target().id());
+    }
   });
   // context: who calls / fires the root
   cy.edges('[!detail][kind="calls"], [!detail][kind="executes"]').forEach((e) => {
@@ -1296,7 +1302,7 @@ function showCallTree(node: NodeSingular): void {
     if (!keep.has(srcUnit) || !keep.has(tgtUnit)) return false;
     if (kind === "executes") return fns.has(tgtId) || fns.has(tgtUnit);
     if (kind === "calls") return fns.has(srcUnit) || fns.has(tgtUnit);
-    if (kind === "reads" || kind === "writes") return fns.has(srcUnit);
+    if (DATA_KINDS.has(kind)) return fns.has(srcUnit);
     return false;
   };
   const revealedPairs = new Set<string>();
@@ -1409,6 +1415,9 @@ const PASSIVE_KIND: Record<string, string> = {
   calls: "called by",
   executes: "executed by",
   reads: "read by",
+  inserts: "inserted by",
+  updates: "updated by",
+  deletes: "deleted by",
   writes: "written by",
   selects: "selected by",
   fk: "referenced by",

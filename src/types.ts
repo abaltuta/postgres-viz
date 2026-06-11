@@ -110,6 +110,9 @@ export type NodeType = RelKind | "column" | "function" | "trigger" | "constraint
 export type EdgeKind =
   | "selects"
   | "reads"
+  | "inserts"
+  | "updates"
+  | "deletes"
   | "writes"
   | "calls"
   | "executes"

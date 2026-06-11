@@ -10,11 +10,17 @@ type Json = any;
 export interface FuncRefs {
   /** relOid → attnums (0 = whole-table) */
   reads: Map<number, Set<number>>;
+  inserts: Map<number, Set<number>>;
+  updates: Map<number, Set<number>>;
+  deletes: Map<number, Set<number>>;
+  /** writes not attributable to one operation (MERGE, NEW.col := …, fallback) */
   writes: Map<number, Set<number>>;
   calls: Set<number>;
   /** true when the real Postgres parser was used; false = regex fallback */
   parsed: boolean;
 }
+
+type WriteOp = "inserts" | "updates" | "deletes" | "writes";
 
 export interface PgParser {
   /** returns a raw-parse tree `{version, stmts: [...]}` or throws */
@@ -366,22 +372,30 @@ function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
 
   // Write targets, tracked by OBJECT IDENTITY (not name): the same relation can
   // appear as both a read and a write in one statement (UPDATE t … FROM t), and
-  // only the specific RangeVar node sitting in `relation` is the write.
-  const writeTargets = new Set<Json>();
+  // only the specific RangeVar node sitting in `relation` is the write. The
+  // statement tag tells us WHICH kind of write; MERGE stays generic (it can be
+  // all three at once).
+  const writeTargets = new Map<Json, WriteOp>();
   walk(stmt, (tag, v) => {
     switch (tag) {
       case "InsertStmt":
+        if (v.relation) writeTargets.set(v.relation, "inserts");
+        break;
       case "UpdateStmt":
+        if (v.relation) writeTargets.set(v.relation, "updates");
+        break;
       case "DeleteStmt":
+        if (v.relation) writeTargets.set(v.relation, "deletes");
+        break;
       case "MergeStmt":
       case "RefreshMatViewStmt":
-        if (v.relation) writeTargets.add(v.relation);
+        if (v.relation) writeTargets.set(v.relation, "writes");
         break;
       case "CopyStmt":
-        if (v.relation && v.is_from) writeTargets.add(v.relation);
+        if (v.relation && v.is_from) writeTargets.set(v.relation, "inserts");
         break;
       case "TruncateStmt":
-        for (const r of v.relations ?? []) if (r?.RangeVar) writeTargets.add(r.RangeVar);
+        for (const r of v.relations ?? []) if (r?.RangeVar) writeTargets.set(r.RangeVar, "deletes");
         break;
     }
   });
@@ -390,7 +404,8 @@ function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
     if (isRangeVar(tag, v)) {
       const rel = resolveRangeVar(v);
       if (!rel) return;
-      add(writeTargets.has(v) ? refs.writes : refs.reads, rel.oid, 0);
+      const op = writeTargets.get(v);
+      add(op ? refs[op] : refs.reads, rel.oid, 0);
       return;
     }
     switch (tag) {
@@ -406,7 +421,7 @@ function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
         for (const c of v.cols ?? []) {
           const name: string | undefined = c?.ResTarget?.name;
           const col = name ? resolver.col(rel.oid, name) : undefined;
-          if (col) add(refs.writes, rel.oid, col.attnum);
+          if (col) add(refs.inserts, rel.oid, col.attnum);
         }
         return;
       }
@@ -419,7 +434,7 @@ function analyzeStmt(stmt: Json, ctx: BodyCtx): void {
         for (const t of targets) {
           const name: string | undefined = t?.ResTarget?.name;
           const col = name ? resolver.col(rel.oid, name) : undefined;
-          if (col) add(refs.writes, rel.oid, col.attnum);
+          if (col) add(refs.updates, rel.oid, col.attnum);
         }
         return;
       }
@@ -882,10 +897,18 @@ function triggerAssignWrites(src: string, ctx: BodyCtx): void {
 export function regexAnalyze(src: string, ctx: BodyCtx): void {
   const cleaned = src.replace(/--[^\n]*/g, " ").replace(/\/\*[\s\S]*?\*\//g, " ");
   const ident = String.raw`([a-zA-Z_][\w$]*(?:\.[a-zA-Z_][\w$]*)?)`;
-  const writeRe = new RegExp(
-    String.raw`\b(?:insert\s+into|update|delete\s+from|truncate\s+(?:table\s+)?|merge\s+into)\s+(?:only\s+)?${ident}`,
-    "gi",
-  );
+  const writePatterns: [WriteOp, RegExp][] = [
+    ["inserts", new RegExp(String.raw`\binsert\s+into\s+(?:only\s+)?${ident}`, "gi")],
+    ["updates", new RegExp(String.raw`\bupdate\s+(?:only\s+)?${ident}`, "gi")],
+    [
+      "deletes",
+      new RegExp(
+        String.raw`\b(?:delete\s+from|truncate\s+(?:table\s+)?)\s*(?:only\s+)?${ident}`,
+        "gi",
+      ),
+    ],
+    ["writes", new RegExp(String.raw`\bmerge\s+into\s+(?:only\s+)?${ident}`, "gi")],
+  ];
   const readRe = new RegExp(String.raw`\b(?:from|join)\s+(?:only\s+)?${ident}`, "gi");
   const callRe = /\b([a-zA-Z_][\w$]*)\s*\(/g;
 
@@ -895,9 +918,11 @@ export function regexAnalyze(src: string, ctx: BodyCtx): void {
     return ctx.resolver.resolveRel(name, parts.length > 1 ? parts[0] : undefined, ctx.schema);
   };
 
-  for (const m of cleaned.matchAll(writeRe)) {
-    const rel = resolve(m[1]!);
-    if (rel) add(ctx.refs.writes, rel.oid, 0);
+  for (const [op, re] of writePatterns) {
+    for (const m of cleaned.matchAll(re)) {
+      const rel = resolve(m[1]!);
+      if (rel) add(ctx.refs[op], rel.oid, 0);
+    }
   }
   for (const m of cleaned.matchAll(readRe)) {
     const rel = resolve(m[1]!);
@@ -915,7 +940,15 @@ export async function analyzeFunc(
   triggerRels: CatalogRel[],
   parser: PgParser | null,
 ): Promise<FuncRefs> {
-  const refs: FuncRefs = { reads: new Map(), writes: new Map(), calls: new Set(), parsed: false };
+  const refs: FuncRefs = {
+    reads: new Map(),
+    inserts: new Map(),
+    updates: new Map(),
+    deletes: new Map(),
+    writes: new Map(),
+    calls: new Set(),
+    parsed: false,
+  };
   const ctx: BodyCtx = { resolver, schema: fn.schema, selfOid: fn.oid, triggerRels, refs };
 
   if (parser) {
@@ -992,7 +1025,7 @@ export async function analyzeAll(
     log(
       `[${done}/${candidates.length}] ${fn.schema}.${fn.name}(): ` +
         `${refs.parsed ? "parsed" : "regex fallback"} — ` +
-        `${refs.reads.size} read rels, ${refs.writes.size} write rels, ` +
+        `${refs.reads.size} read rels, ${refs.inserts.size + refs.updates.size + refs.deletes.size + refs.writes.size} write rels, ` +
         `${refs.calls.size} calls (${Date.now() - start} ms)`,
     );
   }

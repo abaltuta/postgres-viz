@@ -89,12 +89,12 @@ async function main(): Promise<void> {
   assert.ok(refs.reads.has(ORDERS), "orders should be read");
   assert.ok(refs.reads.get(ORDERS)!.has(3), "orders.customer_id should be read (incl. NEW.…)");
 
-  assert.ok(refs.writes.has(AUDIT_LOG), "audit_log should be written");
-  assert.ok(refs.writes.get(AUDIT_LOG)!.has(2), "audit_log.table_name should be written");
-  assert.ok(refs.writes.get(AUDIT_LOG)!.has(3), "audit_log.payload should be written");
+  assert.ok(refs.inserts.has(AUDIT_LOG), "audit_log should be inserted into");
+  assert.ok(refs.inserts.get(AUDIT_LOG)!.has(2), "audit_log.table_name should be inserted");
+  assert.ok(refs.inserts.get(AUDIT_LOG)!.has(3), "audit_log.payload should be inserted");
 
-  assert.ok(refs.writes.has(CUSTOMERS), "customers should be written");
-  assert.ok(refs.writes.get(CUSTOMERS)!.has(2), "customers.name should be written");
+  assert.ok(refs.updates.has(CUSTOMERS), "customers should be updated");
+  assert.ok(refs.updates.get(CUSTOMERS)!.has(2), "customers.name should be updated");
 
   assert.ok(refs.calls.has(NOTIFY_FN), "notify_stats() call should be detected");
 
@@ -102,8 +102,8 @@ async function main(): Promise<void> {
   const fallback = await analyzeFunc(logOrderFn, resolver, [ordersRel], null);
   assert.equal(fallback.parsed, false);
   assert.ok(fallback.reads.has(ORDERS), "fallback: orders read");
-  assert.ok(fallback.writes.has(AUDIT_LOG), "fallback: audit_log written");
-  assert.ok(fallback.writes.has(CUSTOMERS), "fallback: customers written");
+  assert.ok(fallback.inserts.has(AUDIT_LOG), "fallback: audit_log inserted");
+  assert.ok(fallback.updates.has(CUSTOMERS), "fallback: customers updated");
   assert.ok(fallback.calls.has(NOTIFY_FN), "fallback: notify_stats call");
 
   console.log("smoke OK — parser + fallback paths both detect reads/writes/calls");

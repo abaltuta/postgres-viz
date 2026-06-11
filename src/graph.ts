@@ -92,7 +92,7 @@ export function buildGraph(
   const emitRefs = (
     funcOid: number,
     map: Map<number, Set<number>>,
-    kind: "reads" | "writes",
+    kind: "reads" | "inserts" | "updates" | "deletes" | "writes",
   ): void => {
     for (const [relOid, atts] of map) {
       if (!relByOid.has(relOid)) continue;
@@ -111,6 +111,9 @@ export function buildGraph(
   for (const [funcOid, refs] of analysis) {
     if (!fnByOid.has(funcOid)) continue;
     emitRefs(funcOid, refs.reads, "reads");
+    emitRefs(funcOid, refs.inserts, "inserts");
+    emitRefs(funcOid, refs.updates, "updates");
+    emitRefs(funcOid, refs.deletes, "deletes");
     emitRefs(funcOid, refs.writes, "writes");
     for (const callee of refs.calls) {
       if (fnByOid.has(callee)) addEdge("calls", fnId(funcOid), fnId(callee));
