@@ -3,6 +3,7 @@ import { Client } from "pg";
 import { analyzeAll, disposeParser } from "./analyze";
 import { buildGraph } from "./graph";
 import { indexEntries, keyVariants, type LocatedEntry, parseHclSymbols } from "./hcl";
+import { fuzzyIncludes } from "./match";
 import { introspect } from "./introspect";
 import type { GraphNodeData, GraphPayload, NodeType } from "./types";
 
@@ -321,12 +322,26 @@ const SYMBOL_KINDS: Partial<Record<NodeType, vscode.SymbolKind>> = {
   table: vscode.SymbolKind.Class,
   foreign: vscode.SymbolKind.Class,
   view: vscode.SymbolKind.Interface,
-  matview: vscode.SymbolKind.Interface,
+  // distinct icon — views and materialized views must be tellable apart
+  matview: vscode.SymbolKind.Struct,
   function: vscode.SymbolKind.Function,
   column: vscode.SymbolKind.Field,
   trigger: vscode.SymbolKind.Event,
   constraint: vscode.SymbolKind.Key,
   index: vscode.SymbolKind.Key,
+};
+
+/** picker text after the symbol name — spells the object type out */
+const SYMBOL_TYPE_LABEL: Partial<Record<NodeType, string>> = {
+  table: "table",
+  foreign: "foreign table",
+  view: "view",
+  matview: "materialized view",
+  function: "function",
+  column: "column",
+  trigger: "trigger",
+  constraint: "constraint",
+  index: "index",
 };
 
 const SYMBOL_ROWS = new Set<string>(["column", "trigger", "constraint", "index"]);
@@ -352,16 +367,27 @@ class DbSymbolProvider implements vscode.WorkspaceSymbolProvider {
       if (!kind) continue; // schemas have no DDL document of their own
       const isRow = SYMBOL_ROWS.has(d.type);
       const owner = isRow ? (labelOf.get(d.parent ?? "") ?? "") : "";
-      const container = isRow ? `${d.schema ?? ""}.${owner}` : (d.schema ?? "");
-      if (q && !`${container}.${d.label}`.toLowerCase().includes(q)) continue;
+      // QUALIFIED name: VS Code's picker re-filters against the symbol NAME
+      // only, so "payroll.instruction" must BE the name or '#' queries miss
+      const qualified = isRow
+        ? `${d.schema ?? ""}.${owner}.${d.label}`
+        : `${d.schema ?? ""}.${d.label}`;
+      if (!fuzzyIncludes(q, qualified)) continue;
       // prefer the Atlas HCL definition site; fall back to the DDL document
       const hcl = await hclIndex?.find(d.type, d.schema, d.label, isRow ? owner : undefined);
       // a column's DDL doc is its table's column listing (oid is the rel's)
-      const docLabel = d.type === "column" ? container : `${d.schema ?? ""}.${d.label}`;
+      const docLabel = d.type === "column" ? `${d.schema ?? ""}.${owner}` : qualified;
       const location = hcl
         ? new vscode.Location(hcl.uri, new vscode.Position(hcl.line, hcl.col))
         : new vscode.Location(ddlUri(d.type, d.oid, docLabel), new vscode.Position(0, 0));
-      out.push(new vscode.SymbolInformation(d.label, kind, container, location));
+      out.push(
+        new vscode.SymbolInformation(
+          qualified,
+          kind,
+          SYMBOL_TYPE_LABEL[d.type] ?? String(d.type),
+          location,
+        ),
+      );
       if (out.length >= SYMBOL_CAP) break;
     }
     return out;

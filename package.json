@@ -2,7 +2,7 @@
   "name": "postgres-viz",
   "displayName": "Postgres Viz",
   "description": "Call-graph & dependency visualizer for PostgreSQL: triggers, views, PL/pgSQL functions, tables and columns.",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "publisher": "baltuta",
   "private": true,
   "engines": {
@@ -111,7 +111,7 @@
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
     "lint": "oxlint src webview test",
     "format": "oxfmt src webview test esbuild.mjs",
-    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/webview.js && node dist-test/hcl.js",
+    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/webview.js && node dist-test/hcl.js && node dist-test/match.js",
     "test:db": "node esbuild.mjs --smoke && node dist-test/integration.js",
     "package": "pnpm build && vsce package --no-dependencies"
   },
