@@ -1372,7 +1372,7 @@ function renderPanel(node: NodeSingular): void {
     </p>
     ${d.detail ? `<p class="detail">${esc(d.detail)}</p>` : ""}
     <div class="actions">
-      ${d.type === "schema" ? "" : '<button id="ddl-btn">Open DDL</button>'}
+      ${d.type === "schema" ? "" : '<button id="def-btn" title="jump to the .hcl definition (DDL when none exists)">Go to definition</button><button id="ddl-btn">Open DDL</button>'}
       <button id="focus-btn" class="${viewState?.mode === "focus" && viewState.rootId === node.id() ? "active-focus" : ""}">Focus</button>
       ${canCallTree ? `<button id="calltree-btn" class="${viewState?.mode === "calltree" && viewState.rootId === node.id() ? "active-calltree" : ""}">Call tree</button>` : ""}
     </div>
@@ -1388,6 +1388,18 @@ function renderPanel(node: NodeSingular): void {
       nodeType: td.type,
       oid: td.oid,
       label: `${td.schema ?? ""}.${td.label}`,
+    });
+  });
+  panel.querySelector("#def-btn")?.addEventListener("click", () => {
+    const owner = ROW_TYPES.has(d.type) ? String(node.parent().first().data("label") ?? "") : "";
+    vscode.postMessage({
+      type: "openDefinition",
+      nodeType: d.type,
+      oid: d.oid,
+      schema: d.schema ?? "",
+      name: d.label,
+      owner,
+      label: `${d.schema ?? ""}.${d.label}`,
     });
   });
   // toggles: pressing the active view's button on its origin node exits it

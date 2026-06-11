@@ -474,6 +474,15 @@ function ensurePanel(context: vscode.ExtensionContext): void {
         await loadGraph(lastConnection, { force: true });
       } else if (msg.type === "openDdl") {
         await openDdl(msg.nodeType as NodeType, Number(msg.oid), String(msg.label ?? ""));
+      } else if (msg.type === "openDefinition") {
+        await openDefinition(
+          msg.nodeType as NodeType,
+          Number(msg.oid),
+          String(msg.schema ?? "") || undefined,
+          String(msg.name ?? ""),
+          String(msg.owner ?? "") || undefined,
+          String(msg.label ?? ""),
+        );
       } else if (msg.type === "nodeSelected") {
         const item = treeProvider?.find(String(msg.id));
         if (item && treeView?.visible) {
@@ -605,13 +614,16 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
   }
 }
 
-async function openDdl(nodeType: NodeType, oid: number, label: string): Promise<void> {
-  if (!lastConnection || !Number.isFinite(oid)) return;
-  // an Atlas HCL definition in the workspace beats generated DDL
-  const dot = label.indexOf(".");
-  const schema = dot > 0 ? label.slice(0, dot) : undefined;
-  const name = dot > 0 ? label.slice(dot + 1) : label;
-  const hcl = await hclIndex?.find(nodeType, schema, name);
+/** "Go to definition": the .hcl definition site when one exists, DDL otherwise. */
+async function openDefinition(
+  nodeType: NodeType,
+  oid: number,
+  schema: string | undefined,
+  name: string,
+  owner: string | undefined,
+  label: string,
+): Promise<void> {
+  const hcl = await hclIndex?.find(nodeType, schema, name, owner);
   if (hcl) {
     const pos = new vscode.Position(hcl.line, hcl.col);
     await vscode.window.showTextDocument(hcl.uri, {
@@ -621,6 +633,11 @@ async function openDdl(nodeType: NodeType, oid: number, label: string): Promise<
     });
     return;
   }
+  await openDdl(nodeType, oid, label);
+}
+
+async function openDdl(nodeType: NodeType, oid: number, label: string): Promise<void> {
+  if (!lastConnection || !Number.isFinite(oid)) return;
   const content = await fetchDdl(nodeType, oid, label);
   const doc = await vscode.workspace.openTextDocument({ language: "sql", content });
   await vscode.window.showTextDocument(doc, {
