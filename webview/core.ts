@@ -44,6 +44,21 @@ export function fitTarget(cy: Core): CollectionReturnValue {
   return shown.length > 0 ? shown : cy.elements();
 }
 
+/**
+ * Panel row dedupe: a table-level aggregate ("reads ×3 recurring_payrun") is
+ * pure noise when the same kind/direction/counterpart already shows its
+ * column-level rows — keep the columns, drop the rollup. Whole-table-only
+ * relationships (no detail rows) keep their aggregate.
+ */
+export function suppressRedundantAggs<
+  T extends { kind: string; counterUnit: string; out: boolean; agg?: boolean; detail?: boolean },
+>(rows: T[]): T[] {
+  const detailPairs = new Set(
+    rows.filter((r) => r.detail).map((r) => `${r.kind}|${r.counterUnit}|${r.out}`),
+  );
+  return rows.filter((r) => !(r.agg && detailPairs.has(`${r.kind}|${r.counterUnit}|${r.out}`)));
+}
+
 /** Edge kinds that mean "this function touches that table's data". */
 export const DATA_KINDS = new Set(["reads", "inserts", "updates", "deletes", "writes", "modifies"]);
 

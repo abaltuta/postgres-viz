@@ -1,7 +1,14 @@
 import "@vscode-elements/elements/dist/bundled.js";
 import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
 import type { GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
-import { callTreeClosure, DATA_KINDS, fitTarget, isShownByClasses, unitOf } from "./core";
+import {
+  callTreeClosure,
+  DATA_KINDS,
+  fitTarget,
+  isShownByClasses,
+  suppressRedundantAggs,
+  unitOf,
+} from "./core";
 
 const vscode = acquireVsCodeApi();
 
@@ -1341,12 +1348,34 @@ function renderPanel(node: NodeSingular): void {
   const edges = (
     isCard ? node.union(node.descendants()).connectedEdges("[!detail]") : node.connectedEdges()
   ).filter((e) => !e.hasClass("hidden-el"));
-  const outRows: string[] = [];
-  const inRows: string[] = [];
+  const records: {
+    kind: string;
+    counterUnit: string;
+    out: boolean;
+    agg?: boolean;
+    detail?: boolean;
+    data: GraphEdgeData;
+    other: NodeSingular;
+  }[] = [];
   edges.forEach((e: EdgeSingular) => {
     const data = e.data() as GraphEdgeData;
     const outgoing = node.union(node.descendants()).contains(e.source());
-    const other = outgoing ? e.target() : e.source();
+    const other = (outgoing ? e.target() : e.source()) as NodeSingular;
+    records.push({
+      kind: data.kind,
+      counterUnit: unitOf(other).id(),
+      out: outgoing,
+      agg: data.agg,
+      detail: data.detail,
+      data,
+      other,
+    });
+  });
+  const outRows: string[] = [];
+  const inRows: string[] = [];
+  // when a relationship's columns are listed, its table-level rollup is noise
+  for (const rec of suppressRedundantAggs(records)) {
+    const { data, other, out: outgoing } = rec;
     const otherData = other.data() as GraphNodeData;
     const owner = ROW_TYPES.has(otherData.type)
       ? String(other.parent().first().data("label") ?? "")
@@ -1361,7 +1390,7 @@ function renderPanel(node: NodeSingular): void {
         <small>${esc(otherData.type)}</small>
         ${cols ? `<span class="cols">${esc(cols)}</span>` : ""}
       </li>`);
-  });
+  }
   const ownerTable = ROW_TYPES.has(d.type) ? String(node.parent().first().data("label") ?? "") : "";
   const where = ownerTable ? `${d.schema ?? ""}.${ownerTable}` : (d.schema ?? "");
   const canCallTree = d.type === "function" || d.type === "trigger";
@@ -1490,13 +1519,23 @@ function buildLegend(): void {
 }
 
 // ── wiring ──
+
+/** A reveal that arrived before the graph did — applied right after render. */
+let pendingRevealId: string | null = null;
+
 window.addEventListener("message", (ev: MessageEvent) => {
   const msg = ev.data;
   if (msg?.type === "graph") {
     database = msg.database ?? "";
     render(msg.graph as GraphPayload);
+    if (pendingRevealId) {
+      const id = pendingRevealId;
+      pendingRevealId = null;
+      jumpToNode(id);
+    }
   } else if (msg?.type === "reveal") {
-    jumpToNode(String(msg.id ?? ""));
+    if (cy) jumpToNode(String(msg.id ?? ""));
+    else pendingRevealId = String(msg.id ?? "");
   } else if (msg?.type === "connection") {
     const connEl = el("conn") as unknown as { value: string };
     if (!connEl.value) connEl.value = msg.value ?? "";

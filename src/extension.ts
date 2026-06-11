@@ -20,6 +20,8 @@ function secretKey(): string {
 let panel: vscode.WebviewPanel | undefined;
 let lastConnection: string | undefined;
 let output: vscode.OutputChannel | undefined;
+/** reveal requested while the webview was still booting — sent after "ready" */
+let pendingReveal: string | null = null;
 
 /**
  * Memory cache for built graphs, alive as long as the extension host is —
@@ -393,9 +395,13 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("postgresViz.visualize", () => visualize(context)),
     vscode.commands.registerCommand("postgresViz.load", () => load(context)),
     vscode.commands.registerCommand("postgresViz.revealNode", async (graphId: string) => {
+      const hadPanel = Boolean(panel);
       if (!panel) await visualize(context);
       panel?.reveal(undefined, true);
-      panel?.webview.postMessage({ type: "reveal", id: graphId });
+      // a freshly created webview is not listening yet — its messages are
+      // silently dropped; deliver the reveal after the "ready" handshake
+      if (hadPanel) panel?.webview.postMessage({ type: "reveal", id: graphId });
+      else pendingReveal = graphId;
     }),
   );
   // a stored connection loads in the background at startup — tree + Cmd+T
@@ -469,6 +475,10 @@ function ensurePanel(context: vscode.ExtensionContext): void {
             graph: currentGraph,
             database: currentDatabase,
           });
+        }
+        if (pendingReveal) {
+          panel?.webview.postMessage({ type: "reveal", id: pendingReveal });
+          pendingReveal = null;
         }
       } else if (msg.type === "connect") {
         const conn = String(msg.connectionString ?? "").trim();

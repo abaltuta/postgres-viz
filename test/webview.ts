@@ -13,7 +13,13 @@
  */
 import assert from "node:assert/strict";
 import cytoscape, { Core, NodeSingular } from "cytoscape";
-import { callTreeClosure, fitTarget, isShownByClasses, unitOf } from "../webview/core";
+import {
+  callTreeClosure,
+  fitTarget,
+  isShownByClasses,
+  suppressRedundantAggs,
+  unitOf,
+} from "../webview/core";
 
 function build(): Core {
   return cytoscape({
@@ -118,4 +124,29 @@ function build(): Core {
   assert.equal(fitTarget(cy).length, cy.elements().length, "all-hidden falls back to all");
 }
 
-console.log("webview OK — call-tree closure, stale-row re-resolution, class-derived fit");
+// ── 4. panel rows: table-level aggregates are noise when their columns show ──
+{
+  const rows = [
+    // reads with column detail present → aggregate suppressed
+    { kind: "reads", agg: true, counterUnit: "recurring_payrun", out: true, label: "rp table" },
+    { kind: "reads", detail: true, counterUnit: "recurring_payrun", out: true, label: "rp.type" },
+    { kind: "reads", detail: true, counterUnit: "recurring_payrun", out: true, label: "rp.id" },
+    // modifies with column detail present → aggregate suppressed
+    { kind: "modifies", agg: true, counterUnit: "instruction", out: true, label: "instr table" },
+    { kind: "modifies", detail: true, counterUnit: "instruction", out: true, label: "proration" },
+    // whole-table-only relationship (no detail) → aggregate STAYS
+    { kind: "deletes", agg: true, counterUnit: "employee_totals", out: true, label: "et table" },
+    // same pair, different kind → unrelated detail must not suppress it
+    { kind: "writes", agg: true, counterUnit: "recurring_payrun", out: true, label: "w table" },
+    // same kind+unit but opposite direction → not suppressed
+    { kind: "reads", agg: true, counterUnit: "recurring_payrun", out: false, label: "read by" },
+  ];
+  const kept = suppressRedundantAggs(rows).map((r) => r.label);
+  assert.deepEqual(
+    kept,
+    ["rp.type", "rp.id", "proration", "et table", "w table", "read by"],
+    "aggregates with column detail vanish; whole-table-only and cross-kind/direction stay",
+  );
+}
+
+console.log("webview OK — call-tree closure, stale-row re-resolution, fit, panel agg dedupe");
