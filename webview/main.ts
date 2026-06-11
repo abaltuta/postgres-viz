@@ -370,6 +370,7 @@ function buildStyle(): cytoscape.StylesheetJson {
     { selector: ".hidden-el", style: { display: "none" } },
     { selector: ".isolated-hidden", style: { display: "none" } },
     { selector: ".focus-hidden", style: { display: "none" } },
+    { selector: ".untouched-hidden", style: { display: "none" } },
     {
       selector: ".matched",
       style: { "border-width": 2, "border-color": "#FFD700", "background-opacity": 1 },
@@ -535,7 +536,8 @@ function restackRows(): void {
           (d) =>
             !d.hasClass("hidden-el") &&
             !d.hasClass("isolated-hidden") &&
-            !d.hasClass("focus-hidden"),
+            !d.hasClass("focus-hidden") &&
+            !d.hasClass("untouched-hidden"),
         )
         .sort((a, b) => (Number(a.data("ord")) || 0) - (Number(b.data("ord")) || 0));
       if (rows.length === 0) return;
@@ -604,7 +606,12 @@ function fitView(eles?: cytoscape.CollectionArgument, padding = 50): void {
 function isShown(n: NodeSingular): boolean {
   let e: NodeSingular = n;
   for (;;) {
-    if (e.hasClass("hidden-el") || e.hasClass("isolated-hidden") || e.hasClass("focus-hidden")) {
+    if (
+      e.hasClass("hidden-el") ||
+      e.hasClass("isolated-hidden") ||
+      e.hasClass("focus-hidden") ||
+      e.hasClass("untouched-hidden")
+    ) {
       return false;
     }
     const p = e.parent().first();
@@ -992,14 +999,33 @@ function clearSelection(): void {
 interface ViewState {
   saved: Map<string, { x: number; y: number }>;
   mode: "focus" | "calltree";
+  /** the node the view was opened from — its panel button renders pressed */
+  rootId: string;
+  /** row ids the call chain actually touches (others hideable) */
+  touchedRows?: Set<string>;
 }
 let viewState: ViewState | null = null;
 
-function showCrumb(text: string): void {
+function showCrumb(text: string, extraHtml = ""): void {
   const crumb = el("crumb");
   crumb.classList.remove("hidden");
-  crumb.innerHTML = `<span>${esc(text)}</span><button id="crumb-back">back</button>`;
+  crumb.innerHTML = `<span>${esc(text)}</span>${extraHtml}<button id="crumb-back">back</button>`;
   crumb.querySelector("#crumb-back")?.addEventListener("click", () => exitView(true));
+}
+
+/** Call-tree neatness: hide rows the chain doesn't touch (crumb toggle). */
+function applyCallTreeColumnFilter(): void {
+  if (!cy || !viewState || viewState.mode !== "calltree") return;
+  const box = document.getElementById("crumb-cols") as HTMLInputElement | null;
+  const onlyTouched = box?.checked ?? true;
+  const touched = viewState.touchedRows ?? new Set<string>();
+  cy.batch(() => {
+    cy!.nodes(':parent[type != "schema"]').forEach((p) => {
+      p.children().forEach((r) => {
+        r.toggleClass("untouched-hidden", onlyTouched && !touched.has(r.id()));
+      });
+    });
+  });
 }
 
 function hideCrumb(): void {
@@ -1010,6 +1036,7 @@ function enterIsolatedView(
   keepUnits: Set<string>,
   crumb: string,
   mode: "focus" | "calltree",
+  rootId: string,
 ): void {
   if (!cy) return;
   exitView(false);
@@ -1040,7 +1067,7 @@ function enterIsolatedView(
     });
     if (!anyVisible) s.addClass("focus-hidden");
   });
-  viewState = { saved, mode };
+  viewState = { saved, mode, rootId };
   el("content").classList.add(`view-${mode}`);
   showCrumb(crumb);
 }
@@ -1052,7 +1079,7 @@ function exitView(refit: boolean): void {
   el("content").classList.remove("view-focus", "view-calltree");
   dematerializeAll();
   cy.batch(() => {
-    cy!.elements().removeClass("focus-hidden dimmed");
+    cy!.elements().removeClass("focus-hidden dimmed untouched-hidden");
     cy!.edges().removeClass("revealed hot agg-suppressed");
     saved.forEach((pos, id) => {
       const n = cy!.getElementById(id);
@@ -1075,7 +1102,7 @@ function focusNode(node: NodeSingular): void {
     if (e.target().id() === unit.id()) keep.add(e.source().id());
   });
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
-  enterIsolatedView(keep, `Focused: ${label} · 1 hop`, "focus");
+  enterIsolatedView(keep, `Focused: ${label} · 1 hop`, "focus", node.id());
   materializeCard(unit.id());
   applyFilters();
   runLayout();
@@ -1117,7 +1144,11 @@ function showCallTree(node: NodeSingular): void {
     if (roots.has(e.target().id())) keep.add(e.source().id());
   });
   const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
-  enterIsolatedView(keep, `Call tree: ${label}`, "calltree");
+  enterIsolatedView(keep, `Call tree: ${label}`, "calltree", node.id());
+  showCrumb(
+    `Call tree: ${label}`,
+    '<label class="crumb-opt"><input type="checkbox" id="crumb-cols" checked />touched columns only</label>',
+  );
 
   // make the chain's column detail available, then reveal ONLY the chain
   for (const id of keep) materializeCard(id);
@@ -1131,6 +1162,7 @@ function showCallTree(node: NodeSingular): void {
     return false;
   };
   const revealedPairs = new Set<string>();
+  const touchedRows = new Set<string>();
   cy.edges("[?detail]").forEach((e) => {
     const su = unitOf(e.source() as NodeSingular).id();
     const tu = unitOf(e.target() as NodeSingular).id();
@@ -1138,6 +1170,9 @@ function showCallTree(node: NodeSingular): void {
     if (!onChain(k, su, tu, e.target().id())) return;
     e.addClass("revealed");
     revealedPairs.add(`${k}|${su}|${tu}`);
+    for (const end of [e.source(), e.target()]) {
+      if (ROW_TYPES.has(String(end.data("type")))) touchedRows.add(end.id());
+    }
   });
   cy.edges("[!detail]").forEach((e) => {
     const su = e.source().id();
@@ -1147,6 +1182,17 @@ function showCallTree(node: NodeSingular): void {
     if (e.data("agg") && revealedPairs.has(`${k}|${su}|${tu}`)) e.addClass("agg-suppressed");
     else e.addClass("revealed");
   });
+
+  if (viewState) viewState.touchedRows = touchedRows;
+  applyCallTreeColumnFilter();
+  el("crumb")
+    .querySelector("#crumb-cols")
+    ?.addEventListener("change", () => {
+      applyCallTreeColumnFilter();
+      restackRows();
+      layoutTreeCards(cardUnits());
+      fitView();
+    });
 
   restackRows();
   layoutTreeCards(cardUnits());
@@ -1274,8 +1320,8 @@ function renderPanel(node: NodeSingular): void {
     ${d.detail ? `<p class="detail">${esc(d.detail)}</p>` : ""}
     <div class="actions">
       ${d.type === "schema" ? "" : '<button id="ddl-btn">Open DDL</button>'}
-      <button id="focus-btn">Focus</button>
-      ${canCallTree ? '<button id="calltree-btn">Call tree</button>' : ""}
+      <button id="focus-btn" class="${viewState?.mode === "focus" && viewState.rootId === node.id() ? "active-focus" : ""}">Focus</button>
+      ${canCallTree ? `<button id="calltree-btn" class="${viewState?.mode === "calltree" && viewState.rootId === node.id() ? "active-calltree" : ""}">Call tree</button>` : ""}
     </div>
     ${outRows.length > 0 ? `<details open><summary>Uses (${outRows.length})</summary><ul class="edge-list">${outRows.join("")}</ul></details>` : ""}
     ${inRows.length > 0 ? `<details open><summary>Used by (${inRows.length})</summary><ul class="edge-list">${inRows.join("")}</ul></details>` : ""}
@@ -1291,8 +1337,23 @@ function renderPanel(node: NodeSingular): void {
       label: `${td.schema ?? ""}.${td.label}`,
     });
   });
-  panel.querySelector("#focus-btn")?.addEventListener("click", () => focusNode(node));
-  panel.querySelector("#calltree-btn")?.addEventListener("click", () => showCallTree(node));
+  // toggles: pressing the active view's button on its origin node exits it
+  panel.querySelector("#focus-btn")?.addEventListener("click", () => {
+    if (viewState?.mode === "focus" && viewState.rootId === node.id()) {
+      exitView(true);
+      selectNode(node);
+    } else {
+      focusNode(node);
+    }
+  });
+  panel.querySelector("#calltree-btn")?.addEventListener("click", () => {
+    if (viewState?.mode === "calltree" && viewState.rootId === node.id()) {
+      exitView(true);
+      selectNode(node);
+    } else {
+      showCallTree(node);
+    }
+  });
   panel.querySelectorAll<HTMLElement>("li[data-node]").forEach((li) => {
     li.addEventListener("click", () => {
       const other = cy?.getElementById(li.dataset.node!);

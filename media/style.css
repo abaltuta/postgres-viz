@@ -273,8 +273,27 @@ body {
   border-color: #ffab00;
 }
 
+#panel .actions button.active-focus {
+  background: #4c9aff;
+  color: #0b1220;
+}
+
+#panel .actions button.active-calltree {
+  background: #ffab00;
+  color: #1f1300;
+}
+
 #crumb.hidden {
   display: none;
+}
+
+#crumb .crumb-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  opacity: 0.85;
+  cursor: pointer;
 }
 
 #crumb button {
