@@ -2,7 +2,9 @@ import * as vscode from "vscode";
 import { Client } from "pg";
 import { analyzeAll, disposeParser } from "./analyze";
 import { buildGraph } from "./graph";
+import { DdlDocumentSymbolProvider } from "./ddl-symbol-provider";
 import { indexEntries, keyVariants, type LocatedEntry, parseHclSymbols } from "./hcl";
+import { HclHoverProvider, HclLensProvider } from "./lens-providers";
 import { fuzzyIncludes } from "./match";
 import { introspect } from "./introspect";
 import type { GraphNodeData, GraphPayload, NodeType } from "./types";
@@ -53,6 +55,8 @@ let workspaceState: vscode.Memento | undefined;
 let lastStatsText = "";
 
 let statusItem: vscode.StatusBarItem | undefined;
+/** lenses re-render when a graph loads (anchors resolve against it) */
+let hclLensProvider: HclLensProvider | undefined;
 
 function savePrefs(): void {
   void workspaceState?.update(PREFS_KEY, prefs);
@@ -475,11 +479,23 @@ export function activate(context: vscode.ExtensionContext): void {
     treeDataProvider: treeProvider,
     showCollapseAll: true,
   });
+  hclLensProvider = new HclLensProvider(() => currentGraph);
   context.subscriptions.push(
     statusItem,
     treeView,
     vscode.workspace.registerTextDocumentContentProvider("pgviz", new DdlContentProvider()),
     vscode.languages.registerWorkspaceSymbolProvider(new DbSymbolProvider()),
+    // editor integration: lenses/hovers on Atlas schema files, outline (@)
+    // inside generated-DDL virtual documents
+    vscode.languages.registerCodeLensProvider({ pattern: "**/*.hcl" }, hclLensProvider),
+    vscode.languages.registerHoverProvider(
+      { pattern: "**/*.hcl" },
+      new HclHoverProvider(() => currentGraph),
+    ),
+    vscode.languages.registerDocumentSymbolProvider(
+      { scheme: "pgviz" },
+      new DdlDocumentSymbolProvider(),
+    ),
     vscode.commands.registerCommand("postgresViz.showLogs", () => getOutput().show(true)),
     vscode.commands.registerCommand("postgresViz.visualize", () => visualize(context)),
     vscode.commands.registerCommand("postgresViz.load", () => load(context)),
@@ -669,6 +685,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
       currentGraph = cached.graph;
       currentDatabase = cached.database;
       treeProvider?.setGraph(cached.graph);
+      hclLensProvider?.refresh();
       applyInitialHideIsolated(cached.graph);
       panel?.webview.postMessage({
         type: "graph",
@@ -734,6 +751,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
         currentGraph = graph;
         currentDatabase = database;
         treeProvider?.setGraph(graph);
+        hclLensProvider?.refresh();
         applyInitialHideIsolated(graph);
         panel?.webview.postMessage({ type: "graph", graph, database });
         postPrefs();
@@ -924,7 +942,12 @@ async function chooseLayout(): Promise<void> {
   type Item = vscode.QuickPickItem & { value: Prefs["layout"] };
   const items: Item[] = [
     { value: "grid", label: "Grid", picked: prefs.layout === "grid" },
-    { value: "tree", label: "Tree", description: "dependency layers", picked: prefs.layout === "tree" },
+    {
+      value: "tree",
+      label: "Tree",
+      description: "dependency layers",
+      picked: prefs.layout === "tree",
+    },
   ];
   const pick = await vscode.window.showQuickPick(items, { title: "Postgres Viz: layout" });
   if (!pick || pick.value === prefs.layout) return;
@@ -1014,9 +1037,7 @@ async function searchGraph(context: vscode.ExtensionContext): Promise<void> {
   for (const { data: d } of currentGraph.nodes) {
     if (d.type === "schema") continue;
     const owner = ROWS.has(d.type) ? (labelOf.get(d.parent ?? "") ?? "") : "";
-    const label = owner
-      ? `${d.schema ?? ""}.${owner}.${d.label}`
-      : `${d.schema ?? ""}.${d.label}`;
+    const label = owner ? `${d.schema ?? ""}.${owner}.${d.label}` : `${d.schema ?? ""}.${d.label}`;
     items.push({ id: d.id, label, description: String(d.type) });
   }
   const pick = await vscode.window.showQuickPick(items, {

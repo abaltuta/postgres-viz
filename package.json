@@ -253,7 +253,7 @@
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
     "lint": "oxlint src webview test",
     "format": "oxfmt src webview test esbuild.mjs",
-    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/webview.js && node dist-test/hcl.js && node dist-test/match.js",
+    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/webview.js && node dist-test/hcl.js && node dist-test/match.js && node dist-test/lenses.js && node dist-test/ddl-symbols.js",
     "test:db": "node esbuild.mjs --smoke && node dist-test/integration.js",
     "package": "pnpm build && vsce package --no-dependencies"
   },

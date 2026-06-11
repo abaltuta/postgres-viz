@@ -51,6 +51,8 @@ const smokeTest = {
     "test/webview.ts",
     "test/hcl.ts",
     "test/match.ts",
+    "test/lenses.ts",
+    "test/ddl-symbols.ts",
   ],
   bundle: true,
   platform: "node",
