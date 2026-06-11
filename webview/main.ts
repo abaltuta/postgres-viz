@@ -871,7 +871,23 @@ function layoutConcentricCards(units: NodeSingular[]): void {
 function runLayout(): void {
   if (!cy) return;
   const name = el<HTMLSelectElement>("layout").value;
-  cy.edges("[!detail]").toggleClass("ortho", name === "breadthfirst" || name === "grid");
+  // taxi routing has NO parallel-edge separation — multiple edges between the
+  // same pair (reads + writes to one table) would coincide exactly. Pairs with
+  // more than one card-level edge stay bezier, which fans parallels apart.
+  const structured = name === "breadthfirst" || name === "grid";
+  const pairCount = new Map<string, number>();
+  const pairKey = (e: EdgeSingular): string => {
+    const a = e.source().id();
+    const b = e.target().id();
+    return a < b ? `${a}|${b}` : `${b}|${a}`;
+  };
+  cy.edges("[!detail]").forEach((e) => {
+    const k = pairKey(e);
+    pairCount.set(k, (pairCount.get(k) ?? 0) + 1);
+  });
+  cy.edges("[!detail]").forEach((e) => {
+    e.toggleClass("ortho", structured && (pairCount.get(pairKey(e)) ?? 0) === 1);
+  });
   if (name === "fcose") {
     const eles = cy
       .elements(":visible")
