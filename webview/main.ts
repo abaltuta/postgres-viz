@@ -1655,8 +1655,33 @@ el<HTMLInputElement>("explorer-filter").addEventListener("input", () => {
 });
 
 el("flt-explorer").addEventListener("change", () => {
-  el("explorer").classList.toggle("hidden", !checked("flt-explorer"));
+  const on = checked("flt-explorer");
+  el("explorer").classList.toggle("hidden", !on);
+  el("legend").style.left = on ? `${el("explorer").offsetWidth + 8}px` : "8px";
 });
+
+// explorer resize: drag the right edge (mirrors the side panel's handle)
+{
+  const explorerEl = el("explorer");
+  const handle = el("explorer-resize");
+  let resizing = false;
+  handle.addEventListener("pointerdown", (ev) => {
+    resizing = true;
+    handle.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+  });
+  handle.addEventListener("pointermove", (ev) => {
+    if (!resizing) return;
+    const left = explorerEl.getBoundingClientRect().left;
+    const width = Math.min(520, Math.max(170, ev.clientX - left));
+    explorerEl.style.width = `${width}px`;
+    el("legend").style.left = `${width + 8}px`;
+  });
+  handle.addEventListener("pointerup", (ev) => {
+    resizing = false;
+    handle.releasePointerCapture(ev.pointerId);
+  });
+}
 
 function updateStats(): void {
   const parts = Object.entries(lastStats)

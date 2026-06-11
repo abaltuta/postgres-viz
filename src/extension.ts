@@ -336,6 +336,7 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
     <aside id="explorer">
       <input id="explorer-filter" type="text" placeholder="filter objects…" spellcheck="false" />
       <div id="explorer-tree"></div>
+      <div id="explorer-resize" title="drag to resize"></div>
     </aside>
     <div id="cy"></div>
     <div id="crumb" class="hidden"></div>

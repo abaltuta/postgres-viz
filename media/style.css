@@ -113,12 +113,28 @@ body {
 }
 
 #explorer {
+  position: relative;
   width: 250px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--vscode-panel-border, #444);
   background: var(--vscode-sideBar-background, transparent);
   font-size: 12px;
+}
+
+#explorer-resize {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+  z-index: 4;
+}
+
+#explorer-resize:hover {
+  background: var(--vscode-focusBorder, #007fd4);
+  opacity: 0.4;
 }
 
 #explorer.hidden {
