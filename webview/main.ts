@@ -76,18 +76,22 @@ function esc(s: unknown): string {
 
 const ROW_H = 15;
 const HEADER_H = 22;
+/** Art is a preview, not the ERD — a 200-column table must not dwarf the graph. */
+const MAX_ART_ROWS = 30;
 
-function cardDims(label: string, rows: NodeDef[]): { w: number; h: number } {
+function cardDims(label: string, rows: NodeDef[], extraLines = 0): { w: number; h: number } {
   let maxLen = label.length;
   for (const r of rows) maxLen = Math.max(maxLen, String(r.data.label).length);
   const w = Math.max(90, maxLen * 6.2 + 24);
-  const h = HEADER_H + rows.length * ROW_H + 8;
+  const h = HEADER_H + (rows.length + extraLines) * ROW_H + 8;
   return { w, h };
 }
 
 function buildCardArt(card: NodeDef): void {
-  const rows = rowsByCard.get(card.data.id) ?? [];
-  const { w, h } = cardDims(card.data.label, rows);
+  const all = rowsByCard.get(card.data.id) ?? [];
+  const rows = all.slice(0, MAX_ART_ROWS);
+  const extra = all.length - rows.length;
+  const { w, h } = cardDims(card.data.label, rows, extra > 0 ? 1 : 0);
   const dark = isDark();
   const textColor = dark ? "#9fadbc" : "#57606a";
   const stripe = dark ? "#ffffff" : "#000000";
@@ -111,6 +115,11 @@ function buildCardArt(card: NodeDef): void {
       `<text x="10" y="${y + 11}" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="${r.data.type === "column" ? textColor : accent}">${esc(r.data.label)}</text>`,
     );
   });
+  if (extra > 0) {
+    parts.push(
+      `<text x="10" y="${rows.length * ROW_H + 11}" font-family="Helvetica,Arial,sans-serif" font-size="9" font-style="italic" fill="${textColor}" opacity="0.75">… +${extra} more</text>`,
+    );
+  }
   parts.push("</svg>");
   card.data.svg = `data:image/svg+xml;utf8,${encodeURIComponent(parts.join(""))}`;
   card.data.cardW = w;
@@ -168,20 +177,24 @@ function materializeAll(): void {
   for (const id of rowsByCard.keys()) materializeCard(id);
 }
 
+/** Collapse one card back to its SVG-art form (callers wrap in cy.batch). */
+function dematerializeCard(id: string): void {
+  if (!cy || !materialized.has(id)) return;
+  const card = cy.getElementById(id);
+  if (card.empty()) return;
+  const pos = { ...card.position() };
+  cy.remove(card.children()); // incident detail edges go with the rows
+  card.position(pos);
+  card.addClass("virtual-card");
+  materialized.delete(id);
+}
+
 function dematerializeAll(): void {
   if (!cy || materialized.size === 0) return;
   // iterate a copy — entries are deleted mid-loop
   const ids = Array.from(materialized);
   cy.batch(() => {
-    for (const id of ids) {
-      const card = cy!.getElementById(id);
-      if (card.empty()) continue;
-      const pos = { ...card.position() };
-      cy!.remove(card.children()); // incident detail edges go with the rows
-      card.position(pos);
-      card.addClass("virtual-card");
-      materialized.delete(id);
-    }
+    for (const id of ids) dematerializeCard(id);
   });
 }
 
@@ -1093,6 +1106,24 @@ function focusNode(node: NodeSingular): void {
   enterIsolatedView(keep, `Focused: ${label} · 1 hop`, "focus", node.id());
   materializeCard(unit.id());
   applyFilters();
+  // the focused ITEM is the star: when it's a row, collapse its (possibly
+  // huge) table to the clicked row plus rows related outside the card —
+  // a 200-column table must not dwarf the thing being focused
+  if (node.id() !== unit.id()) {
+    const card = cy.getElementById(unit.id());
+    cy.batch(() => {
+      card.children().forEach((r) => {
+        if (r.id() === node.id()) return;
+        let involved = false;
+        r.connectedEdges("[?detail]").forEach((e) => {
+          const other = e.source().id() === r.id() ? e.target() : e.source();
+          const ou = unitOf(other as NodeSingular).id();
+          if (ou !== unit.id() && keep.has(ou)) involved = true;
+        });
+        r.toggleClass("untouched-hidden", !involved);
+      });
+    });
+  }
   runLayout();
   // exitView (inside enterIsolatedView) dematerializes rows: the clicked row
   // node may have been REMOVED and re-added — a stale reference has no edges,
@@ -1115,15 +1146,6 @@ function showCallTree(node: NodeSingular): void {
     '<label class="crumb-opt"><input type="checkbox" id="crumb-cols" checked />touched columns only</label>',
   );
 
-  // make the chain's column detail available, then reveal ONLY the chain
-  for (const id of keep) materializeCard(id);
-  applyFilters();
-  // same stale-reference hazard as focusNode: exitView (inside
-  // enterIsolatedView) may have removed and re-created the clicked row —
-  // re-resolve so selection/panel/zoom see the live node, not a detached one
-  const live = cy.getElementById(node.id());
-  if (live.nonempty()) node = live as unknown as NodeSingular;
-
   const onChain = (kind: string, srcUnit: string, tgtUnit: string, tgtId: string): boolean => {
     if (!keep.has(srcUnit) || !keep.has(tgtUnit)) return false;
     if (kind === "executes") return fns.has(tgtId) || fns.has(tgtUnit);
@@ -1131,44 +1153,83 @@ function showCallTree(node: NodeSingular): void {
     if (DATA_KINDS.has(kind)) return fns.has(srcUnit);
     return false;
   };
-  const revealedPairs = new Set<string>();
-  const touchedRows = new Set<string>();
-  cy.edges("[?detail]").forEach((e) => {
-    const su = unitOf(e.source() as NodeSingular).id();
-    const tu = unitOf(e.target() as NodeSingular).id();
-    const k = String(e.data("kind"));
-    if (!onChain(k, su, tu, e.target().id())) return;
-    e.addClass("revealed");
-    revealedPairs.add(`${k}|${su}|${tu}`);
-    for (const end of [e.source(), e.target()]) {
-      if (ROW_TYPES.has(String(end.data("type")))) touchedRows.add(end.id());
-    }
-  });
-  cy.edges("[!detail]").forEach((e) => {
-    const su = e.source().id();
-    const tu = e.target().id();
-    const k = String(e.data("kind"));
-    if (!onChain(k, su, tu, tu)) return;
-    if (e.data("agg") && revealedPairs.has(`${k}|${su}|${tu}`)) e.addClass("agg-suppressed");
-    else e.addClass("revealed");
-  });
 
-  if (viewState) viewState.touchedRows = touchedRows;
-  applyCallTreeColumnFilter();
+  /** (Re)build the whole presentation — also runs when the crumb toggles. */
+  const apply = (onlyTouched: boolean): void => {
+    if (!cy) return;
+    // make the chain's column detail available, then reveal ONLY the chain
+    for (const id of keep) materializeCard(id);
+    applyFilters();
+    cy.edges().removeClass("revealed agg-suppressed");
+
+    // which rows the chain touches — collected BEFORE any reveal classes
+    const touchedRows = new Set<string>();
+    cy.edges("[?detail]").forEach((e) => {
+      const su = unitOf(e.source() as NodeSingular).id();
+      const tu = unitOf(e.target() as NodeSingular).id();
+      if (!onChain(String(e.data("kind")), su, tu, e.target().id())) return;
+      for (const end of [e.source(), e.target()]) {
+        if (ROW_TYPES.has(String(end.data("type")))) touchedRows.add(end.id());
+      }
+    });
+
+    // tables the chain touches only at WHOLE-TABLE level (no column detail —
+    // think regex-fallback inserts/deletes) have zero touched rows; hiding
+    // all rows makes their compound render as NOTHING. Collapse them back to
+    // compact virtual cards instead — the agg pass below still draws their
+    // edges because no detail pair survives to suppress it.
+    if (onlyTouched) {
+      const touchedCards = new Set<string>();
+      for (const id of touchedRows) {
+        const c = cardOfNode.get(id);
+        if (c) touchedCards.add(c);
+      }
+      cy.batch(() => {
+        for (const id of keep) {
+          if (materialized.has(id) && !touchedCards.has(id)) dematerializeCard(id);
+        }
+      });
+    }
+
+    const revealedPairs = new Set<string>();
+    cy.edges("[?detail]").forEach((e) => {
+      const su = unitOf(e.source() as NodeSingular).id();
+      const tu = unitOf(e.target() as NodeSingular).id();
+      const k = String(e.data("kind"));
+      if (!onChain(k, su, tu, e.target().id())) return;
+      e.addClass("revealed");
+      revealedPairs.add(`${k}|${su}|${tu}`);
+    });
+    cy.edges("[!detail]").forEach((e) => {
+      const su = e.source().id();
+      const tu = e.target().id();
+      const k = String(e.data("kind"));
+      if (!onChain(k, su, tu, tu)) return;
+      if (e.data("agg") && revealedPairs.has(`${k}|${su}|${tu}`)) e.addClass("agg-suppressed");
+      else e.addClass("revealed");
+    });
+
+    if (viewState) viewState.touchedRows = touchedRows;
+    applyCallTreeColumnFilter();
+    restackRows();
+    layoutTreeCards(cardUnits());
+    routeEdgesAroundCards();
+    fitView();
+  };
+
+  apply(true);
+  // same stale-reference hazard as focusNode: exitView (inside
+  // enterIsolatedView) may have removed and re-created the clicked row —
+  // re-resolve so selection/panel/zoom see the live node, not a detached one
+  const live = cy.getElementById(node.id());
+  if (live.nonempty()) node = live as unknown as NodeSingular;
+
   el("crumb")
     .querySelector("#crumb-cols")
     ?.addEventListener("change", () => {
-      applyCallTreeColumnFilter();
-      restackRows();
-      layoutTreeCards(cardUnits());
-      routeEdgesAroundCards();
-      fitView();
+      const box = document.getElementById("crumb-cols") as HTMLInputElement | null;
+      apply(box?.checked ?? true);
     });
-
-  restackRows();
-  layoutTreeCards(cardUnits());
-  routeEdgesAroundCards();
-  fitView();
   // wide trees fit to specks — guarantee a readable zoom centered on the root
   window.setTimeout(() => {
     if (cy && viewState && cy.zoom() < 0.3) {
