@@ -1466,15 +1466,19 @@ function applyPrefs(next: Prefs): void {
   }
   if (next.schemaGroup !== prev.schemaGroup) applySchemaGrouping(true);
   if (next.route !== prev.route) routeEdgesAroundCards();
-  if (
+  if (filterPrefsChanged(next, prev)) {
+    applyFilters();
+    routeEdgesAroundCards();
+  }
+}
+
+function filterPrefsChanged(next: Prefs, prev: Prefs): boolean {
+  return (
     next.hideIsolated !== prev.hideIsolated ||
     !sameList(next.filterSchemas, prev.filterSchemas) ||
     !sameList(next.filterNodeTypes, prev.filterNodeTypes) ||
     !sameList(next.filterEdgeKinds, prev.filterEdgeKinds)
-  ) {
-    applyFilters();
-    routeEdgesAroundCards();
-  }
+  );
 }
 
 function sameList(a: string[], b: string[]): boolean {
