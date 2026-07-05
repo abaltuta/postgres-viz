@@ -51,6 +51,15 @@ export function buildGraphDiffReport(snapshot: GraphSnapshot, current: GraphPayl
   } catch {
     snapshotSaved = `${snapshot.savedAt} (invalid date)`;
   }
+  const changedNodes = markdownList(
+    diff.changedNodes,
+    (c) =>
+      `- ${formatNodeLabel(c.after)} (${escapeMarkdownText(c.after.id)}) - ${changedFields(c.before, c.after, nodeComparable)}`,
+  );
+  const changedEdges = markdownList(
+    diff.changedEdges,
+    (c) => `- ${formatEdgeLabel(c.after)} - ${changedFields(c.before, c.after, edgeComparable)}`,
+  );
   return `# Graph Snapshot Diff
 
 - Snapshot database: ${escapeMarkdownText(snapshot.database)}
@@ -75,7 +84,7 @@ ${nodeList(diff.removedNodes)}
 
 ## Changed Nodes
 
-${changedNodeList(diff.changedNodes)}
+${changedNodes}
 
 ## Added Edges
 
@@ -87,7 +96,7 @@ ${edgeList(diff.removedEdges)}
 
 ## Changed Edges
 
-${changedEdgeList(diff.changedEdges)}
+${changedEdges}
 `;
 }
 
@@ -141,21 +150,6 @@ function nodeList(nodes: GraphNodeData[]): string {
 
 function edgeList(edges: GraphEdgeData[]): string {
   return markdownList(edges, (e) => `- ${formatEdgeLabel(e)}`);
-}
-
-function changedNodeList(changes: { before: GraphNodeData; after: GraphNodeData }[]): string {
-  return markdownList(
-    changes,
-    (c) =>
-      `- ${formatNodeLabel(c.after)} (${escapeMarkdownText(c.after.id)}) - ${changedFields(c.before, c.after, nodeComparable)}`,
-  );
-}
-
-function changedEdgeList(changes: { before: GraphEdgeData; after: GraphEdgeData }[]): string {
-  return markdownList(
-    changes,
-    (c) => `- ${formatEdgeLabel(c.after)} - ${changedFields(c.before, c.after, edgeComparable)}`,
-  );
 }
 
 function markdownList<T>(items: T[], format: (item: T) => string): string {
