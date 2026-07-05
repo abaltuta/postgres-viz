@@ -73,10 +73,15 @@ function boolOr(value: unknown, fallback: boolean): boolean {
 
 function stringList(value: unknown, opts: { trim: boolean } = { trim: true }): string[] {
   if (!Array.isArray(value)) return [];
-  const strings = value
-    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-    .map((item) => (opts.trim ? item.trim() : item));
-  return [...new Set(strings)];
+  return [
+    ...new Set(
+      value.flatMap((item) => {
+        if (typeof item !== "string") return [];
+        const trimmed = item.trim();
+        return trimmed ? [opts.trim ? trimmed : item] : [];
+      }),
+    ),
+  ];
 }
 
 function enumList<T extends string>(value: unknown, allowed: readonly T[]): T[] {
