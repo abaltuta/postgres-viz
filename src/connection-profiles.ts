@@ -118,7 +118,12 @@ export class ConnectionProfileStore {
 export function defaultProfileName(conn: string): string {
   try {
     const url = new URL(conn);
-    const db = decodePathComponent(url.pathname.slice(1) || "postgres");
+    let db = url.pathname.slice(1) || "postgres";
+    try {
+      db = decodeURIComponent(db);
+    } catch {
+      // Keep the raw path if the connection string contains malformed escapes.
+    }
     return `${db}@${url.hostname || "localhost"}`;
   } catch {
     return "Default";
@@ -131,14 +136,6 @@ function createId(): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function decodePathComponent(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
 }
 
 function timestampOr(value: unknown, fallback: number): number {
