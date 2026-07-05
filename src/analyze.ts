@@ -327,7 +327,7 @@ function nameList(list: Json): string[] {
 }
 
 function addCall(funcname: Json, ctx: BodyCtx): void {
-  const parts = ((funcname ?? []) as Json[]).map(fieldName).filter((s): s is string => !!s);
+  const parts = nameList(funcname);
   if (parts.length === 0) return;
   const name = parts[parts.length - 1]!;
   const schema = parts.length > 1 ? parts[parts.length - 2] : undefined;
