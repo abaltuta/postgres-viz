@@ -58,12 +58,8 @@ export function quoteSqlObjectName(name: SqlObjectName): string {
   return (name.schema ? [name.schema, name.name] : [name.name]).map(quoteSqlIdent).join(".");
 }
 
-function lineCommentText(text: string): string {
-  return text.replace(/[\r\n]+/g, " ");
-}
-
 function ddlComment(label: string, suffix = ""): string {
-  return `-- ${lineCommentText(label)}${suffix}`;
+  return `-- ${label.replace(/[\r\n]+/g, " ")}${suffix}`;
 }
 
 export function renderTableDdl(

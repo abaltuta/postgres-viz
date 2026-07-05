@@ -95,7 +95,7 @@ export function buildPathReport(graph: GraphPayload, opts: PathReportOptions): s
   const targetNode = index.node(opts.targetId);
   const source = formatNodeName(index, sourceNode ?? opts.sourceId);
   const target = formatNodeName(index, targetNode ?? opts.targetId);
-  const title = dependencyPathTitle(source, target);
+  const title = `# Dependency Path: ${source} -> ${target}`;
   if (!sourceNode || !targetNode) {
     const missing = [
       sourceNode ? undefined : `source ${inlineCode(opts.sourceId)}`,
@@ -136,10 +136,6 @@ export function buildPathReport(graph: GraphPayload, opts: PathReportOptions): s
   }
   lines.push("");
   return `${lines.join("\n")}\n`;
-}
-
-function dependencyPathTitle(source: string, target: string): string {
-  return `# Dependency Path: ${source} -> ${target}`;
 }
 
 function formatSteps(index: GraphIndex, steps: GraphStep[], arrow: string): string[] {
