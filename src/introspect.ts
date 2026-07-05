@@ -64,6 +64,10 @@ function countBy<T>(items: T[], key: (item: T) => string): string {
   );
 }
 
+function numberArray(value: unknown): number[] {
+  return ((value ?? []) as unknown[]).map(Number);
+}
+
 function isMissingProsqlbody(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const err = error as { code?: unknown; message?: unknown };
@@ -153,7 +157,7 @@ export async function introspect(
     relOid: Number(r.rel_oid),
     funcOid: Number(r.func_oid),
     tgtype: Number(r.tgtype),
-    updateCols: ((r.update_cols ?? []) as unknown[]).map(Number),
+    updateCols: numberArray(r.update_cols),
   }));
   log(`pg_trigger: ${triggers.length} user triggers — ${took()}`);
 
@@ -229,8 +233,8 @@ export async function introspect(
     name: String(r.name),
     relOid: Number(r.rel_oid),
     refRelOid: Number(r.ref_rel_oid),
-    cols: ((r.cols ?? []) as unknown[]).map(Number),
-    refCols: ((r.ref_cols ?? []) as unknown[]).map(Number),
+    cols: numberArray(r.cols),
+    refCols: numberArray(r.ref_cols),
   }));
   log(`pg_constraint: ${fks.length} foreign keys — ${took()}`);
 
@@ -254,7 +258,7 @@ export async function introspect(
     name: String(r.name),
     relOid: Number(r.rel_oid),
     contype: String(r.contype),
-    cols: ((r.cols ?? []) as unknown[]).map(Number),
+    cols: numberArray(r.cols),
     def: r.def === null || r.def === undefined ? null : String(r.def),
   }));
   const conNames: Record<string, string> = { c: "CHECK", p: "PK", u: "UNIQUE", x: "EXCLUDE" };
@@ -290,7 +294,7 @@ export async function introspect(
     oid: Number(r.oid),
     name: String(r.name),
     relOid: Number(r.rel_oid),
-    cols: ((r.cols ?? []) as unknown[]).map(Number).filter((a) => a > 0),
+    cols: numberArray(r.cols).filter((a) => a > 0),
     def: r.def === null || r.def === undefined ? null : String(r.def),
   }));
   log(`pg_index: ${indexes.length} plain indexes (constraint-backed excluded) — ${took()}`);
