@@ -6,7 +6,6 @@
  */
 export function fuzzyIncludes(query: string, target: string): boolean {
   const q = query.replace(/\s+/g, "").toLowerCase();
-  if (q.length === 0) return true;
   const t = target.toLowerCase();
   let ti = 0;
   for (const ch of q) {

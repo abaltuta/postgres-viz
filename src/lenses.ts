@@ -4,6 +4,7 @@
  * The thin provider classes in `src/lens-providers.ts` wrap these.
  */
 import type { HclEntry } from "./hcl";
+import { routineNameFromLabel } from "./routine-label";
 import type { GraphEdgeData, GraphNodeData, GraphPayload } from "./types";
 
 export interface LensAnchor {
@@ -36,8 +37,29 @@ const INCOMING_PHRASE: Partial<Record<string, string>> = {
   executes: "executed by",
 };
 
+const EDGE_KIND_ORDER = [
+  "selects",
+  "reads",
+  "inserts",
+  "updates",
+  "deletes",
+  "writes",
+  "modifies",
+  "calls",
+  "executes",
+  "update-of",
+  "fk",
+  "constrains",
+  "indexes",
+  "default",
+];
+
 function nodes(graph: GraphPayload): Node[] {
   return graph.nodes.map((n) => n.data);
+}
+
+function unique<T>(items: T[]): T | undefined {
+  return items.length === 1 ? items[0] : undefined;
 }
 
 /**
@@ -46,56 +68,58 @@ function nodes(graph: GraphPayload): Node[] {
  * schema, we refuse to guess — returning undefined (mirrors hcl.ts ambiguity).
  */
 function resolveByLabel(list: Node[], label: string, schema: string | undefined): Node | undefined {
-  const hits = list.filter((n) => n.label === label);
-  if (hits.length === 0) return undefined;
-  if (schema !== undefined) return hits.find((n) => n.schema === schema);
-  return hits.length === 1 ? hits[0] : undefined;
+  const hits = list.filter((n) => n.label === label && (schema === undefined || n.schema === schema));
+  return unique(hits);
+}
+
+function resolveByRoutineName(
+  list: Node[],
+  name: string,
+  schema: string | undefined,
+): Node | undefined {
+  const hits = list.filter(
+    (n) =>
+      routineNameFromLabel(n.label) === name && (schema === undefined || n.schema === schema),
+  );
+  return unique(hits);
+}
+
+function triggerMatchesOwner(all: Node[], trigger: Node, owner: string): boolean {
+  const parent = all.find((n) => n.id === trigger.parent);
+  return parent?.label === owner;
 }
 
 function resolveNode(entry: HclEntry, graph: GraphPayload): Node | undefined {
   const all = nodes(graph);
+  const byType = (type: string): Node[] => all.filter((n) => n.type === type);
   switch (entry.kind) {
     case "table": {
       const tables = all.filter((n) => n.type === "table" || n.type === "foreign");
       return resolveByLabel(tables, entry.name, entry.schema);
     }
     case "view":
-      return resolveByLabel(
-        all.filter((n) => n.type === "view"),
-        entry.name,
-        entry.schema,
-      );
+      return resolveByLabel(byType("view"), entry.name, entry.schema);
     case "materialized": {
-      const mat = all.filter((n) => n.type === "matview");
       return (
-        resolveByLabel(mat, entry.name, entry.schema) ??
-        resolveByLabel(
-          all.filter((n) => n.type === "view"),
-          entry.name,
-          entry.schema,
-        )
+        resolveByLabel(byType("matview"), entry.name, entry.schema) ??
+        resolveByLabel(byType("view"), entry.name, entry.schema)
       );
     }
     case "function":
     case "procedure":
-      return resolveByLabel(
-        all.filter((n) => n.type === "function"),
-        `${entry.name}()`,
-        entry.schema,
-      );
+      return resolveByRoutineName(byType("function"), entry.name, entry.schema);
     case "trigger": {
-      const trg = resolveByLabel(
-        all.filter((n) => n.type === "trigger"),
-        entry.name,
-        entry.schema,
+      let triggers = all.filter(
+        (n) =>
+          n.type === "trigger" &&
+          n.label === entry.name &&
+          (entry.schema === undefined || n.schema === entry.schema),
       );
-      if (!trg) return undefined;
-      // owner sanity: the trigger's parent card must be the table it lives on
       if (entry.owner) {
-        const parent = all.find((n) => n.id === trg.parent);
-        if (parent && parent.label !== entry.owner) return undefined;
+        const owner = entry.owner;
+        triggers = triggers.filter((n) => triggerMatchesOwner(all, n, owner));
       }
-      return trg;
+      return unique(triggers);
     }
     default:
       return undefined;
@@ -107,6 +131,19 @@ function cardEdges(graph: GraphPayload): GraphEdgeData[] {
   return graph.edges.map((e) => e.data).filter((e) => e.detail !== true);
 }
 
+function cmp(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function kindRank(kind: string): number {
+  const idx = EDGE_KIND_ORDER.indexOf(kind);
+  return idx < 0 ? Number.MAX_SAFE_INTEGER : idx;
+}
+
+function cmpKind(a: string, b: string): number {
+  return kindRank(a) - kindRank(b) || cmp(a, b);
+}
+
 function buildSummary(graph: GraphPayload, nodeId: string): string | undefined {
   const segs: string[] = [];
   const out = new Map<string, number>();
@@ -115,8 +152,10 @@ function buildSummary(graph: GraphPayload, nodeId: string): string | undefined {
     if (e.source === nodeId) out.set(e.kind, (out.get(e.kind) ?? 0) + 1);
     else if (e.target === nodeId) inc.set(e.kind, (inc.get(e.kind) ?? 0) + 1);
   }
-  for (const [kind, n] of out) segs.push(`${kind} ${n}`);
-  for (const [kind, n] of inc) segs.push(`${INCOMING_PHRASE[kind] ?? `${kind} by`} ${n}`);
+  for (const [kind, n] of [...out].sort(([a], [b]) => cmpKind(a, b))) segs.push(`${kind} ${n}`);
+  for (const [kind, n] of [...inc].sort(([a], [b]) => cmpKind(a, b))) {
+    segs.push(`${INCOMING_PHRASE[kind] ?? `${kind} by`} ${n}`);
+  }
   if (segs.length === 0) return undefined;
   if (segs.length > 4) return [...segs.slice(0, 4), "…"].join(" · ");
   return segs.join(" · ");
@@ -161,25 +200,67 @@ function qualify(node: Node): string {
   return node.schema ? `${node.schema}.${node.label}` : node.label;
 }
 
+const MARKDOWN_SPECIALS = new Set(["\\", "`", "*", "_", "{", "}", "[", "]", "(", ")", "#", "+", "-", ".", "!", "|"]);
+
+function oneLine(text: string): string {
+  return text.replace(/\r\n?|\n/g, " ");
+}
+
+function escapeMarkdownText(text: string): string {
+  const htmlEscaped = oneLine(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  let out = "";
+  for (const ch of htmlEscaped) out += MARKDOWN_SPECIALS.has(ch) ? `\\${ch}` : ch;
+  return out;
+}
+
+function codeSpan(text: string): string {
+  const safeText = oneLine(text);
+  const maxTicks = Math.max(0, ...Array.from(safeText.matchAll(/`+/g), (m) => m[0]!.length));
+  const fence = "`".repeat(maxTicks + 1);
+  const body = safeText.startsWith("`") || safeText.endsWith("`") ? ` ${safeText} ` : safeText;
+  return `${fence}${body}${fence}`;
+}
+
 export function hoverMarkdown(anchor: LensAnchor, graph: GraphPayload): string | null {
   if (!anchor.graphId) return null;
   const nodeMap = new Map(nodes(graph).map((n) => [n.id, n]));
   const self = nodeMap.get(anchor.graphId);
   const title = self ? qualify(self) : anchor.name;
-  const heading = `**${title}** — ${anchor.nodeType ?? anchor.kind}`;
+  const heading = `**${escapeMarkdownText(title)}** — ${escapeMarkdownText(anchor.nodeType ?? anchor.kind)}`;
 
-  const lines: string[] = [];
+  const lines: { direction: number; kind: string; endpoint: string; text: string }[] = [];
   for (const e of cardEdges(graph)) {
     if (e.source === anchor.graphId) {
       const other = endpointLabel(nodeMap, e.target);
-      if (other) lines.push(`→ ${e.kind} \`${other}\``);
+      if (other) {
+        lines.push({
+          direction: 0,
+          kind: e.kind,
+          endpoint: other,
+          text: `→ ${escapeMarkdownText(e.kind)} ${codeSpan(other)}`,
+        });
+      }
     } else if (e.target === anchor.graphId) {
       const other = endpointLabel(nodeMap, e.source);
-      if (other) lines.push(`← ${INCOMING_PHRASE[e.kind] ?? `${e.kind} by`} \`${other}\``);
+      if (other) {
+        lines.push({
+          direction: 1,
+          kind: e.kind,
+          endpoint: other,
+          text: `← ${escapeMarkdownText(INCOMING_PHRASE[e.kind] ?? `${e.kind} by`)} ${codeSpan(other)}`,
+        });
+      }
     }
   }
 
-  const shown = lines.slice(0, 8);
+  lines.sort(
+    (a, b) =>
+      a.direction - b.direction || cmpKind(a.kind, b.kind) || cmp(a.endpoint, b.endpoint),
+  );
+  const shown = lines.slice(0, 8).map((line) => line.text);
   const body = shown.length > 0 ? shown.join("\n\n") : "_no card-level relationships_";
   const more = lines.length > 8 ? `\n\n… and ${lines.length - 8} more` : "";
   return `${heading}\n\n${body}${more}`;

@@ -58,9 +58,19 @@ function countBy<T>(items: T[], key: (item: T) => string): string {
   }
   return (
     [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
       .map(([k, n]) => `${n} ${k}`)
       .join(", ") || "none"
+  );
+}
+
+function isMissingProsqlbody(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const err = error as { code?: unknown; message?: unknown };
+  return (
+    err.code === "42703" &&
+    typeof err.message === "string" &&
+    err.message.includes("prosqlbody")
   );
 }
 
@@ -91,7 +101,8 @@ export async function introspect(
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE c.relkind IN ('r','p','v','m','f') AND ${schemaPred("n.nspname")}
-         AND ${notExtensionOwned("pg_class", "c.oid")}`,
+         AND ${notExtensionOwned("pg_class", "c.oid")}
+       ORDER BY n.nspname, c.relname, c.oid`,
       params,
     )
   ).rows.map((r) => ({
@@ -110,7 +121,9 @@ export async function introspect(
        JOIN pg_class c ON c.oid = a.attrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE a.attnum > 0 AND NOT a.attisdropped
-         AND c.relkind IN ('r','p','v','m','f') AND ${schemaPred("n.nspname")}`,
+         AND c.relkind IN ('r','p','v','m','f') AND ${schemaPred("n.nspname")}
+         AND ${notExtensionOwned("pg_class", "c.oid")}
+       ORDER BY n.nspname, c.relname, a.attnum`,
       params,
     )
   ).rows.map((r) => ({
@@ -128,7 +141,10 @@ export async function introspect(
        FROM pg_trigger t
        JOIN pg_class c ON c.oid = t.tgrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE NOT t.tgisinternal AND ${schemaPred("n.nspname")}`,
+       WHERE NOT t.tgisinternal AND ${schemaPred("n.nspname")}
+         AND ${notExtensionOwned("pg_trigger", "t.oid")}
+         AND ${notExtensionOwned("pg_class", "c.oid")}
+       ORDER BY n.nspname, c.relname, t.tgname, t.oid`,
       params,
     )
   ).rows.map((r) => ({
@@ -148,10 +164,18 @@ export async function introspect(
       `SELECT DISTINCT r.ev_class AS view_oid, d.refobjid AS rel_oid, d.refobjsubid AS attnum
        FROM pg_depend d
        JOIN pg_rewrite r ON r.oid = d.objid
+       JOIN pg_class vc ON vc.oid = r.ev_class
+       JOIN pg_namespace vn ON vn.oid = vc.relnamespace
        WHERE d.classid = 'pg_rewrite'::regclass
          AND d.refclassid = 'pg_class'::regclass
          AND d.deptype = 'n'
-         AND r.ev_class <> d.refobjid`,
+         AND r.rulename = '_RETURN'
+         AND vc.relkind IN ('v','m')
+         AND r.ev_class <> d.refobjid
+         AND ${schemaPred("vn.nspname")}
+         AND ${notExtensionOwned("pg_class", "vc.oid")}
+       ORDER BY view_oid, rel_oid, attnum`,
+      params,
     )
   ).rows.map((r) => ({
     viewOid: Number(r.view_oid),
@@ -168,9 +192,17 @@ export async function introspect(
       `SELECT DISTINCT r.ev_class AS view_oid, d.refobjid AS func_oid
        FROM pg_depend d
        JOIN pg_rewrite r ON r.oid = d.objid
+       JOIN pg_class vc ON vc.oid = r.ev_class
+       JOIN pg_namespace vn ON vn.oid = vc.relnamespace
        WHERE d.classid = 'pg_rewrite'::regclass
          AND d.refclassid = 'pg_proc'::regclass
-         AND d.deptype = 'n'`,
+         AND d.deptype = 'n'
+         AND r.rulename = '_RETURN'
+         AND vc.relkind IN ('v','m')
+         AND ${schemaPred("vn.nspname")}
+         AND ${notExtensionOwned("pg_class", "vc.oid")}
+       ORDER BY view_oid, func_oid`,
+      params,
     )
   ).rows.map((r) => ({ viewOid: Number(r.view_oid), funcOid: Number(r.func_oid) }));
   log(`pg_depend: ${viewFuncDeps.length} view→function deps — ${took()}`);
@@ -180,7 +212,18 @@ export async function introspect(
       `SELECT con.conname AS name, con.conrelid AS rel_oid, con.confrelid AS ref_rel_oid,
               con.conkey AS cols, con.confkey AS ref_cols
        FROM pg_constraint con
-       WHERE con.contype = 'f'`,
+       JOIN pg_class c ON c.oid = con.conrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_class rc ON rc.oid = con.confrelid
+       JOIN pg_namespace rn ON rn.oid = rc.relnamespace
+       WHERE con.contype = 'f'
+         AND ${schemaPred("n.nspname")}
+         AND ${schemaPred("rn.nspname")}
+         AND ${notExtensionOwned("pg_constraint", "con.oid")}
+         AND ${notExtensionOwned("pg_class", "c.oid")}
+         AND ${notExtensionOwned("pg_class", "rc.oid")}
+       ORDER BY n.nspname, c.relname, con.conname, con.oid`,
+      params,
     )
   ).rows.map((r) => ({
     name: String(r.name),
@@ -200,7 +243,10 @@ export async function introspect(
        FROM pg_constraint con
        JOIN pg_class c ON c.oid = con.conrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE con.contype IN ('c','u','p','x') AND ${schemaPred("n.nspname")}`,
+       WHERE con.contype IN ('c','u','p','x') AND ${schemaPred("n.nspname")}
+         AND ${notExtensionOwned("pg_constraint", "con.oid")}
+         AND ${notExtensionOwned("pg_class", "c.oid")}
+       ORDER BY n.nspname, c.relname, con.conname, con.oid`,
       params,
     )
   ).rows.map((r) => ({
@@ -222,13 +268,22 @@ export async function introspect(
   const indexes: CatalogIndex[] = (
     await client.query(
       `SELECT i.indexrelid AS oid, ic.relname AS name, i.indrelid AS rel_oid,
-              i.indkey::int2[] AS cols, pg_get_indexdef(i.indexrelid, 0, true) AS def
+              ARRAY(
+                SELECT k.attnum
+                FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+                WHERE k.ord <= i.indnkeyatts
+                ORDER BY k.ord
+              ) AS cols,
+              pg_get_indexdef(i.indexrelid, 0, true) AS def
        FROM pg_index i
        JOIN pg_class ic ON ic.oid = i.indexrelid
        JOIN pg_class c ON c.oid = i.indrelid
        JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE ${schemaPred("n.nspname")}
-         AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.indexrelid)`,
+         AND ${notExtensionOwned("pg_class", "ic.oid")}
+         AND ${notExtensionOwned("pg_class", "c.oid")}
+         AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.indexrelid)
+       ORDER BY n.nspname, c.relname, ic.relname, i.indexrelid`,
       params,
     )
   ).rows.map((r) => ({
@@ -245,27 +300,28 @@ export async function introspect(
     await client.query(
       `SELECT DISTINCT d.objid AS con_oid, d.refobjid AS func_oid
        FROM pg_depend d
+       JOIN pg_constraint con ON con.oid = d.objid
+       JOIN pg_class c ON c.oid = con.conrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE d.classid = 'pg_constraint'::regclass
          AND d.refclassid = 'pg_proc'::regclass
-         AND d.deptype = 'n'`,
+         AND d.deptype = 'n'
+         AND con.contype IN ('c','u','p','x')
+         AND ${schemaPred("n.nspname")}
+         AND ${notExtensionOwned("pg_constraint", "con.oid")}
+         AND ${notExtensionOwned("pg_class", "c.oid")}
+       ORDER BY con_oid, func_oid`,
+      params,
     )
   ).rows.map((r) => ({ conOid: Number(r.con_oid), funcOid: Number(r.func_oid) }));
   log(`pg_depend: ${constraintFuncDeps.length} constraint→function deps — ${took()}`);
 
   // Exact relation deps of new-style (BEGIN ATOMIC) SQL functions — tracked by pg_depend.
-  const sqlBodyDeps: SqlBodyDep[] = (
-    await client.query(
-      `SELECT DISTINCT d.objid AS func_oid, d.refobjid AS rel_oid, d.refobjsubid AS attnum
-       FROM pg_depend d
-       WHERE d.classid = 'pg_proc'::regclass
-         AND d.refclassid = 'pg_class'::regclass
-         AND d.deptype = 'n'`,
-    )
-  ).rows.map((r) => ({
-    funcOid: Number(r.func_oid),
-    relOid: Number(r.rel_oid),
-    attnum: Number(r.attnum),
-  }));
+  const sqlBodyDeps = await fetchSqlBodyDeps(
+    client,
+    `${schemaPred("n.nspname")} AND ${notExtensionOwned("pg_proc", "p.oid")}`,
+    params,
+  );
   log(`pg_depend: ${sqlBodyDeps.length} SQL-body (BEGIN ATOMIC) function deps — ${took()}`);
 
   // Column defaults & generated columns: what other columns/functions they reference.
@@ -277,11 +333,18 @@ export async function introspect(
               CASE WHEN d.refclassid = 'pg_proc'::regclass THEN d.refobjid END AS ref_func_oid
        FROM pg_depend d
        JOIN pg_attrdef ad ON ad.oid = d.objid
+       JOIN pg_class c ON c.oid = ad.adrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE d.classid = 'pg_attrdef'::regclass
          AND d.deptype IN ('n','a')
          AND d.refclassid IN ('pg_class'::regclass, 'pg_proc'::regclass)
          AND NOT (d.refclassid = 'pg_class'::regclass
-                  AND d.refobjid = ad.adrelid AND d.refobjsubid = ad.adnum)`,
+                  AND d.refobjid = ad.adrelid AND d.refobjsubid = ad.adnum)
+         AND ${schemaPred("n.nspname")}
+         AND ${notExtensionOwned("pg_attrdef", "ad.oid")}
+         AND ${notExtensionOwned("pg_class", "c.oid")}
+       ORDER BY rel_oid, attnum, ref_rel_oid, ref_attnum, ref_func_oid`,
+      params,
     )
   ).rows.map((r) => ({
     relOid: Number(r.rel_oid),
@@ -303,33 +366,55 @@ export async function introspect(
       `(${countBy(funcs, (f) => f.language)}) — ${took()}`,
   );
 
-  // Pull in trigger functions / view-called functions living outside the schema filter
-  // (extensions etc.). System-schema functions are kept only when a trigger uses them.
+  // Pull in non-extension functions referenced by in-scope triggers, views,
+  // constraints, and defaults. System-schema functions are kept only when a
+  // trigger uses them.
   const relOids = new Set(rels.map((r) => r.oid));
   const known = new Set(funcs.map((f) => f.oid));
   const trigFnOids = new Set(triggers.map((t) => t.funcOid));
   const conOids = new Set(constraints.map((c) => c.oid));
-  const wanted = new Set<number>();
-  for (const t of triggers) if (!known.has(t.funcOid)) wanted.add(t.funcOid);
-  for (const d of viewFuncDeps) {
-    if (relOids.has(d.viewOid) && !known.has(d.funcOid)) wanted.add(d.funcOid);
-  }
-  for (const d of constraintFuncDeps) {
-    if (conOids.has(d.conOid) && !known.has(d.funcOid)) wanted.add(d.funcOid);
-  }
+  const referencedFuncOids = [
+    ...triggers.map((t) => t.funcOid),
+    ...viewFuncDeps.filter((d) => relOids.has(d.viewOid)).map((d) => d.funcOid),
+    ...constraintFuncDeps.filter((d) => conOids.has(d.conOid)).map((d) => d.funcOid),
+    ...defaultDeps
+      .filter(
+        (d): d is DefaultDep & { refFuncOid: number } =>
+          relOids.has(d.relOid) && d.refFuncOid !== null,
+      )
+      .map((d) => d.refFuncOid),
+  ];
+  const wanted = new Set(referencedFuncOids.filter((oid) => !known.has(oid)));
   if (wanted.size > 0) {
-    const extra = await fetchFuncs(client, `p.oid = ANY($1::oid[])`, [[...wanted]]);
+    const extra = await fetchFuncs(
+      client,
+      `p.oid = ANY($1::oid[]) AND ${notExtensionOwned("pg_proc", "p.oid")}`,
+      [[...wanted]],
+    );
     let kept = 0;
+    const keptOids: number[] = [];
     for (const f of extra) {
       const system = f.schema === "pg_catalog" || f.schema === "information_schema";
       if (!system || trigFnOids.has(f.oid)) {
         funcs.push(f);
         kept++;
+        keptOids.push(f.oid);
       }
+    }
+    let extraSqlBodyDeps = 0;
+    if (keptOids.length > 0) {
+      const deps = await fetchSqlBodyDeps(
+        client,
+        `p.oid = ANY($1::oid[]) AND ${notExtensionOwned("pg_proc", "p.oid")}`,
+        [keptOids],
+      );
+      sqlBodyDeps.push(...deps);
+      extraSqlBodyDeps = deps.length;
     }
     log(
       `pg_proc: ${kept} extra out-of-filter functions referenced by ` +
-        `triggers/views/constraints (${wanted.size} candidates) — ${took()}`,
+        `triggers/views/constraints/defaults (${wanted.size} candidates, ` +
+        `${extraSqlBodyDeps} SQL-body deps) — ${took()}`,
     );
   }
 
@@ -349,6 +434,32 @@ export async function introspect(
   };
 }
 
+async function fetchSqlBodyDeps(
+  client: Client,
+  procPredicate: string,
+  params: unknown[],
+): Promise<SqlBodyDep[]> {
+  return (
+    await client.query(
+      `SELECT DISTINCT d.objid AS func_oid, d.refobjid AS rel_oid, d.refobjsubid AS attnum
+       FROM pg_depend d
+       JOIN pg_proc p ON p.oid = d.objid
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE d.classid = 'pg_proc'::regclass
+         AND d.refclassid = 'pg_class'::regclass
+         AND d.deptype = 'n'
+         AND p.prokind IN ('f','p')
+         AND ${procPredicate}
+       ORDER BY func_oid, rel_oid, attnum`,
+      params,
+    )
+  ).rows.map((r) => ({
+    funcOid: Number(r.func_oid),
+    relOid: Number(r.rel_oid),
+    attnum: Number(r.attnum),
+  }));
+}
+
 async function fetchFuncs(
   client: Client,
   where: string,
@@ -366,12 +477,14 @@ async function fetchFuncs(
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
     JOIN pg_language l ON l.oid = p.prolang
-    WHERE ${where}`;
+    WHERE ${where}
+    ORDER BY n.nspname, p.proname, p.oid`;
 
   let rows: Record<string, unknown>[];
   try {
     rows = (await client.query(sql("p.prosqlbody IS NOT NULL"), params)).rows;
-  } catch {
+  } catch (err) {
+    if (!isMissingProsqlbody(err)) throw err;
     // prosqlbody only exists on PG 14+
     rows = (await client.query(sql("false"), params)).rows;
   }

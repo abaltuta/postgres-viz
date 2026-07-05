@@ -1,21 +1,62 @@
 import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
+import * as dagre from "dagre";
+import {
+  DEFAULT_PREFS,
+  type HostToWebviewMessage,
+  normalizePrefs,
+  type Prefs,
+  type WebviewToHostMessage,
+} from "../src/protocol";
 import type { GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
 import {
+  aggregateMemberLabels,
   allCardUnits as coreCardUnits,
-  applyKeepMask,
   callTreeClosure,
-  DATA_KINDS,
   fitTarget,
   isShownByClasses,
   type PositionSnapshot,
-  resetViewState,
-  restorePositions,
   snapshotPositions,
   suppressRedundantAggs,
   unitOf,
 } from "./core";
+import {
+  applyCallTreeColumnFilter as adapterApplyCallTreeColumnFilter,
+  applyEdgeSegments,
+  applyFilterClasses,
+  applyFocusedRowFilter,
+  applyKeepMask,
+  applySchemaGrouping as adapterApplySchemaGrouping,
+  applySelectionClasses,
+  clearEdgeRouting as adapterClearEdgeRouting,
+  clearHotEdges,
+  clearHoverReveal,
+  clearSelectionClasses,
+  collectCallTreeTouchedRows,
+  DATA_KINDS,
+  dematerializeAll as adapterDematerializeAll,
+  dematerializeCardsWithoutTouchedRows,
+  edgeHidden,
+  edgeShownByClasses,
+  initializeVirtualCards,
+  materializeCard as adapterMaterializeCard,
+  materializeNeighborhood as adapterMaterializeNeighborhood,
+  type EdgeDef,
+  markCallTreeHot,
+  markSingleCardEdgesOrthogonal,
+  moveUnitTo,
+  type NodeDef,
+  resetViewState,
+  restackRows as adapterRestackRows,
+  restoreViewPositions,
+  revealCallTreeEdges,
+  setHoverReveal,
+} from "./cytoscape-adapter";
 
 const vscode = acquireVsCodeApi();
+
+function postToHost(message: WebviewToHostMessage): void {
+  vscode.postMessage(message);
+}
 
 const NODE_COLORS: Record<string, string> = {
   table: "#4C9AFF",
@@ -49,9 +90,6 @@ const EDGE_COLORS: Record<string, string> = {
 
 const ROW_TYPES = new Set(["column", "trigger", "constraint", "index"]);
 
-type NodeDef = { data: GraphNodeData };
-type EdgeDef = { data: GraphEdgeData };
-
 let cy: Core | null = null;
 let database = "";
 let lastStats: Record<string, number> = {};
@@ -70,27 +108,22 @@ const MATERIALIZE_CAP = 30;
 
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
-/**
- * View preferences now live in the EXTENSION (status bar / QuickPicks / title
- * actions own all chrome). The webview holds a local mirror, updated only via
- * the `prefs` message, and reads it everywhere the old toolbar controls were
- * read. `layout: "tree"` maps to the cytoscape layout the old select called
- * "breadthfirst" — normalized in runLayout().
- */
-interface Prefs {
-  layout: "grid" | "tree";
-  edgeMode: "off" | "cards" | "all";
-  schemaGroup: boolean;
-  route: boolean;
-  hideIsolated: boolean;
+function hidePanel(): void {
+  el("panel").classList.add("hidden");
 }
-let prefs: Prefs = {
-  layout: "grid",
-  edgeMode: "off",
-  schemaGroup: true,
-  route: false,
-  hideIsolated: false,
-};
+
+function materializationState() {
+  return {
+    rowsByCard,
+    detailEdgesByCard,
+    cardOfNode,
+    materialized,
+    materializeCap: MATERIALIZE_CAP,
+  };
+}
+
+/** Mirrored from the extension host; native chrome owns preference changes. */
+let prefs: Prefs = { ...DEFAULT_PREFS };
 const edgeMode = (): Prefs["edgeMode"] => prefs.edgeMode;
 
 const isDark = (): boolean =>
@@ -158,73 +191,19 @@ function buildCardArt(card: NodeDef): void {
 // ── materialization: swap a card's SVG rows for real nodes + detail edges ──
 
 function materializeCard(cardId: string): void {
-  if (!cy || materialized.has(cardId) || !rowsByCard.has(cardId)) return;
-  const card = cy.getElementById(cardId);
-  if (card.empty()) return;
-  const center = { ...card.position() };
-  const rows = rowsByCard.get(cardId)!;
-  materialized.add(cardId);
-  cy.batch(() => {
-    card.removeClass("virtual-card");
-    cy!.add(
-      rows.map((r, i) => ({
-        group: "nodes" as const,
-        data: r.data,
-        position: { x: center.x, y: center.y + i }, // restack trues this up
-      })),
-    );
-    for (const e of detailEdgesByCard.get(cardId) ?? []) {
-      if (cy!.getElementById(e.data.id).nonempty()) continue;
-      if (
-        cy!.getElementById(e.data.source).nonempty() &&
-        cy!.getElementById(e.data.target).nonempty()
-      ) {
-        cy!.add({ group: "edges" as const, data: e.data });
-      }
-    }
-  });
+  if (!cy) return;
+  adapterMaterializeCard(cy, materializationState(), cardId);
 }
 
 /** Materialize a card plus the counterpart cards of its detail edges (capped). */
 function materializeNeighborhood(unitId: string): void {
-  materializeCard(unitId);
-  const counters = new Set<string>();
-  for (const e of detailEdgesByCard.get(unitId) ?? []) {
-    for (const end of [e.data.source, e.data.target]) {
-      const card = cardOfNode.get(end);
-      if (card && card !== unitId) counters.add(card);
-    }
-  }
-  let n = 0;
-  for (const c of counters) {
-    if (n++ >= MATERIALIZE_CAP) break;
-    materializeCard(c);
-  }
-}
-
-function materializeAll(): void {
-  for (const id of rowsByCard.keys()) materializeCard(id);
-}
-
-/** Collapse one card back to its SVG-art form (callers wrap in cy.batch). */
-function dematerializeCard(id: string): void {
-  if (!cy || !materialized.has(id)) return;
-  const card = cy.getElementById(id);
-  if (card.empty()) return;
-  const pos = { ...card.position() };
-  cy.remove(card.children()); // incident detail edges go with the rows
-  card.position(pos);
-  card.addClass("virtual-card");
-  materialized.delete(id);
+  if (!cy) return;
+  adapterMaterializeNeighborhood(cy, materializationState(), unitId);
 }
 
 function dematerializeAll(): void {
-  if (!cy || materialized.size === 0) return;
-  // iterate a copy — entries are deleted mid-loop
-  const ids = Array.from(materialized);
-  cy.batch(() => {
-    for (const id of ids) dematerializeCard(id);
-  });
+  if (!cy) return;
+  adapterDematerializeAll(cy, materializationState());
 }
 
 // ── styles ──
@@ -403,6 +382,7 @@ function buildStyle(): cytoscape.StylesheetJson {
     { selector: "edge.hover-reveal", style: { display: "element", opacity: 0.8, width: 1.5 } },
     { selector: "edge.agg-suppressed", style: { display: "none" } },
     { selector: ".hidden-el", style: { display: "none" } },
+    { selector: ".facet-hidden", style: { display: "none" } },
     { selector: ".isolated-hidden", style: { display: "none" } },
     { selector: ".focus-hidden", style: { display: "none" } },
     { selector: ".untouched-hidden", style: { display: "none" } },
@@ -473,16 +453,13 @@ function render(graph: GraphPayload): void {
     // dragging always pans the canvas — node positions are layout-owned
     autoungrabify: true,
   });
-  cy.nodes().forEach((n) => {
-    if (rowsByCard.has(n.id())) n.addClass("virtual-card");
-  });
+  initializeVirtualCards(cy, rowsByCard);
   // a graph push while a view was active must clear EVERYTHING the view
   // owned: the spec, the canvas tint, the pending zoom nudge, the panel
   view = null;
   window.clearTimeout(zoomNudge);
-  hoverUnit = null;
-  el("content").classList.remove("view-focus", "view-calltree");
-  el("panel").classList.add("hidden");
+  clearViewUiState();
+  hidePanel();
   lastStats = graph.stats;
   applySchemaGrouping(false);
   applyFilters();
@@ -506,40 +483,7 @@ function render(graph: GraphPayload): void {
 
 function applyFilters(): void {
   if (!cy) return;
-  const g = cy;
-  if (edgeMode() === "all" && materialized.size < rowsByCard.size && !view) {
-    materializeAll();
-  }
-  g.batch(() => {
-    const mode = edgeMode();
-    g.edges().removeClass("edge-off");
-    if (mode === "off") g.edges().addClass("edge-off");
-    else if (mode === "cards") g.edges("[?detail]").addClass("edge-off");
-
-    g.nodes().removeClass("isolated-hidden");
-    if (prefs.hideIsolated) {
-      // keep anything participating in at least one card-level relationship
-      const keep = new Set<string>();
-      g.edges("[!detail]").forEach((e) => {
-        if (e.hasClass("hidden-el")) return;
-        keep.add(e.source().id());
-        keep.add(e.target().id());
-      });
-      g.nodes().forEach((n) => {
-        if (keep.has(n.id())) {
-          n.ancestors().forEach((a) => {
-            keep.add(a.id());
-          });
-          n.descendants().forEach((d) => {
-            keep.add(d.id());
-          });
-        }
-      });
-      g.nodes().forEach((n) => {
-        if (!keep.has(n.id()) && !n.hasClass("hidden-el")) n.addClass("isolated-hidden");
-      });
-    }
-  });
+  applyFilterClasses(cy, materializationState(), prefs, edgeMode(), Boolean(view));
   restackRows();
   updateStats();
 }
@@ -554,49 +498,14 @@ function applyFilters(): void {
  */
 function restackRows(): void {
   if (!cy) return;
-  cy.batch(() => {
-    cy!.nodes(':parent[type != "schema"]').forEach((p) => {
-      // class checks, NOT `:visible` — freshly materialized rows have no
-      // computed style yet, so `:visible` returns empty and leaves the pile
-      const rows = p
-        .children()
-        .filter(
-          (d) =>
-            !d.hasClass("hidden-el") &&
-            !d.hasClass("isolated-hidden") &&
-            !d.hasClass("focus-hidden") &&
-            !d.hasClass("untouched-hidden"),
-        )
-        .sort((a, b) => (Number(a.data("ord")) || 0) - (Number(b.data("ord")) || 0));
-      if (rows.length === 0) return;
-      let maxLen = String(p.data("label") ?? "").length;
-      rows.forEach((r) => {
-        maxLen = Math.max(maxLen, String(r.data("label") ?? "").length);
-      });
-      const rowW = Math.max(70, maxLen * 6.5 + 14);
-      const rowH = 17;
-      const cx = p.position("x");
-      const top = p.position("y") - (rows.length * rowH) / 2;
-      rows.forEach((r, i) => {
-        r.position({ x: cx, y: top + i * rowH + rowH / 2 });
-        r.style({ width: rowW });
-      });
-    });
-  });
+  adapterRestackRows(cy);
 }
 
 /** Move tables/views/functions in or out of their schema compound. */
 function applySchemaGrouping(relayout: boolean): void {
   if (!cy) return;
   exitView(false);
-  const grouped = prefs.schemaGroup;
-  cy.batch(() => {
-    cy!.nodes("[schemaParent]").forEach((n) => {
-      const target = grouped ? (n.data("schemaParent") as string) : null;
-      if ((n.data("parent") ?? null) !== target) n.move({ parent: target });
-    });
-    cy!.nodes('[type="schema"]').toggleClass("hidden-el", !grouped);
-  });
+  adapterApplySchemaGrouping(cy, prefs.schemaGroup);
   if (relayout) {
     applyFilters();
     runLayout();
@@ -638,13 +547,8 @@ function cardUnits(): NodeSingular[] {
   return coreCardUnits(cy!).filter((n) => isShown(n));
 }
 
-function shiftUnit(u: NodeSingular, dx: number, dy: number): void {
-  (u.isParent() ? u.descendants() : u).shift({ x: dx, y: dy });
-}
-
-function moveUnitTo(u: NodeSingular, x: number, y: number): void {
-  const bb = u.boundingBox({ includeLabels: false });
-  shiftUnit(u, x - (bb.x1 + bb.x2) / 2, y - (bb.y1 + bb.y2) / 2);
+function unitBox(u: NodeSingular) {
+  return u.boundingBox({ includeLabels: true });
 }
 
 /** Shelf-pack members into rows of the given width starting at (x0, y0); returns height used. */
@@ -659,7 +563,7 @@ function packShelf(
   let y = y0;
   let rowH = 0;
   for (const u of members) {
-    const b = u.boundingBox({ includeLabels: true });
+    const b = unitBox(u);
     if (x > 0 && x + b.w > rowWidth) {
       x = 0;
       y += rowH + gap;
@@ -713,7 +617,7 @@ function layoutGridCards(units: NodeSingular[]): void {
     let area = 0;
     let widest = 0;
     for (const u of members) {
-      const b = u.boundingBox({ includeLabels: true });
+      const b = unitBox(u);
       area += (b.w + GAP) * (b.h + GAP);
       widest = Math.max(widest, b.w);
     }
@@ -755,7 +659,7 @@ function unitAdjacency(units: NodeSingular[]): {
     degree.set(u.id(), 0);
   }
   cy!.edges("[!detail]").forEach((e) => {
-    if (e.hasClass("hidden-el")) return;
+    if (edgeHidden(e as EdgeSingular)) return;
     const s = e.source().id();
     const t = e.target().id();
     if (s === t || !ids.has(s) || !ids.has(t)) return;
@@ -801,7 +705,7 @@ function layoutTreeCards(units: NodeSingular[]): void {
   // wrap each dependency layer to the viewport's aspect so wide trees don't
   // fit-to-specks; busiest cards lead their layer
   const totalArea = units.reduce((s, u) => {
-    const b = u.boundingBox({ includeLabels: true });
+    const b = unitBox(u);
     return s + (b.w + GAP) * (b.h + GAP);
   }, 0);
   const maxW = Math.max(900, Math.sqrt(totalArea * canvasAspect()));
@@ -812,6 +716,57 @@ function layoutTreeCards(units: NodeSingular[]): void {
       .sort((a, b) => (degree.get(b.id()) ?? 0) - (degree.get(a.id()) ?? 0));
     y += packShelf(row, 0, y, maxW, GAP) + GAP * 2;
   }
+}
+
+/** Grid step for the v2 layout: dagre's coordinates are snapped to multiples
+ *  of this so cards line up cleanly. Small relative to nodesep/ranksep below,
+ *  so snapping tidies fractional offsets without ever colliding cards. */
+const V2_GRID = 24;
+
+/**
+ * v2 tree/call-graph layout — dagre's layered DAG engine over the unit graph.
+ *
+ * Where layoutTreeCards (v1) does BFS leveling + per-level shelf wrapping, this
+ * hands the unit adjacency to dagre, which gives a proper Sugiyama layout:
+ * longest-path ranks (every call edge points the same way, one rank per depth,
+ * no wrapping), cycle breaking (recursion/mutual calls don't strand nodes), and
+ * median crossing reduction. We run dagre HEADLESS on units only — never the
+ * compound schema/column hierarchy it can't handle — then snap each unit's
+ * centre to V2_GRID and place it with moveUnitTo, leaving materialization,
+ * restack and routing untouched.
+ */
+function layoutTreeCardsV2(units: NodeSingular[]): void {
+  if (units.length === 0) return;
+  const { out } = unitAdjacency(units);
+  const g = new dagre.graphlib.Graph({ multigraph: false, compound: false });
+  g.setGraph({
+    rankdir: "TB", // callers above callees — reads top-down like a call graph
+    nodesep: GAP, // horizontal gap within a rank
+    ranksep: GAP * 2, // vertical gap between ranks
+    marginx: 0,
+    marginy: 0,
+    ranker: "network-simplex", // tight, balanced ranks
+  });
+  g.setDefaultEdgeLabel(() => ({}));
+  for (const u of units) {
+    const b = unitBox(u);
+    g.setNode(u.id(), { width: b.w, height: b.h });
+  }
+  for (const [s, targets] of out) {
+    for (const t of targets) g.setEdge(s, t);
+  }
+  dagre.layout(g);
+  const snap = (v: number): number => Math.round(v / V2_GRID) * V2_GRID;
+  for (const u of units) {
+    const n = g.node(u.id()) as { x: number; y: number } | undefined;
+    if (n) moveUnitTo(u, snap(n.x), snap(n.y));
+  }
+}
+
+/** Dispatch the tree/call-graph layout to the engine the prefs select. */
+function layoutTree(units: NodeSingular[]): void {
+  if (prefs.engine === "v2") layoutTreeCardsV2(units);
+  else layoutTreeCards(units);
 }
 
 // ── obstacle-avoiding edge routing (toggleable heuristic) ──
@@ -859,7 +814,7 @@ function segmentHitsBox(ax: number, ay: number, bx: number, by: number, r: Box):
 
 /** True when an edge is actually being drawn right now (class-derived). */
 function edgeShownForRouting(e: EdgeSingular): boolean {
-  if (e.hasClass("agg-suppressed") || e.hasClass("hidden-el")) return false;
+  if (e.hasClass("agg-suppressed") || edgeHidden(e)) return false;
   const revealed = e.hasClass("revealed") || e.hasClass("hover-reveal");
   if (!revealed) {
     const mode = edgeMode();
@@ -873,11 +828,7 @@ const routedEdges = new Set<string>();
 
 function clearEdgeRouting(): void {
   if (!cy) return;
-  for (const id of routedEdges) {
-    const e = cy.getElementById(id);
-    if (e.nonempty()) e.removeStyle("curve-style segment-weights segment-distances");
-  }
-  routedEdges.clear();
+  adapterClearEdgeRouting(cy, routedEdges);
 }
 
 /** Absolute waypoints → cytoscape's relative segment-weights/-distances. */
@@ -887,24 +838,7 @@ function applySegments(
   t: { x: number; y: number },
   pts: { x: number; y: number }[],
 ): void {
-  const dx = t.x - s.x;
-  const dy = t.y - s.y;
-  const len2 = dx * dx + dy * dy;
-  if (len2 < 1) return;
-  const ws: number[] = [];
-  const ds: number[] = [];
-  for (const p of pts) {
-    const px = p.x - s.x;
-    const py = p.y - s.y;
-    ws.push((px * dx + py * dy) / len2);
-    ds.push((px * dy - py * dx) / Math.sqrt(len2));
-  }
-  e.style({
-    "curve-style": "segments",
-    "segment-weights": ws.join(" "),
-    "segment-distances": ds.join(" "),
-  });
-  routedEdges.add(e.id());
+  applyEdgeSegments(routedEdges, e, s, t, pts);
 }
 
 function routeEdgesAroundCards(): void {
@@ -913,7 +847,7 @@ function routeEdgesAroundCards(): void {
   if (!prefs.route) return;
   const units = cardUnits();
   const boxes = units.map((u) => {
-    const b = u.boundingBox({ includeLabels: true });
+    const b = unitBox(u);
     return { id: u.id(), box: { x1: b.x1 - 10, y1: b.y1 - 10, x2: b.x2 + 10, y2: b.y2 + 10 } };
   });
   if (boxes.length === 0) return;
@@ -948,25 +882,11 @@ function runLayout(): void {
   if (!cy) return;
   // prefs.layout "tree" is what layoutTreeCards keys off as "breadthfirst"
   const name = prefs.layout === "tree" ? "breadthfirst" : "grid";
-  // taxi routing has NO parallel-edge separation — multiple edges between the
-  // same pair (reads + writes to one table) would coincide exactly. Pairs with
-  // more than one card-level edge stay bezier, which fans parallels apart.
-  const pairCount = new Map<string, number>();
-  const pairKey = (e: EdgeSingular): string => {
-    const a = e.source().id();
-    const b = e.target().id();
-    return a < b ? `${a}|${b}` : `${b}|${a}`;
-  };
-  cy.edges("[!detail]").forEach((e) => {
-    const k = pairKey(e);
-    pairCount.set(k, (pairCount.get(k) ?? 0) + 1);
-  });
-  cy.edges("[!detail]").forEach((e) => {
-    e.toggleClass("ortho", (pairCount.get(pairKey(e)) ?? 0) === 1);
-  });
+  // Taxi routing has no parallel-edge separation; parallel card pairs stay bezier.
+  markSingleCardEdgesOrthogonal(cy);
   restackRows();
   const units = cardUnits();
-  if (name === "breadthfirst") layoutTreeCards(units);
+  if (name === "breadthfirst") layoutTree(units);
   else layoutGridCards(units);
   routeEdgesAroundCards();
   fitView();
@@ -980,35 +900,13 @@ function selectNode(node: NodeSingular): void {
   // drives the hot layer and the panel there (one stray tap used to wipe
   // every visible edge of the chain)
   if (view?.mode === "calltree") {
-    cy.edges().removeClass("hot");
+    clearHotEdges(cy);
     const unit = unitOf(node);
-    unit.union(unit.descendants()).connectedEdges(".revealed").addClass("hot");
+    markCallTreeHot(unit);
     renderPanel(node);
     return;
   }
-  cy.edges().removeClass("hot revealed agg-suppressed");
-  const core = node.union(node.descendants());
-  const detailEdges = core.connectedEdges("[?detail]");
-  const unit = unitOf(node);
-  const counterUnits = new Set<string>([unit.id()]);
-  detailEdges.forEach((e) => {
-    counterUnits.add(unitOf(e.source() as NodeSingular).id());
-    counterUnits.add(unitOf(e.target() as NodeSingular).id());
-  });
-  unit
-    .union(unit.descendants())
-    .connectedEdges("[?agg]")
-    .forEach((e) => {
-      if (counterUnits.has(e.source().id()) && counterUnits.has(e.target().id())) {
-        e.addClass("agg-suppressed");
-      }
-    });
-  const revealed = detailEdges.union(core.connectedEdges("[!detail]"));
-  revealed.addClass("revealed hot");
-  const hood = core.closedNeighborhood().union(revealed.connectedNodes()).union(node.ancestors());
-  const withParents = hood.union(hood.nodes().ancestors());
-  cy.elements().addClass("dimmed");
-  withParents.removeClass("dimmed");
+  applySelectionClasses(cy, node, unitOf);
   routeEdgesAroundCards();
   renderPanel(node);
 }
@@ -1016,8 +914,8 @@ function selectNode(node: NodeSingular): void {
 function clearSelection(): void {
   if (!cy) return;
   if (view?.mode === "calltree") {
-    cy.edges().removeClass("hot");
-    el("panel").classList.add("hidden");
+    clearHotEdges(cy);
+    hidePanel();
     return;
   }
   if (view?.mode === "focus") {
@@ -1028,9 +926,8 @@ function clearSelection(): void {
       return;
     }
   }
-  cy.elements().removeClass("dimmed");
-  cy.edges().removeClass("hot revealed agg-suppressed");
-  el("panel").classList.add("hidden");
+  clearSelectionClasses(cy);
+  hidePanel();
   if (!view && edgeMode() !== "all") {
     dematerializeAll();
     restackRows();
@@ -1063,6 +960,16 @@ interface ViewSpec {
 let view: ViewSpec | null = null;
 /** the one pending readable-zoom nudge — re-entering a view cancels it */
 let zoomNudge: number | undefined;
+let hoverUnit: string | null = null;
+
+function clearViewUiState(): void {
+  hoverUnit = null;
+  el("content").classList.remove("view-focus", "view-calltree");
+}
+
+function qualifiedNodeLabel(node: NodeSingular): string {
+  return `${node.data("schema") ?? ""}.${node.data("label")}`;
+}
 
 /** Crumb bar rendered FROM the spec; listeners dispatch by rootId, never
  *  through captured elements (stale after dematerialize/materialize). */
@@ -1108,13 +1015,7 @@ function applyCallTreeColumnFilter(): void {
   if (!cy || view?.mode !== "calltree") return;
   const onlyTouched = view.onlyTouched !== false;
   const touched = view.touchedRows ?? new Set<string>();
-  cy.batch(() => {
-    cy!.nodes(':parent[type != "schema"]').forEach((p) => {
-      p.children().forEach((r) => {
-        r.toggleClass("untouched-hidden", onlyTouched && !touched.has(r.id()));
-      });
-    });
-  });
+  adapterApplyCallTreeColumnFilter(cy, onlyTouched, touched);
 }
 
 /** Return to the canonical base state (no refit) — safe from any state. */
@@ -1123,11 +1024,10 @@ function leaveToBase(): void {
   const { saved } = view;
   view = null;
   window.clearTimeout(zoomNudge);
-  el("content").classList.remove("view-focus", "view-calltree");
+  clearViewUiState();
   dematerializeAll();
   resetViewState(cy);
-  hoverUnit = null; // hover-reveal was just stripped — the guard must not skip the re-add
-  restorePositions(cy, saved);
+  restoreViewPositions(cy, saved);
   hideCrumb();
   // re-establish what the view bypassed: edge-mode "all" re-materializes,
   // the isolated mask recomputes, stale view-anchored routing is replaced
@@ -1148,7 +1048,7 @@ function enterView(spec: Omit<ViewSpec, "saved">): void {
   const saved = snapshotPositions(cy); // TRUE base positions, pre-mutation
   view = { ...spec, saved };
   resetViewState(cy); // strip selection highlights left in base
-  hoverUnit = null; // hover-reveal was just stripped — the guard must not skip the re-add
+  clearViewUiState();
   applyKeepMask(cy, view.keep);
   el("content").classList.add(`view-${view.mode}`);
   renderCrumb();
@@ -1160,31 +1060,20 @@ function focusNode(node: NodeSingular): void {
   const unit = unitOf(node);
   const keep = new Set<string>([unit.id()]);
   cy.edges("[!detail]").forEach((e) => {
-    if (e.hasClass("hidden-el")) return;
+    if (edgeHidden(e as EdgeSingular)) return;
     if (e.source().id() === unit.id()) keep.add(e.target().id());
     if (e.target().id() === unit.id()) keep.add(e.source().id());
   });
-  const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
+  const label = qualifiedNodeLabel(node);
   enterView({ mode: "focus", rootId: node.id(), keep, crumb: `Focused: ${label} · 1 hop` });
-  materializeCard(unit.id());
+  if (node.id() !== unit.id()) materializeNeighborhood(unit.id());
+  else materializeCard(unit.id());
   applyFilters();
   // the focused ITEM is the star: when it's a row, collapse its (possibly
   // huge) table to the clicked row plus rows related outside the card —
   // a 200-column table must not dwarf the thing being focused
   if (node.id() !== unit.id()) {
-    const card = cy.getElementById(unit.id());
-    cy.batch(() => {
-      card.children().forEach((r) => {
-        if (r.id() === node.id()) return;
-        let involved = false;
-        r.connectedEdges("[?detail]").forEach((e) => {
-          const other = e.source().id() === r.id() ? e.target() : e.source();
-          const ou = unitOf(other as NodeSingular).id();
-          if (ou !== unit.id() && keep.has(ou)) involved = true;
-        });
-        r.toggleClass("untouched-hidden", !involved);
-      });
-    });
+    applyFocusedRowFilter(cy, node, unit, keep, unitOf);
   }
   runLayout();
   // leaveToBase (inside enterView) dematerializes rows: the clicked row node
@@ -1213,18 +1102,7 @@ function applyCallTreePresentation(): void {
   // make the chain's column detail available, then reveal ONLY the chain
   for (const id of keep) materializeCard(id);
   applyFilters();
-  cy.edges().removeClass("revealed agg-suppressed hot");
-
-  // which rows the chain touches — collected BEFORE any reveal classes
-  const touchedRows = new Set<string>();
-  cy.edges("[?detail]").forEach((e) => {
-    const su = unitOf(e.source() as NodeSingular).id();
-    const tu = unitOf(e.target() as NodeSingular).id();
-    if (!onChain(String(e.data("kind")), su, tu, e.target().id())) return;
-    for (const end of [e.source(), e.target()]) {
-      if (ROW_TYPES.has(String(end.data("type")))) touchedRows.add(end.id());
-    }
-  });
+  const touchedRows = collectCallTreeTouchedRows(cy, ROW_TYPES, unitOf, onChain);
 
   // tables the chain touches only at WHOLE-TABLE level (no column detail —
   // think regex-fallback inserts/deletes) have zero touched rows; hiding
@@ -1232,40 +1110,14 @@ function applyCallTreePresentation(): void {
   // compact virtual cards instead — the agg pass below still draws their
   // edges because no detail pair survives to suppress it.
   if (onlyTouched) {
-    const touchedCards = new Set<string>();
-    for (const id of touchedRows) {
-      const c = cardOfNode.get(id);
-      if (c) touchedCards.add(c);
-    }
-    cy.batch(() => {
-      for (const id of keep) {
-        if (materialized.has(id) && !touchedCards.has(id)) dematerializeCard(id);
-      }
-    });
+    dematerializeCardsWithoutTouchedRows(cy, materializationState(), keep, touchedRows);
   }
 
-  const revealedPairs = new Set<string>();
-  cy.edges("[?detail]").forEach((e) => {
-    const su = unitOf(e.source() as NodeSingular).id();
-    const tu = unitOf(e.target() as NodeSingular).id();
-    const k = String(e.data("kind"));
-    if (!onChain(k, su, tu, e.target().id())) return;
-    e.addClass("revealed");
-    revealedPairs.add(`${k}|${su}|${tu}`);
-  });
-  cy.edges("[!detail]").forEach((e) => {
-    const su = e.source().id();
-    const tu = e.target().id();
-    const k = String(e.data("kind"));
-    if (!onChain(k, su, tu, tu)) return;
-    if (e.data("agg") && revealedPairs.has(`${k}|${su}|${tu}`)) e.addClass("agg-suppressed");
-    else e.addClass("revealed");
-  });
-
+  revealCallTreeEdges(cy, unitOf, onChain);
   spec.touchedRows = touchedRows;
   applyCallTreeColumnFilter();
   restackRows();
-  layoutTreeCards(cardUnits());
+  layoutTree(cardUnits());
   routeEdgesAroundCards();
   fitView();
 }
@@ -1284,7 +1136,7 @@ function showCallTreeById(id: string, levels: number): void {
 function showCallTree(node: NodeSingular, levels = 2): void {
   if (!cy) return;
   const { fns, keep } = callTreeClosure(cy, node, levels);
-  const label = `${node.data("schema") ?? ""}.${node.data("label")}`;
+  const label = qualifiedNodeLabel(node);
   // re-entering the same root (depth stepper) keeps the column-filter choice
   const onlyTouched =
     view?.mode === "calltree" && view.rootId === node.id() ? view.onlyTouched !== false : true;
@@ -1317,21 +1169,18 @@ function showCallTree(node: NodeSingular, levels = 2): void {
   renderPanel(node);
 }
 
-// ── hover preview ──
-let hoverUnit: string | null = null;
-
 function wireHoverPreview(): void {
   if (!cy) return;
   cy.on("mouseover", "node", (ev) => {
     const unit = unitOf(ev.target as NodeSingular);
     if (hoverUnit === unit.id()) return;
-    cy!.edges(".hover-reveal").removeClass("hover-reveal");
+    clearHoverReveal(cy!);
     hoverUnit = unit.id();
-    unit.union(unit.descendants()).connectedEdges("[!detail]").addClass("hover-reveal");
+    setHoverReveal(unit);
   });
   cy.on("mouseout", "node", () => {
     hoverUnit = null;
-    cy!.edges(".hover-reveal").removeClass("hover-reveal");
+    clearHoverReveal(cy!);
   });
   // cursor affordance: pointer over interactive nodes, default for panning
   const container = el("cy");
@@ -1351,28 +1200,7 @@ function wireHoverPreview(): void {
  * reads/writes/selects → the touched column names.
  */
 function aggMembers(data: GraphEdgeData): string {
-  const unitOfId = (id: string): string => cardOfNode.get(id) ?? id;
-  const members = (detailEdgesByCard.get(data.source) ?? [])
-    .filter(
-      (e) =>
-        e.data.kind === data.kind &&
-        unitOfId(e.data.source) === data.source &&
-        unitOfId(e.data.target) === data.target,
-    )
-    .map((e) => {
-      const src = nodeDefById.get(e.data.source);
-      const tgt = nodeDefById.get(e.data.target);
-      const srcRow = src && ROW_TYPES.has(src.data.type);
-      const tgtRow = tgt && ROW_TYPES.has(tgt.data.type);
-      if (srcRow && tgtRow) return `${src.data.label}→${tgt.data.label}`;
-      if (srcRow) return String(src!.data.label);
-      if (tgtRow) return String(tgt!.data.label);
-      return "";
-    })
-    .filter(Boolean);
-  const MAX = 6;
-  const shown = members.slice(0, MAX).join(", ");
-  return members.length > MAX ? `${shown}, +${members.length - MAX} more` : shown;
+  return aggregateMemberLabels(data, detailEdgesByCard, nodeDefById, cardOfNode, ROW_TYPES);
 }
 
 /** Incoming relationships read passively: X *is called by* Y, never "Y calls". */
@@ -1401,7 +1229,7 @@ function renderPanel(node: NodeSingular): void {
   const isCard = rowsByCard.has(node.id()) || node.isParent();
   const edges = (
     isCard ? node.union(node.descendants()).connectedEdges("[!detail]") : node.connectedEdges()
-  ).filter((e) => !e.hasClass("hidden-el"));
+  ).filter((e) => edgeShownByClasses(e as EdgeSingular));
   const records: {
     kind: string;
     counterUnit: string;
@@ -1457,7 +1285,7 @@ function renderPanel(node: NodeSingular): void {
     </p>
     ${d.detail ? `<p class="detail">${esc(d.detail)}</p>` : ""}
     <div class="actions">
-      ${d.type === "schema" ? "" : '<button id="def-btn" title="jump to the .hcl definition (DDL when none exists)">Go to definition</button><button id="ddl-btn">Open DDL</button>'}
+      ${d.type === "schema" ? "" : '<button id="def-btn" title="jump to source definition (.hcl, up.sql, then DDL)">Go to definition</button><button id="ddl-btn">Open DDL</button>'}
       <button id="focus-btn" class="${view?.mode === "focus" && view.rootId === node.id() ? "active-focus" : ""}">Focus</button>
       ${canCallTree ? `<button id="calltree-btn" class="${view?.mode === "calltree" && view.rootId === node.id() ? "active-calltree" : ""}">Call tree</button>` : ""}
     </div>
@@ -1468,8 +1296,8 @@ function renderPanel(node: NodeSingular): void {
     if (view) {
       // keep the view, just dismiss the panel — clearSelection in focus mode
       // re-selects the origin, which would immediately reopen it
-      cy?.edges().removeClass("hot");
-      el("panel").classList.add("hidden");
+      if (cy) clearHotEdges(cy);
+      hidePanel();
     } else {
       clearSelection();
     }
@@ -1481,16 +1309,18 @@ function renderPanel(node: NodeSingular): void {
   const ddlTarget = d.type === "column" ? (node.parent().first().data() as GraphNodeData) : d;
   panel.querySelector("#ddl-btn")?.addEventListener("click", () => {
     const td = ddlTarget;
-    vscode.postMessage({
+    postToHost({
       type: "openDdl",
       nodeType: td.type,
       oid: td.oid,
+      schema: td.schema ?? "",
+      name: td.label,
       label: `${td.schema ?? ""}.${td.label}`,
     });
   });
   panel.querySelector("#def-btn")?.addEventListener("click", () => {
     const owner = ownerTable; // resolved at render time — see ddlTarget note
-    vscode.postMessage({
+    postToHost({
       type: "openDefinition",
       nodeType: d.type,
       oid: d.oid,
@@ -1547,7 +1377,7 @@ function renderPanel(node: NodeSingular): void {
 
 /** The explorer is a native VS Code TreeView now — sync selection to it. */
 function syncExplorerSelection(id: string): void {
-  vscode.postMessage({ type: "nodeSelected", id });
+  postToHost({ type: "nodeSelected", id });
 }
 
 /** Isolate one schema's tables/views/functions (clicking a schema in the tree). */
@@ -1591,7 +1421,7 @@ function updateStats(): void {
   // on-canvas overlay (bottom-right, like the legend)…
   el("stats").textContent = text;
   // …and the extension mirrors it into the status bar tooltip
-  vscode.postMessage({ type: "stats", text });
+  postToHost({ type: "stats", text });
 }
 
 function buildLegend(): void {
@@ -1621,7 +1451,13 @@ function applyPrefs(next: Prefs): void {
   const prev = prefs;
   prefs = next;
   if (!cy) return;
-  if (next.layout !== prev.layout) runLayout();
+  // engine swaps the tree/call-graph layout — re-run if it changed, or if the
+  // layout shape changed. In a call-tree view, relayout in place so the chain
+  // re-ranks without exiting the view.
+  if (next.layout !== prev.layout || next.engine !== prev.engine) {
+    if (view?.mode === "calltree") applyCallTreePresentation();
+    else runLayout();
+  }
   if (next.edgeMode !== prev.edgeMode) {
     // leaving "all" with no active view: collapse the rows it force-materialized
     if (prev.edgeMode === "all" && !view) dematerializeAll();
@@ -1630,14 +1466,30 @@ function applyPrefs(next: Prefs): void {
   }
   if (next.schemaGroup !== prev.schemaGroup) applySchemaGrouping(true);
   if (next.route !== prev.route) routeEdgesAroundCards();
-  if (next.hideIsolated !== prev.hideIsolated) applyFilters();
+  if (
+    next.hideIsolated !== prev.hideIsolated ||
+    !sameList(next.filterSchemas, prev.filterSchemas) ||
+    !sameList(next.filterNodeTypes, prev.filterNodeTypes) ||
+    !sameList(next.filterEdgeKinds, prev.filterEdgeKinds)
+  ) {
+    applyFilters();
+    routeEdgesAroundCards();
+  }
+}
+
+function sameList(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
 }
 
 /** searchGraph picker → light a card and centre on it (selection only, no view). */
 function searchSelect(id: string): void {
   if (!cy) return;
   const card = cardOfNode.get(id);
-  if (card && !materialized.has(card) && !view) materializeCard(card);
+  if (view) exitView(false);
+  if (card) {
+    materializeNeighborhood(card);
+    applyFilters();
+  }
   const ele = cy.getElementById(id);
   if (ele.empty()) return;
   selectNode(ele as unknown as NodeSingular);
@@ -1658,37 +1510,99 @@ function callTreeById(id: string): void {
   else focusNode(node);
 }
 
+function exportPng(): void {
+  if (!cy) return;
+  requestAnimationFrame(() => {
+    if (!cy) return;
+    postToHost({
+      type: "pngExport",
+      dataUri: cy.png({ full: true, scale: 2, bg: isDark() ? "#1e1e1e" : "#ffffff" }),
+    });
+  });
+}
+
+function exportSvg(): void {
+  if (!cy) return;
+  requestAnimationFrame(() => {
+    if (!cy) return;
+    const nodes = cy.nodes().filter((n) => isShown(n as NodeSingular));
+    const edges = cy.edges().filter((e) => edgeShownForRouting(e as EdgeSingular));
+    const bb = nodes.nonempty()
+      ? nodes.boundingBox({ includeLabels: true, includeOverlays: false })
+      : { x1: 0, y1: 0, w: 800, h: 600 };
+    const pad = 48;
+    const x0 = bb.x1 - pad;
+    const y0 = bb.y1 - pad;
+    const w = Math.max(1, bb.w + pad * 2);
+    const h = Math.max(1, bb.h + pad * 2);
+    const colorOf = (n: NodeSingular): string => NODE_COLORS[String(n.data("type"))] ?? "#8f9bb3";
+    const parts = [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(w)}" height="${Math.ceil(h)}" viewBox="${x0} ${y0} ${w} ${h}">`,
+      `<rect x="${x0}" y="${y0}" width="${w}" height="${h}" fill="${isDark() ? "#1e1e1e" : "#ffffff"}"/>`,
+    ];
+    edges.forEach((e) => {
+      const s = e.source().position();
+      const t = e.target().position();
+      const color = EDGE_COLORS[String(e.data("kind"))] ?? "#6b778c";
+      parts.push(
+        `<line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${color}" stroke-width="1.5" stroke-opacity="0.75"/>`,
+      );
+    });
+    nodes.forEach((raw) => {
+      const n = raw as NodeSingular;
+      const p = n.position();
+      const label = esc(n.data("label"));
+      if (n.isParent()) {
+        const box = n.boundingBox({ includeLabels: false, includeOverlays: false });
+        parts.push(
+          `<rect x="${box.x1}" y="${box.y1}" width="${box.w}" height="${box.h}" rx="6" fill="${colorOf(n)}" fill-opacity="0.08" stroke="${colorOf(n)}" stroke-opacity="0.35"/>`,
+        );
+      } else {
+        parts.push(
+          `<circle cx="${p.x}" cy="${p.y}" r="8" fill="${colorOf(n)}"/><text x="${p.x + 12}" y="${p.y + 4}" font-family="sans-serif" font-size="11" fill="${isDark() ? "#d4d4d4" : "#172b4d"}">${label}</text>`,
+        );
+      }
+    });
+    parts.push("</svg>");
+    postToHost({ type: "svgExport", svg: parts.join("") });
+  });
+}
+
 window.addEventListener("message", (ev: MessageEvent) => {
-  const msg = ev.data;
-  if (msg?.type === "graph") {
+  const msg = ev.data as HostToWebviewMessage;
+  if (msg.type === "graph") {
     database = msg.database ?? "";
-    render(msg.graph as GraphPayload);
+    render(msg.graph);
     if (pendingRevealId) {
       const id = pendingRevealId;
       pendingRevealId = null;
       jumpToNode(id);
     }
-  } else if (msg?.type === "prefs") {
-    applyPrefs(msg.prefs as Prefs);
-  } else if (msg?.type === "reveal") {
+  } else if (msg.type === "prefs") {
+    applyPrefs(normalizePrefs(msg.prefs));
+  } else if (msg.type === "reveal") {
     if (cy) jumpToNode(String(msg.id ?? ""));
     else pendingRevealId = String(msg.id ?? "");
-  } else if (msg?.type === "searchSelect") {
+  } else if (msg.type === "searchSelect") {
     searchSelect(String(msg.id ?? ""));
-  } else if (msg?.type === "callTreeById") {
+  } else if (msg.type === "callTreeById") {
     callTreeById(String(msg.id ?? ""));
-  } else if (msg?.type === "fit") {
+  } else if (msg.type === "fit") {
     fitView(undefined, 40);
-  } else if (msg?.type === "relayout") {
+  } else if (msg.type === "relayout") {
     runLayout();
-  } else if (msg?.type === "exitView") {
+  } else if (msg.type === "exitView") {
     exitView(true);
-  } else if (msg?.type === "status") {
+  } else if (msg.type === "exportPng") {
+    exportPng();
+  } else if (msg.type === "exportSvg") {
+    exportSvg();
+  } else if (msg.type === "status") {
     if (!cy) {
       el("empty").style.display = "flex";
       el("empty").textContent = String(msg.message ?? "");
     }
-  } else if (msg?.type === "error") {
+  } else if (msg.type === "error") {
     if (!cy) {
       el("empty").style.display = "flex";
       el("empty").textContent = `Error: ${msg.message ?? "unknown"}`;
@@ -1725,4 +1639,4 @@ window.addEventListener("keydown", (ev) => {
   });
 }
 buildLegend();
-vscode.postMessage({ type: "ready" });
+postToHost({ type: "ready" });

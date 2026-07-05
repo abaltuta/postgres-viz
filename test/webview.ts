@@ -12,19 +12,43 @@
  *     class changes, so fits must use the class-derived shown set
  */
 import assert from "node:assert/strict";
-import cytoscape, { Core, NodeSingular } from "cytoscape";
+import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
+import { DEFAULT_PREFS } from "../src/protocol";
 import {
+  aggregateMemberLabels,
   allCardUnits,
-  applyKeepMask,
   callTreeClosure,
   fitTarget,
   isShownByClasses,
-  resetViewState,
-  restorePositions,
   snapshotPositions,
   suppressRedundantAggs,
   unitOf,
 } from "../webview/core";
+import {
+  applyFilterClasses,
+  applySelectionClasses,
+  applyKeepMask,
+  dematerializeCard,
+  edgeHidden,
+  edgeShownByClasses,
+  markSingleCardEdgesOrthogonal,
+  materializeCard,
+  materializeNeighborhood,
+  type MaterializationState,
+  restackRows,
+  resetViewState,
+  restoreViewPositions,
+} from "../webview/cytoscape-adapter";
+
+function emptyMaterializationState(): MaterializationState {
+  return {
+    rowsByCard: new Map(),
+    detailEdgesByCard: new Map(),
+    cardOfNode: new Map(),
+    materialized: new Set(),
+    materializeCap: 30,
+  };
+}
 
 function build(): Core {
   return cytoscape({
@@ -75,7 +99,24 @@ function build(): Core {
   assert.ok(lvl2.keep.has("audit"), "depth 2 brings f2's tables back");
 }
 
-// ── 2. stale row reference after dematerialize/materialize ──
+// ── 2. data dependency closure includes view SELECT edges ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "orders_v", type: "view" } },
+        { data: { id: "orders", type: "table" } },
+      ],
+      edges: [{ data: { id: "e_selects", source: "orders_v", target: "orders", kind: "selects" } }],
+    },
+  });
+  const view = cy.getElementById("orders_v") as unknown as NodeSingular;
+  const { keep } = callTreeClosure(cy, view);
+  assert.ok(keep.has("orders"), "selects edges count as data touches");
+}
+
+// ── 3. stale row reference after dematerialize/materialize ──
 {
   const cy = build();
   const stale = cy.getElementById("trg") as unknown as NodeSingular;
@@ -102,7 +143,7 @@ function build(): Core {
   assert.deepEqual([...fns].sort(), ["f1", "f2"], "closure works from the re-resolved node");
 }
 
-// ── 3. fit target derives from classes, not (stale) computed style ──
+// ── 4. fit target derives from classes, not (stale) computed style ──
 {
   const cy = build();
   cy.batch(() => {
@@ -129,7 +170,7 @@ function build(): Core {
   assert.equal(fitTarget(cy).length, cy.elements().length, "all-hidden falls back to all");
 }
 
-// ── 4. panel rows: table-level aggregates are noise when their columns show ──
+// ── 5. panel rows: table-level aggregates are noise when their columns show ──
 {
   const rows = [
     // reads with column detail present → aggregate suppressed
@@ -154,12 +195,86 @@ function build(): Core {
   );
 }
 
-// ── 5. view-state class ownership: reset strips ONLY view-owned classes ──
+// ── 6. panel aggregate members are found from either endpoint card ──
+{
+  const detailEdgesByCard = new Map([
+    [
+      "orders",
+      [
+        { data: { id: "d1", source: "fn", target: "orders_total", kind: "reads" } },
+        { data: { id: "d2", source: "orders_customer_id", target: "customers_id", kind: "fk" } },
+      ],
+    ],
+    [
+      "customers",
+      [{ data: { id: "d2", source: "orders_customer_id", target: "customers_id", kind: "fk" } }],
+    ],
+  ]);
+  const nodeDefById = new Map([
+    ["orders_total", { data: { label: "total", type: "column" } }],
+    ["orders_customer_id", { data: { label: "customer_id", type: "column" } }],
+    ["customers_id", { data: { label: "id", type: "column" } }],
+  ]);
+  const cardOfNode = new Map([
+    ["orders_total", "orders"],
+    ["orders_customer_id", "orders"],
+    ["customers_id", "customers"],
+  ]);
+  const rowTypes = new Set(["column", "trigger", "constraint", "index"]);
+  assert.equal(
+    aggregateMemberLabels(
+      { source: "fn", target: "orders", kind: "reads" },
+      detailEdgesByCard,
+      nodeDefById,
+      cardOfNode,
+      rowTypes,
+    ),
+    "total",
+    "function -> table aggregates find detail rows indexed under the target card",
+  );
+  assert.equal(
+    aggregateMemberLabels(
+      { source: "orders", target: "customers", kind: "fk" },
+      detailEdgesByCard,
+      nodeDefById,
+      cardOfNode,
+      rowTypes,
+    ),
+    "customer_id→id",
+    "row-row detail edges are deduped when both endpoint cards index them",
+  );
+
+  const malformedNodeDefById = new Map([
+    ["orders_bad", { data: { label: undefined, type: "column" } }],
+    ["customers_bad", { data: { label: "", type: "column" } }],
+  ]);
+  assert.equal(
+    aggregateMemberLabels(
+      { source: "orders", target: "customers", kind: "fk" },
+      new Map([
+        [
+          "orders",
+          [{ data: { id: "bad_fk", source: "orders_bad", target: "customers_bad", kind: "fk" } }],
+        ],
+      ]),
+      malformedNodeDefById,
+      new Map([
+        ["orders_bad", "orders"],
+        ["customers_bad", "customers"],
+      ]),
+      rowTypes,
+    ),
+    "orders_bad→customers_bad",
+    "malformed aggregate member labels fall back to stable node ids",
+  );
+}
+
+// ── 7. view-state class ownership: reset strips ONLY view-owned classes ──
 {
   const cy = build();
   const n = cy.getElementById("orders");
   n.addClass("focus-hidden untouched-hidden dimmed revealed hot hover-reveal matched");
-  n.addClass("hidden-el isolated-hidden virtual-card"); // filter/structure-owned
+  n.addClass("hidden-el facet-hidden isolated-hidden virtual-card"); // filter/structure-owned
   const e = cy.getElementById("e2");
   e.addClass("revealed agg-suppressed edge-off ortho");
   resetViewState(cy);
@@ -168,13 +283,13 @@ function build(): Core {
   }
   assert.ok(!n.hasClass("hover-reveal") && !n.hasClass("matched"), "highlight layer stripped");
   assert.ok(!e.hasClass("revealed") && !e.hasClass("agg-suppressed"), "edge highlights stripped");
-  for (const kept of ["hidden-el", "isolated-hidden", "virtual-card"]) {
+  for (const kept of ["hidden-el", "facet-hidden", "isolated-hidden", "virtual-card"]) {
     assert.ok(n.hasClass(kept), `filter/structure class ${kept} survives a view reset`);
   }
   assert.ok(e.hasClass("edge-off") && e.hasClass("ortho"), "edge structure classes survive");
 }
 
-// ── 6. position snapshot/restore survives the dematerialize round-trip ──
+// ── 8. position snapshot/restore survives the dematerialize round-trip ──
 // (the drift bug: parents weren't saved, so cards materialized BEFORE a view
 // were stranded at the view layout's position on exit)
 {
@@ -205,14 +320,23 @@ function build(): Core {
   });
   cy.remove(cy.getElementById("card").children()); // demat: card becomes childless
   cy.getElementById("card").position({ x: 777, y: 777 }); // stranded at view position
-  restorePositions(cy, saved);
+  restoreViewPositions(cy, saved);
   const c = cy.getElementById("card").position();
   assert.ok(Math.abs(c.x - 100) < 1 && Math.abs(c.y - 200) < 1, "card restored to base center");
   const f = cy.getElementById("fn").position();
   assert.equal(`${f.x},${f.y}`, "500,500", "standalone node restored");
 }
 
-// ── 7. keep-mask: non-keep units hidden with descendants, empty schemas hidden ──
+// ── 9. dematerialize clears stale bookkeeping for missing cards ──
+{
+  const cy = cytoscape({ headless: true, elements: { nodes: [], edges: [] } });
+  const state = emptyMaterializationState();
+  state.materialized.add("gone");
+  dematerializeCard(cy, state, "gone");
+  assert.ok(!state.materialized.has("gone"), "missing cards do not leak materialized state");
+}
+
+// ── 10. keep-mask: non-keep units hidden with descendants, empty schemas hidden ──
 {
   const cy = cytoscape({
     headless: true,
@@ -242,8 +366,292 @@ function build(): Core {
   );
   assert.ok(!cy.getElementById("s1").hasClass("focus-hidden"), "schema with a kept child stays");
   assert.ok(!cy.getElementById("f1").hasClass("focus-hidden"), "kept standalone stays");
+
+  applyKeepMask(cy, new Set(["b"]));
+  assert.ok(cy.getElementById("a").hasClass("focus-hidden"), "previously kept card can be hidden");
+  assert.ok(!cy.getElementById("b").hasClass("focus-hidden"), "previously hidden card can be kept");
+  assert.ok(!cy.getElementById("s1").hasClass("focus-hidden"), "schema is recomputed on remask");
+  assert.ok(cy.getElementById("f1").hasClass("focus-hidden"), "standalone keep mask is replaced");
+}
+
+// ── 11. faceted filters hide incident edges and empty schema compounds ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "s_public", label: "public", type: "schema", schema: "public" } },
+        {
+          data: {
+            id: "orders",
+            label: "orders",
+            type: "table",
+            parent: "s_public",
+            schema: "public",
+          },
+        },
+        {
+          data: {
+            id: "orders_total",
+            label: "total",
+            type: "column",
+            parent: "orders",
+            schema: "public",
+          },
+        },
+        { data: { id: "s_private", label: "private", type: "schema", schema: "private" } },
+        {
+          data: {
+            id: "customers",
+            label: "customers",
+            type: "table",
+            parent: "s_private",
+            schema: "private",
+          },
+        },
+      ],
+      edges: [{ data: { id: "e", source: "orders", target: "customers", kind: "reads" } }],
+    },
+  });
+  applyFilterClasses(
+    cy,
+    emptyMaterializationState(),
+    { ...DEFAULT_PREFS, filterSchemas: ["public"], hideIsolated: true },
+    DEFAULT_PREFS.edgeMode,
+    false,
+  );
+  assert.ok(cy.getElementById("customers").hasClass("facet-hidden"), "filtered schema node hidden");
+  assert.ok(
+    cy.getElementById("s_private").hasClass("facet-hidden"),
+    "empty filtered schema hidden",
+  );
+  assert.ok(cy.getElementById("e").hasClass("facet-hidden"), "edge to filtered endpoint hidden");
+  assert.ok(
+    cy.getElementById("orders").hasClass("isolated-hidden"),
+    "filtered-out endpoint does not keep the visible endpoint non-isolated",
+  );
+}
+
+// ── 12. orthogonal edge marking ignores filter-hidden parallel edges ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [{ data: { id: "a", type: "table" } }, { data: { id: "b", type: "table" } }],
+      edges: [
+        { data: { id: "visible", source: "a", target: "b", kind: "reads" } },
+        { data: { id: "filtered", source: "a", target: "b", kind: "calls" } },
+      ],
+    },
+  });
+  cy.getElementById("filtered").addClass("facet-hidden ortho");
+  markSingleCardEdgesOrthogonal(cy);
+  assert.ok(cy.getElementById("visible").hasClass("ortho"), "visible singleton pair is orthogonal");
+  assert.ok(
+    !cy.getElementById("filtered").hasClass("ortho"),
+    "filter-hidden parallel edge does not keep stale orthogonal routing",
+  );
+}
+
+// ── 13. endpoint-hidden edges are not panel-visible ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "visible", type: "table" } },
+        { data: { id: "masked", type: "table" } },
+      ],
+      edges: [{ data: { id: "e", source: "visible", target: "masked", kind: "reads" } }],
+    },
+  });
+  const edge = cy.getElementById("e") as unknown as EdgeSingular;
+  cy.getElementById("masked").addClass("focus-hidden");
+  assert.equal(edgeHidden(edge), false, "edge itself is not edge-hidden");
+  assert.equal(
+    edgeShownByClasses(edge),
+    false,
+    "panel-facing edge visibility also checks hidden endpoints",
+  );
+}
+
+// ── 14. row selection suppresses only matching aggregate kind+direction ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "orders", type: "table" } },
+        { data: { id: "orders_total", type: "column", parent: "orders" } },
+        { data: { id: "fn", type: "function" } },
+      ],
+      edges: [
+        {
+          data: {
+            id: "detail_reads",
+            source: "fn",
+            target: "orders_total",
+            kind: "reads",
+            detail: true,
+          },
+        },
+        { data: { id: "agg_reads", source: "fn", target: "orders", kind: "reads", agg: true } },
+        { data: { id: "agg_writes", source: "fn", target: "orders", kind: "writes", agg: true } },
+        {
+          data: {
+            id: "agg_reverse_reads",
+            source: "orders",
+            target: "fn",
+            kind: "reads",
+            agg: true,
+          },
+        },
+      ],
+    },
+  });
+  applySelectionClasses(cy, cy.getElementById("orders_total") as unknown as NodeSingular, unitOf);
+  assert.ok(
+    cy.getElementById("agg_reads").hasClass("agg-suppressed"),
+    "matching aggregate is suppressed when its detail row is revealed",
+  );
+  assert.ok(
+    !cy.getElementById("agg_writes").hasClass("agg-suppressed"),
+    "same endpoint pair with a different kind stays visible",
+  );
+  assert.ok(
+    !cy.getElementById("agg_reverse_reads").hasClass("agg-suppressed"),
+    "same endpoint pair in the opposite direction stays visible",
+  );
+}
+
+// ── 15. row focus/search needs counterpart rows for row-row details ──
+{
+  const make = (): { cy: Core; state: MaterializationState } => {
+    const rowsByCard = new Map([
+      [
+        "orders",
+        [
+          {
+            data: {
+              id: "orders_customer_id",
+              label: "customer_id",
+              type: "column" as const,
+              parent: "orders",
+              schema: "public",
+              oid: 1,
+              ord: 1,
+            },
+          },
+        ],
+      ],
+      [
+        "customers",
+        [
+          {
+            data: {
+              id: "customers_id",
+              label: "id",
+              type: "column" as const,
+              parent: "customers",
+              schema: "public",
+              oid: 2,
+              ord: 1,
+            },
+          },
+        ],
+      ],
+    ]);
+    const fk = {
+      data: {
+        id: "fk_detail",
+        source: "orders_customer_id",
+        target: "customers_id",
+        kind: "fk" as const,
+        detail: true,
+      },
+    };
+    return {
+      cy: cytoscape({
+        headless: true,
+        elements: {
+          nodes: [
+            { data: { id: "orders", type: "table" } },
+            { data: { id: "customers", type: "table" } },
+          ],
+          edges: [
+            {
+              data: {
+                id: "agg_fk",
+                source: "orders",
+                target: "customers",
+                kind: "fk",
+                agg: true,
+              },
+            },
+          ],
+        },
+      }),
+      state: {
+        rowsByCard,
+        detailEdgesByCard: new Map([
+          ["orders", [fk]],
+          ["customers", [fk]],
+        ]),
+        cardOfNode: new Map([
+          ["orders_customer_id", "orders"],
+          ["customers_id", "customers"],
+        ]),
+        materialized: new Set(),
+        materializeCap: 30,
+      },
+    };
+  };
+
+  const single = make();
+  materializeCard(single.cy, single.state, "orders");
+  assert.ok(single.cy.getElementById("orders_customer_id").nonempty(), "source row exists");
+  assert.ok(
+    single.cy.getElementById("fk_detail").empty(),
+    "one-card materialization cannot restore a row-row edge",
+  );
+
+  const hood = make();
+  materializeNeighborhood(hood.cy, hood.state, "orders");
+  assert.ok(hood.cy.getElementById("customers_id").nonempty(), "counterpart row exists");
+  assert.ok(hood.cy.getElementById("fk_detail").nonempty(), "row-row detail edge is restored");
+  applySelectionClasses(
+    hood.cy,
+    hood.cy.getElementById("orders_customer_id") as unknown as NodeSingular,
+    unitOf,
+  );
+  assert.ok(
+    hood.cy.getElementById("agg_fk").hasClass("agg-suppressed"),
+    "selection can suppress the aggregate once the detail edge exists",
+  );
+}
+
+// ── 16. malformed row order stacks after ordered rows ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "orders", label: "orders", type: "table" } },
+        { data: { id: "orders_id", label: "id", type: "column", parent: "orders", ord: 1 } },
+        { data: { id: "orders_name", label: "name", type: "column", parent: "orders", ord: 2 } },
+        { data: { id: "orders_bad", label: "bad", type: "column", parent: "orders" } },
+        { data: { id: "orders_nan", label: "nan", type: "column", parent: "orders", ord: NaN } },
+      ],
+      edges: [],
+    },
+  });
+  restackRows(cy);
+  const yOf = (id: string): number => cy.getElementById(id).position("y");
+  assert.ok(yOf("orders_id") < yOf("orders_name"), "ordered rows keep their ord order");
+  assert.ok(yOf("orders_name") < yOf("orders_bad"), "missing ord stacks after ordered rows");
+  assert.ok(yOf("orders_name") < yOf("orders_nan"), "malformed ord stacks after ordered rows");
 }
 
 console.log(
-  "webview OK — closure, stale-row, fit, agg dedupe, class ownership, positions, keep-mask",
+  "webview OK — closure, stale-row, fit, agg members, agg dedupe, class ownership, positions, demat, keep-mask, facets, routing, panel visibility, selection aggs, row neighborhoods, row order",
 );

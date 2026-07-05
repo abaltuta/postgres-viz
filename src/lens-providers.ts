@@ -7,6 +7,7 @@
 import * as vscode from "vscode";
 import { parseHclSymbols } from "./hcl";
 import { buildLensAnchors, hoverMarkdown } from "./lenses";
+import type { LensAnchor } from "./lenses";
 import type { GraphPayload } from "./types";
 
 export class HclLensProvider implements vscode.CodeLensProvider {
@@ -14,6 +15,10 @@ export class HclLensProvider implements vscode.CodeLensProvider {
   readonly onDidChangeCodeLenses = this.emitter.event;
 
   constructor(private readonly getGraph: () => GraphPayload | null) {}
+
+  dispose(): void {
+    this.emitter.dispose();
+  }
 
   /** Fire when the graph (re)loads so VS Code re-requests lenses. */
   refresh(): void {
@@ -25,22 +30,15 @@ export class HclLensProvider implements vscode.CodeLensProvider {
     const anchors = buildLensAnchors(entries, this.getGraph());
     const lenses: vscode.CodeLens[] = [];
     for (const a of anchors) {
-      const range = new vscode.Range(a.line, a.col, a.line, a.col);
+      const range = anchorLabelRange(document, a);
+      if (!range) continue;
       if (a.graphId) {
         lenses.push(
-          new vscode.CodeLens(range, {
-            title: "$(graph) Show in graph",
-            command: "postgresViz.revealNode",
-            arguments: [a.graphId],
-          }),
+          commandLens(range, "$(graph) Show in graph", "postgresViz.revealNode", [a.graphId]),
         );
         if (a.canCallTree) {
           lenses.push(
-            new vscode.CodeLens(range, {
-              title: "Call tree",
-              command: "postgresViz.treeCallTree",
-              arguments: [{ graphId: a.graphId }],
-            }),
+            commandLens(range, "Call tree", "postgresViz.treeCallTree", [{ graphId: a.graphId }]),
           );
         }
         if (a.summary) {
@@ -53,6 +51,15 @@ export class HclLensProvider implements vscode.CodeLensProvider {
   }
 }
 
+function commandLens(
+  range: vscode.Range,
+  title: string,
+  command: string,
+  args: unknown[],
+): vscode.CodeLens {
+  return new vscode.CodeLens(range, { title, command, arguments: args });
+}
+
 export class HclHoverProvider implements vscode.HoverProvider {
   constructor(private readonly getGraph: () => GraphPayload | null) {}
 
@@ -61,10 +68,49 @@ export class HclHoverProvider implements vscode.HoverProvider {
     if (!graph) return undefined;
     const entries = parseHclSymbols(document.getText());
     const anchors = buildLensAnchors(entries, graph);
-    const anchor = anchors.find((a) => a.line === position.line);
-    if (!anchor) return undefined;
-    const md = hoverMarkdown(anchor, graph);
-    if (!md) return undefined;
-    return new vscode.Hover(new vscode.MarkdownString(md));
+    for (const anchor of anchors) {
+      const range = anchorLabelRange(document, anchor);
+      if (!range || !containsExclusiveEnd(range, position)) continue;
+      const md = hoverMarkdown(anchor, graph);
+      if (md) return new vscode.Hover(new vscode.MarkdownString(md), range);
+    }
+    return undefined;
   }
+}
+
+function anchorLabelRange(
+  document: vscode.TextDocument,
+  anchor: LensAnchor,
+): vscode.Range | undefined {
+  if (!Number.isInteger(anchor.line) || anchor.line < 0 || anchor.line >= document.lineCount) {
+    return undefined;
+  }
+  const text = document.lineAt(anchor.line).text;
+  const start = Math.max(0, Math.min(anchor.col, text.length));
+  const end = labelEnd(text, start, anchor.name.length);
+  return new vscode.Range(anchor.line, start, anchor.line, end);
+}
+
+function labelEnd(text: string, start: number, fallbackLength: number): number {
+  if (start > 0 && text[start - 1] === '"') {
+    let escaped = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i]!;
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        return i;
+      }
+    }
+  }
+  return Math.min(text.length, start + Math.max(1, fallbackLength));
+}
+
+function containsExclusiveEnd(range: vscode.Range, position: vscode.Position): boolean {
+  if (position.line < range.start.line || position.line > range.end.line) return false;
+  if (position.line === range.start.line && position.character < range.start.character) return false;
+  if (position.line === range.end.line && position.character >= range.end.character) return false;
+  return true;
 }

@@ -16,6 +16,7 @@ import type { CollectionReturnValue, Core, NodeSingular } from "cytoscape";
 /** whether an element renders at all (read via isShownByClasses) */
 export const HIDE_CLASSES = [
   "hidden-el", // owned by filters / schema grouping
+  "facet-hidden", // owned by faceted filters
   "isolated-hidden", // owned by the "hide isolated" filter
   "focus-hidden", // owned by views
   "untouched-hidden", // owned by views
@@ -37,16 +38,7 @@ export const STRUCTURE_CLASSES = ["virtual-card", "edge-off", "ortho"] as const;
 /** everything a view may have touched — stripped when (re)entering base state */
 export const VIEW_OWNED_CLASSES = ["focus-hidden", "untouched-hidden", ...HIGHLIGHT_CLASSES];
 
-/** Return ALL elements to the canonical base: no view masks, no highlights.
- *  Filter classes (hidden-el, isolated-hidden) and structure classes are
- *  owned elsewhere and deliberately survive. */
-export function resetViewState(cy: Core): void {
-  cy.batch(() => {
-    cy.elements().removeClass(VIEW_OWNED_CLASSES.join(" "));
-  });
-}
-
-// ── position snapshot/restore across views ──
+// ── position snapshot across views ──
 
 export type PositionSnapshot = Map<string, { x: number; y: number }>;
 
@@ -78,19 +70,7 @@ export function snapshotPositions(cy: Core): PositionSnapshot {
   return saved;
 }
 
-/** Restore by id. Only childless elements accept a position (compound
- *  positions are derived) — call AFTER dematerializing, when former parents
- *  are plain nodes again. Ids that no longer exist are skipped. */
-export function restorePositions(cy: Core, saved: PositionSnapshot): void {
-  cy.batch(() => {
-    saved.forEach((pos, id) => {
-      const n = cy.getElementById(id);
-      if (n.nonempty() && n.isNode() && !n.isParent()) n.position(pos);
-    });
-  });
-}
-
-// ── focus/call-tree keep mask ──
+// ── focus/call-tree helpers ──
 
 /** Every card/standalone unit (children of schemas or roots), never rows. */
 export function allCardUnits(cy: Core): NodeSingular[] {
@@ -101,29 +81,6 @@ export function allCardUnits(cy: Core): NodeSingular[] {
     if (p.empty() || p.data("type") === "schema") out.push(n as NodeSingular);
   });
   return out;
-}
-
-/** Hide every unit outside `keep` (with its rows), then schema compounds left
- *  with no visible child. Writes ONLY focus-hidden. */
-export function applyKeepMask(cy: Core, keep: ReadonlySet<string>): void {
-  cy.batch(() => {
-    for (const u of allCardUnits(cy)) {
-      if (!keep.has(u.id())) u.union(u.descendants()).addClass("focus-hidden");
-    }
-    cy.nodes('[type="schema"]').forEach((s) => {
-      let anyVisible = false;
-      s.children().forEach((d) => {
-        if (
-          !d.hasClass("focus-hidden") &&
-          !d.hasClass("hidden-el") &&
-          !d.hasClass("isolated-hidden")
-        ) {
-          anyVisible = true;
-        }
-      });
-      if (!anyVisible) s.addClass("focus-hidden");
-    });
-  });
 }
 
 /** Visibility from classes on self + ancestors (see module doc). */
@@ -170,8 +127,70 @@ export function suppressRedundantAggs<
   return rows.filter((r) => !(r.agg && detailPairs.has(`${r.kind}|${r.counterUnit}|${r.out}`)));
 }
 
-/** Edge kinds that mean "this function touches that table's data". */
-export const DATA_KINDS = new Set(["reads", "inserts", "updates", "deletes", "writes", "modifies"]);
+type AggregateMemberEdge = {
+  data: { id?: string; source: string; target: string; kind: string };
+};
+
+type AggregateMemberNode = {
+  data: { label: unknown; type: string };
+};
+
+/**
+ * Human-readable row members behind a card-level aggregate edge. Detail edges
+ * are indexed by every row endpoint's card, so aggregates whose row endpoint is
+ * on the target side (function/view -> table.column) must search both cards.
+ */
+export function aggregateMemberLabels(
+  data: { source: string; target: string; kind: string },
+  detailEdgesByCard: ReadonlyMap<string, readonly AggregateMemberEdge[]>,
+  nodeDefById: ReadonlyMap<string, AggregateMemberNode>,
+  cardOfNode: ReadonlyMap<string, string>,
+  rowTypes: ReadonlySet<string>,
+  max = 6,
+): string {
+  const unitOfId = (id: string): string => cardOfNode.get(id) ?? id;
+  const labelOf = (id: string, n: AggregateMemberNode): string => {
+    const label = String(n.data.label ?? "");
+    return label || id;
+  };
+  const seen = new Set<string>();
+  const members: string[] = [];
+  for (const card of [data.source, data.target]) {
+    for (const e of detailEdgesByCard.get(card) ?? []) {
+      const edgeKey = e.data.id ?? `${e.data.kind}|${e.data.source}|${e.data.target}`;
+      if (seen.has(edgeKey)) continue;
+      seen.add(edgeKey);
+      if (
+        e.data.kind !== data.kind ||
+        unitOfId(e.data.source) !== data.source ||
+        unitOfId(e.data.target) !== data.target
+      ) {
+        continue;
+      }
+      const src = nodeDefById.get(e.data.source);
+      const tgt = nodeDefById.get(e.data.target);
+      const srcRow = src && rowTypes.has(src.data.type);
+      const tgtRow = tgt && rowTypes.has(tgt.data.type);
+      if (srcRow && tgtRow)
+        members.push(`${labelOf(e.data.source, src)}→${labelOf(e.data.target, tgt)}`);
+      else if (srcRow) members.push(labelOf(e.data.source, src));
+      else if (tgtRow) members.push(labelOf(e.data.target, tgt));
+    }
+  }
+  const shown = members.slice(0, max).join(", ");
+  return members.length > max ? `${shown}, +${members.length - max} more` : shown;
+}
+
+/** Edge kinds that mean "this unit touches that table's data". */
+export const DATA_KINDS = new Set([
+  "selects",
+  "reads",
+  "inserts",
+  "updates",
+  "deletes",
+  "writes",
+  "modifies",
+]);
 
 /**
  * Call-tree closure from a trigger/function node: a trigger seeds with the

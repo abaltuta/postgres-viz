@@ -95,8 +95,8 @@ class WorkerParser implements PgParser {
 
   private request(op: "parseQuery" | "parsePlPgSQL", sql: string): Promise<Json> {
     if (this.requests >= WORKER_RECYCLE_AFTER) this.kill();
-    this.requests++;
     const child = this.ensure();
+    this.requests++;
     return new Promise<Json>((resolve, reject) => {
       const id = this.nextId++;
       const timer = setTimeout(() => {
@@ -218,6 +218,18 @@ function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   else map.set(key, [value]);
 }
 
+function preferredCandidate<T extends { schema: string }>(
+  candidates: T[] | undefined,
+  preferred: string,
+): T | undefined {
+  if (!candidates || candidates.length === 0) return undefined;
+  return (
+    candidates.find((item) => item.schema === preferred) ??
+    candidates.find((item) => item.schema === "public") ??
+    (candidates.length === 1 ? candidates[0] : undefined)
+  );
+}
+
 export class Resolver {
   private relByQual = new Map<string, CatalogRel>();
   private relsByName = new Map<string, CatalogRel[]>();
@@ -244,13 +256,7 @@ export class Resolver {
 
   resolveRel(name: string, schema: string | undefined, preferred: string): CatalogRel | undefined {
     if (schema) return this.relByQual.get(`${schema}.${name}`);
-    const cands = this.relsByName.get(name);
-    if (!cands || cands.length === 0) return undefined;
-    return (
-      cands.find((r) => r.schema === preferred) ??
-      cands.find((r) => r.schema === "public") ??
-      (cands.length === 1 ? cands[0] : undefined)
-    );
+    return preferredCandidate(this.relsByName.get(name), preferred);
   }
 
   col(relOid: number, name: string): CatalogCol | undefined {
@@ -263,13 +269,7 @@ export class Resolver {
     preferred: string,
   ): CatalogFunc | undefined {
     if (schema) return this.funcByQual.get(`${schema}.${name}`);
-    const cands = this.funcsByName.get(name);
-    if (!cands || cands.length === 0) return undefined;
-    return (
-      cands.find((f) => f.schema === preferred) ??
-      cands.find((f) => f.schema === "public") ??
-      (cands.length === 1 ? cands[0] : undefined)
-    );
+    return preferredCandidate(this.funcsByName.get(name), preferred);
   }
 }
 
@@ -558,6 +558,18 @@ function findColumn(scope: Scope | undefined, name: string, ctx: BodyCtx): BaseR
   return null;
 }
 
+function addSource(out: DerivedBinding, source: Binding): void {
+  if (!out.sources.includes(source)) out.sources.push(source);
+}
+
+function addedBindings(scope: Scope, before: ReadonlySet<string>): Binding[] {
+  const out: Binding[] = [];
+  for (const [name, binding] of scope.bindings) {
+    if (!before.has(name)) out.push(binding);
+  }
+  return out;
+}
+
 function emitReads(refs: BaseRef[] | null, ctx: BodyCtx): void {
   for (const r of refs ?? []) {
     if (r.attnum > 0) add(ctx.refs.reads, r.relOid, r.attnum);
@@ -646,7 +658,10 @@ function bindFromItem(item: Json, scope: Scope, ctx: BodyCtx): void {
       }
     }
     const rel = ctx.resolver.resolveRel(rv.relname, rv.schemaname, ctx.schema);
-    if (rel) scope.bindings.set(alias ?? rv.relname, { kind: "base", rel });
+    if (rel) {
+      add(ctx.refs.reads, rel.oid, 0);
+      scope.bindings.set(alias ?? rv.relname, { kind: "base", rel });
+    }
     return;
   }
   if (item.RangeSubselect) {
@@ -658,12 +673,14 @@ function bindFromItem(item: Json, scope: Scope, ctx: BodyCtx): void {
   }
   if (item.JoinExpr) {
     const j = item.JoinExpr;
+    const before = new Set(scope.bindings.keys());
     bindFromItem(j.larg, scope, ctx);
     bindFromItem(j.rarg, scope, ctx);
+    const joined = addedBindings(scope, before);
     walkExprs(j.quals, scope, ctx);
     // JOIN USING (col, …): the column is read on every side that has it
     for (const name of nameList(j.usingClause)) {
-      for (const b of scope.bindings.values()) emitReads(colsInBinding(b, name, ctx), ctx);
+      for (const b of joined) emitReads(colsInBinding(b, name, ctx), ctx);
     }
     return;
   }
@@ -691,7 +708,13 @@ function buildOutputs(targetList: Json[], scope: Scope, ctx: BodyCtx): DerivedBi
     if (cr) {
       const fields: Json[] = cr.fields ?? [];
       if (isStar(fields[fields.length - 1])) {
-        out.sources = [...scope.bindings.values()];
+        if (fields.length === 1) {
+          for (const source of scope.bindings.values()) addSource(out, source);
+        } else {
+          const qual = fieldName(fields[fields.length - 2]);
+          const source = qual ? lookupBinding(scope, qual) : undefined;
+          if (source) addSource(out, source);
+        }
         out.ordered.push({ name: null, refs: [] });
         continue;
       }
@@ -879,13 +902,14 @@ async function tryParse(parser: PgParser, sql: string): Promise<Json | null> {
  * and the `(?![=<>])` tail keeps `!=`, `<=`, `>=` out.
  */
 const TRIGGER_ASSIGN_RE =
-  /(?:^|;|\bbegin\b|\bthen\b|\belse\b|\bloop\b)\s*"?(_?new|_?old)"?\."?([a-zA-Z_][\w$]*)"?\s*:?=(?![=<>])/gim;
+  /(?:^|;|\bbegin\b|\bthen\b|\belse\b|\bloop\b)\s*"?(_?new|_?old)"?\s*\.\s*(?:"((?:""|[^"])*)"|([a-zA-Z_][\w$]*))\s*:?=(?![=<>])/gim;
 
 function triggerAssignWrites(src: string, ctx: BodyCtx): void {
   if (ctx.triggerRels.length === 0 || !src) return;
   for (const m of src.matchAll(TRIGGER_ASSIGN_RE)) {
+    const colName = m[2] !== undefined ? m[2].replace(/""/g, '"') : m[3]!;
     for (const rel of ctx.triggerRels) {
-      const col = ctx.resolver.col(rel.oid, m[2]!);
+      const col = ctx.resolver.col(rel.oid, colName);
       if (col) add(ctx.refs.modifies, rel.oid, col.attnum);
     }
   }

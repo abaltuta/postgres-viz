@@ -1,15 +1,15 @@
 /**
- * End-to-end integration test against a real Postgres (run with `pnpm test:db`,
- * which starts a disposable docker container). Loads a fixture schema covering
- * views, matviews, triggers (incl. UPDATE OF), PL/pgSQL bodies, FKs, generated
- * columns and BEGIN ATOMIC SQL functions, then runs the full
- * introspect → analyzeAll → buildGraph pipeline and asserts the edges.
+ * End-to-end integration test against a real Postgres. Run `pnpm test:db`
+ * against DATABASE_URL / localhost:54339, or `pnpm test:db:docker` to manage a
+ * disposable postgres:16 container. Loads a fixture schema covering views,
+ * matviews, triggers (incl. UPDATE OF), PL/pgSQL bodies, FKs, generated columns
+ * and BEGIN ATOMIC SQL functions, then runs the full
+ * introspect -> analyzeAll -> buildGraph pipeline and asserts the edges.
  */
 import assert from "node:assert/strict";
 import { Client } from "pg";
-import { analyzeAll, disposeParser } from "../src/analyze";
-import { buildGraph } from "../src/graph";
-import { introspect } from "../src/introspect";
+import { disposeParser } from "../src/analyze";
+import { loadGraphFromDatabase } from "../src/load-service";
 import type { EdgeKind, GraphPayload, NodeType } from "../src/types";
 
 const url = process.env.DATABASE_URL ?? "postgres://postgres:pg@localhost:54339/postgres";
@@ -43,6 +43,24 @@ CREATE TABLE orders (
   created_at timestamptz DEFAULT now()
 );
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE SCHEMA helpers;
+
+CREATE FUNCTION helpers.default_email() RETURNS text STABLE LANGUAGE sql
+  AS $$ SELECT 'default@example.test' $$;
+
+CREATE FUNCTION helpers.default_customer_id_floor() RETURNS bigint LANGUAGE sql BEGIN ATOMIC
+  SELECT coalesce(max(id), 0) FROM public.customers;
+END;
+
+CREATE TABLE defaulted_accounts (
+  id bigint PRIMARY KEY,
+  email text DEFAULT helpers.default_email(),
+  customer_id_floor bigint DEFAULT helpers.default_customer_id_floor(),
+  external_id uuid DEFAULT gen_random_uuid()
+);
+
 CREATE TABLE audit_log (
   id bigserial PRIMARY KEY,
   table_name text,
@@ -54,6 +72,25 @@ CREATE VIEW customer_orders AS
 
 CREATE MATERIALIZED VIEW order_stats AS
   SELECT customer_id, sum(total) AS sum_total FROM orders GROUP BY customer_id;
+
+CREATE TABLE rule_source (
+  id bigint PRIMARY KEY,
+  note text
+);
+
+CREATE TABLE rule_target (
+  id bigint PRIMARY KEY
+);
+
+CREATE FUNCTION rule_note() RETURNS text LANGUAGE sql AS $$ SELECT 'from rule' $$;
+
+CREATE RULE rule_target_insert AS ON INSERT TO rule_target DO ALSO
+  INSERT INTO rule_source (id, note) SELECT NEW.id, rule_note();
+
+CREATE VIEW rule_view AS SELECT id FROM rule_target;
+
+CREATE RULE rule_view_insert AS ON INSERT TO rule_view DO INSTEAD
+  INSERT INTO rule_source (id, note) SELECT NEW.id, rule_note();
 
 CREATE FUNCTION notify_stats() RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
@@ -86,6 +123,14 @@ ALTER TABLE orders ADD CONSTRAINT total_non_negative CHECK (non_negative(total))
 
 -- plain index (multi-column) — PK/UNIQUE-backed indexes must NOT reappear
 CREATE INDEX orders_customer_created_idx ON orders (customer_id, created_at);
+
+CREATE TABLE index_cover (
+  id bigint PRIMARY KEY,
+  lookup text,
+  payload text
+);
+
+CREATE INDEX index_cover_lookup_idx ON index_cover (lookup) INCLUDE (payload);
 
 -- alias gauntlet: CTE with column-list rename, named CTE outputs, derived-table
 -- alias, and a correlated subquery referencing both
@@ -276,20 +321,29 @@ async function main(): Promise<void> {
   const client = await connectWithRetry();
   try {
     await client.query(
-      "DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS payroll CASCADE;",
+      "DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS payroll CASCADE; DROP SCHEMA IF EXISTS helpers CASCADE;",
     );
     await client.query(FIXTURE);
 
-    const catalog = await introspect(client, { include: null, exclude: [] });
-    const analysis = await analyzeAll(catalog);
-    const g = buildGraph(catalog, analysis, { includeFks: true });
+    const loaded = await loadGraphFromDatabase({
+      conn: url,
+      schemas: [],
+      excludeSchemas: [],
+      includeFks: true,
+    });
+    const g = loaded.graph;
 
     // relations
     const customers = nodeId(g, "table", "customers");
     const orders = nodeId(g, "table", "orders");
+    const defaultedAccounts = nodeId(g, "table", "defaulted_accounts");
     const auditLog = nodeId(g, "table", "audit_log");
     const customerOrders = nodeId(g, "view", "customer_orders");
     const orderStats = nodeId(g, "matview", "order_stats");
+    const ruleTarget = nodeId(g, "table", "rule_target");
+    const ruleSource = nodeId(g, "table", "rule_source");
+    const ruleView = nodeId(g, "view", "rule_view");
+    const indexCover = nodeId(g, "table", "index_cover");
 
     // referenced columns materialized as child nodes
     const customersName = nodeId(g, "column", "name", customers);
@@ -297,13 +351,23 @@ async function main(): Promise<void> {
     const ordersTotal = nodeId(g, "column", "total", orders);
     const ordersCustomerId = nodeId(g, "column", "customer_id", orders);
     const ordersVat = nodeId(g, "column", "vat", orders);
+    const defaultedEmail = nodeId(g, "column", "email", defaultedAccounts);
+    const defaultedCustomerIdFloor = nodeId(
+      g,
+      "column",
+      "customer_id_floor",
+      defaultedAccounts,
+    );
     const auditTableName = nodeId(g, "column", "table_name", auditLog);
     const auditPayload = nodeId(g, "column", "payload", auditLog);
 
     // functions & trigger
     const logOrder = nodeId(g, "function", "log_order()");
     const notifyStats = nodeId(g, "function", "notify_stats()");
-    const totalFor = nodeId(g, "function", "total_for()");
+    const totalFor = nodeId(g, "function", "total_for(cid bigint)");
+    const defaultEmail = nodeId(g, "function", "default_email()");
+    const defaultCustomerIdFloor = nodeId(g, "function", "default_customer_id_floor()");
+    const ruleNote = nodeId(g, "function", "rule_note()");
     const trigger = nodeId(g, "trigger", "orders_audit", orders);
 
     // view → column-level deps (pg_depend)
@@ -311,14 +375,33 @@ async function main(): Promise<void> {
     assertEdge(g, "selects", customerOrders, ordersTotal, "view selects orders.total");
     assertEdge(g, "selects", orderStats, ordersCustomerId, "matview selects orders.customer_id");
     assertEdge(g, "selects", orderStats, ordersTotal, "matview selects orders.total");
+    assert.ok(
+      !g.edges.some(
+        (e) =>
+          e.data.source === ruleTarget &&
+          (e.data.kind === "selects" ||
+            (e.data.kind === "calls" && e.data.target === ruleNote)),
+      ),
+      "table rewrite rules are not modeled as view dependencies",
+    );
+    assert.ok(
+      !g.edges.some(
+        (e) =>
+          e.data.source === ruleView &&
+          (e.data.target === ruleSource || e.data.target === ruleNote),
+      ),
+      "non-RETURN view rules are not modeled as view definition dependencies",
+    );
 
     // trigger wiring
     assertEdge(g, "executes", trigger, logOrder, "trigger executes log_order");
     assertEdge(g, "update-of", trigger, ordersTotal, "trigger UPDATE OF total");
 
     // PL/pgSQL body analysis (parser path)
-    const logOrderRefs = [...analysis.values()].find((r) => r.parsed);
-    assert.ok(logOrderRefs, "at least one function should be analyzed via the parser");
+    assert.ok(
+      loaded.diagnostics.analysis.analyzedFunctions > loaded.diagnostics.analysis.parserFallbacks,
+      "at least one function should be analyzed via the parser",
+    );
     assertEdge(g, "reads", logOrder, orders, "log_order reads orders");
     assertEdge(
       g,
@@ -364,12 +447,37 @@ async function main(): Promise<void> {
 
     // generated column → source column
     assertEdge(g, "default", ordersVat, ordersTotal, "orders.vat generated from orders.total");
+    assertEdge(
+      g,
+      "default",
+      defaultedEmail,
+      defaultEmail,
+      "defaulted_accounts.email default calls helpers.default_email",
+    );
+    assertEdge(
+      g,
+      "default",
+      defaultedCustomerIdFloor,
+      defaultCustomerIdFloor,
+      "defaulted_accounts.customer_id_floor default calls helpers.default_customer_id_floor",
+    );
+    assertEdge(
+      g,
+      "reads",
+      defaultCustomerIdFloor,
+      customersId,
+      "helpers.default_customer_id_floor BEGIN ATOMIC body reads customers.id",
+    );
+    assert.ok(
+      !g.nodes.some((n) => n.data.type === "function" && n.data.label === "gen_random_uuid()"),
+      "extension-owned functions remain filtered even when used in defaults",
+    );
 
     // ── constraints ──
     const customersEmail = nodeId(g, "column", "email", customers);
     const customersPk = nodeId(g, "constraint", "customers_pkey", customers);
     const checkCon = nodeId(g, "constraint", "total_non_negative", orders);
-    const nonNegative = nodeId(g, "function", "non_negative()");
+    const nonNegative = nodeId(g, "function", "non_negative(n numeric)");
     assertEdge(g, "constrains", customersPk, customersId, "PK constrains customers.id");
     assertEdge(g, "constrains", checkCon, ordersTotal, "CHECK constrains orders.total");
     assertEdge(g, "calls", checkCon, nonNegative, "CHECK calls non_negative()");
@@ -387,6 +495,23 @@ async function main(): Promise<void> {
     assert.ok(
       !g.nodes.some((n) => n.data.type === "index" && n.data.label === "orders_pkey"),
       "PK-backed index is not duplicated as an index node",
+    );
+    const coverIdx = nodeId(g, "index", "index_cover_lookup_idx", indexCover);
+    assertEdge(
+      g,
+      "indexes",
+      coverIdx,
+      nodeId(g, "column", "lookup", indexCover),
+      "covering index key covers index_cover.lookup",
+    );
+    assert.ok(
+      !g.edges.some(
+        (e) =>
+          e.data.kind === "indexes" &&
+          e.data.source === coverIdx &&
+          e.data.target === nodeId(g, "column", "payload", indexCover),
+      ),
+      "covering index INCLUDE columns are not modeled as key columns",
     );
 
     // ── alias gauntlet: provenance through CTEs, derived tables, correlation ──
@@ -421,7 +546,7 @@ async function main(): Promise<void> {
     assertEdge(g, "reads", collision, customersEmail, "collision: t.email → customers.email");
 
     // aliased UPDATE target
-    const touch = nodeId(g, "function", "touch_customer()");
+    const touch = nodeId(g, "function", "touch_customer(cid bigint)");
     assertEdge(
       g,
       "updates",
@@ -448,9 +573,9 @@ async function main(): Promise<void> {
     const totalsTable = nodeId(g, "table", "employee_totals");
     const payrunTable = nodeId(g, "table", "payrun");
     const instruction = nodeId(g, "table", "instruction");
-    const recalc = nodeId(g, "function", "recalculate_totals()");
-    const entryAmount = nodeId(g, "function", "entry_amount()");
-    const payrunStatus = nodeId(g, "function", "payrun_status()");
+    const recalc = nodeId(g, "function", "recalculate_totals(report_id uuid)");
+    const entryAmount = nodeId(g, "function", "entry_amount(entry payroll.report_entry)");
+    const payrunStatus = nodeId(g, "function", "payrun_status(payrun payroll.payrun)");
 
     // LANGUAGE sql body with a data-modifying CTE + aggregation
     assertEdge(g, "deletes", recalc, totalsTable, "DELETE inside CTE deletes from employee_totals");
@@ -501,7 +626,7 @@ async function main(): Promise<void> {
     assert.equal(
       g.nodes.find((n) => n.data.id === recalc)!.data.parent,
       payrollSchema,
-      "recalculate_totals() nests inside the payroll schema compound",
+      "recalculate_totals nests inside the payroll schema compound",
     );
 
     // composite-type parameter fields attribute to the rowtype's table
@@ -543,6 +668,50 @@ async function main(): Promise<void> {
       wrongWrites,
       [],
       "a SELECT-only BEFORE trigger fn must have no write-family edges",
+    );
+
+    const filtered = await loadGraphFromDatabase({
+      conn: url,
+      schemas: ["public"],
+      excludeSchemas: [],
+      includeFks: true,
+    });
+    const fg = filtered.graph;
+    const filteredDefaulted = nodeId(fg, "table", "defaulted_accounts");
+    const filteredCustomers = nodeId(fg, "table", "customers");
+    const filteredDefaultCustomerIdFloor = nodeId(
+      fg,
+      "function",
+      "default_customer_id_floor()",
+    );
+    assertEdge(
+      fg,
+      "default",
+      nodeId(fg, "column", "email", filteredDefaulted),
+      nodeId(fg, "function", "default_email()"),
+      "schema-filtered default pulls helpers.default_email into the graph",
+    );
+    assertEdge(
+      fg,
+      "default",
+      nodeId(fg, "column", "customer_id_floor", filteredDefaulted),
+      filteredDefaultCustomerIdFloor,
+      "schema-filtered default pulls helpers.default_customer_id_floor into the graph",
+    );
+    assertEdge(
+      fg,
+      "reads",
+      filteredDefaultCustomerIdFloor,
+      nodeId(fg, "column", "id", filteredCustomers),
+      "out-of-filter BEGIN ATOMIC default helper keeps exact SQL-body deps",
+    );
+    assert.ok(
+      !fg.nodes.some((n) => n.data.type === "table" && n.data.label === "paycode"),
+      "schema filter excludes non-public relations",
+    );
+    assert.ok(
+      !fg.nodes.some((n) => n.data.type === "function" && n.data.label === "gen_random_uuid()"),
+      "schema-filtered defaults still exclude extension-owned functions",
     );
 
     console.log(

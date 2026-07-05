@@ -2,10 +2,16 @@
 src/**
 webview/**
 test/**
+scripts/**
 dist-test/**
 esbuild.mjs
 tsconfig.json
 **/*.map
+*.vsix
 .gitignore
 pnpm-lock.yaml
 pnpm-workspace.yaml
+.aidex/**
+.claude/**
+CLAUDE.md
+docs/**

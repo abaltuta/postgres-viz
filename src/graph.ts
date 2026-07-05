@@ -1,4 +1,5 @@
 import type { FuncRefs } from "./analyze";
+import { routineLabel } from "./routine-label";
 import type { Catalog, EdgeKind, GraphEdgeData, GraphNodeData, GraphPayload } from "./types";
 
 const relId = (oid: number): string => `r${oid}`;
@@ -7,6 +8,19 @@ const fnId = (oid: number): string => `f${oid}`;
 const trgId = (oid: number): string => `g${oid}`;
 const conId = (oid: number): string => `k${oid}`;
 const idxId = (oid: number): string => `i${oid}`;
+
+const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+const edgeKey = (kind: EdgeKind, source: string, target: string): string =>
+  `${kind}|${source}|${target}`;
+
+function cmpNums(a: readonly number[], b: readonly number[]): number {
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const diff = (a[i] ?? 0) - (b[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return a.length - b.length;
+}
 
 const CONTYPE_LABEL: Record<string, string> = {
   c: "CHECK",
@@ -17,11 +31,12 @@ const CONTYPE_LABEL: Record<string, string> = {
 
 function triggerDesc(tgtype: number): string {
   const timing = tgtype & 2 ? "BEFORE" : tgtype & 64 ? "INSTEAD OF" : "AFTER";
-  const events: string[] = [];
-  if (tgtype & 4) events.push("INSERT");
-  if (tgtype & 8) events.push("DELETE");
-  if (tgtype & 16) events.push("UPDATE");
-  if (tgtype & 32) events.push("TRUNCATE");
+  const events = [
+    tgtype & 4 ? "INSERT" : "",
+    tgtype & 8 ? "DELETE" : "",
+    tgtype & 16 ? "UPDATE" : "",
+    tgtype & 32 ? "TRUNCATE" : "",
+  ].filter(Boolean);
   return `${timing} ${events.join(" OR ")} · ${tgtype & 1 ? "ROW" : "STATEMENT"}`;
 }
 
@@ -38,7 +53,7 @@ export function buildGraph(
 
   const addEdge = (kind: EdgeKind, source: string, target: string, label?: string): void => {
     if (source === target) return;
-    const id = `${kind}|${source}|${target}`;
+    const id = edgeKey(kind, source, target);
     if (edges.has(id)) return;
     const data: GraphEdgeData = { id, source, target, kind };
     if (label) data.label = label;
@@ -147,12 +162,20 @@ export function buildGraph(
   // 6. Foreign keys (column → referenced column).
   const fkLabelHint = new Map<string, string>();
   if (opts.includeFks) {
-    for (const fk of catalog.fks) {
+    const fks = [...catalog.fks].sort(
+      (a, b) =>
+        a.relOid - b.relOid ||
+        a.refRelOid - b.refRelOid ||
+        cmp(a.name, b.name) ||
+        cmpNums(a.cols, b.cols) ||
+        cmpNums(a.refCols, b.refCols),
+    );
+    for (const fk of fks) {
       if (!relByOid.has(fk.relOid) || !relByOid.has(fk.refRelOid)) continue;
       let hasCols = false;
       for (let i = 0; i < fk.cols.length; i++) {
         const att = fk.cols[i];
-        const refAtt = fk.refCols[i] ?? fk.refCols[0];
+        const refAtt = fk.refCols[i];
         if (att === undefined || refAtt === undefined) continue;
         const src = colNode(fk.relOid, att);
         const tgt = colNode(fk.refRelOid, refAtt);
@@ -212,6 +235,10 @@ export function buildGraph(
   const nodes: { data: GraphNodeData }[] = [];
   /** node id → its card id (rows map to their relation; cards/functions to themselves) */
   const unitOfId = new Map<string, string>();
+  const edgeUnits = (edge: GraphEdgeData): [string, string] => [
+    unitOfId.get(edge.source) ?? edge.source,
+    unitOfId.get(edge.target) ?? edge.target,
+  ];
 
   // schema compounds: tables/views/functions nest inside their schema
   const schemaId = (name: string): string => `s_${name}`;
@@ -315,7 +342,7 @@ export function buildGraph(
     nodes.push({
       data: {
         id: fnId(f.oid),
-        label: `${f.name}()`,
+        label: routineLabel(f.name, f.args),
         type: "function",
         parent: schemaId(f.schema),
         schemaParent: schemaId(f.schema),
@@ -347,10 +374,9 @@ export function buildGraph(
   //    emitted: one pair, one card-level edge, never both. ──
   const unitLevelKeys = new Set<string>();
   for (const e of edgeList) {
-    const su = unitOfId.get(e.data.source) ?? e.data.source;
-    const tu = unitOfId.get(e.data.target) ?? e.data.target;
+    const [su, tu] = edgeUnits(e.data);
     if (su === e.data.source && tu === e.data.target) {
-      unitLevelKeys.add(`${e.data.kind}|${su}|${tu}`);
+      unitLevelKeys.add(edgeKey(e.data.kind, su, tu));
     } else {
       e.data.detail = true;
     }
@@ -358,10 +384,9 @@ export function buildGraph(
   const aggCounts = new Map<string, number>();
   for (const e of edgeList) {
     if (!e.data.detail) continue;
-    const su = unitOfId.get(e.data.source) ?? e.data.source;
-    const tu = unitOfId.get(e.data.target) ?? e.data.target;
+    const [su, tu] = edgeUnits(e.data);
     if (su === tu) continue; // intra-card (constrains, update-of, …)
-    const key = `${e.data.kind}|${su}|${tu}`;
+    const key = edgeKey(e.data.kind, su, tu);
     aggCounts.set(key, (aggCounts.get(key) ?? 0) + 1);
   }
   for (const [key, count] of aggCounts) {
@@ -374,6 +399,33 @@ export function buildGraph(
     if (label) data.label = label;
     edgeList.push({ data });
   }
+
+  const nodeTypeRank: Record<string, number> = {
+    schema: 0,
+    table: 1,
+    view: 1,
+    matview: 1,
+    foreign: 1,
+    column: 2,
+    trigger: 3,
+    constraint: 4,
+    index: 5,
+    function: 6,
+  };
+  nodes.sort((a, b) => {
+    const ad = a.data;
+    const bd = b.data;
+    return (
+      (nodeTypeRank[ad.type] ?? 99) - (nodeTypeRank[bd.type] ?? 99) ||
+      cmp(ad.parent ?? "", bd.parent ?? "") ||
+      (ad.ord ?? 0) - (bd.ord ?? 0) ||
+      cmp(ad.schema ?? "", bd.schema ?? "") ||
+      cmp(ad.label, bd.label) ||
+      ad.oid - bd.oid ||
+      cmp(ad.id, bd.id)
+    );
+  });
+  edgeList.sort((a, b) => cmp(a.data.id, b.data.id));
 
   const detailCount = edgeList.filter((e) => e.data.detail).length;
   const stats: Record<string, number> = {

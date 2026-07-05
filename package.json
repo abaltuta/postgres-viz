@@ -2,11 +2,12 @@
   "name": "postgres-viz",
   "displayName": "Postgres Viz",
   "description": "Call-graph & dependency visualizer for PostgreSQL: triggers, views, PL/pgSQL functions, tables and columns.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "baltuta",
   "private": true,
+  "packageManager": "pnpm@11.9.0",
   "engines": {
-    "vscode": "^1.120.0"
+    "vscode": "^1.125.0"
   },
   "categories": [
     "Visualization"
@@ -65,24 +66,29 @@
           "group": "navigation@3"
         },
         {
-          "command": "postgresViz.chooseLayout",
+          "command": "postgresViz.facetedFilters",
           "when": "activeWebviewPanelId == 'postgresViz'",
           "group": "navigation@4"
         },
         {
-          "command": "postgresViz.fit",
+          "command": "postgresViz.chooseLayout",
           "when": "activeWebviewPanelId == 'postgresViz'",
           "group": "navigation@5"
         },
         {
-          "command": "postgresViz.relayout",
+          "command": "postgresViz.fit",
           "when": "activeWebviewPanelId == 'postgresViz'",
           "group": "navigation@6"
         },
         {
-          "command": "postgresViz.refreshGraph",
+          "command": "postgresViz.relayout",
           "when": "activeWebviewPanelId == 'postgresViz'",
           "group": "navigation@7"
+        },
+        {
+          "command": "postgresViz.refreshGraph",
+          "when": "activeWebviewPanelId == 'postgresViz'",
+          "group": "navigation@8"
         }
       ],
       "view/item/context": [
@@ -110,6 +116,16 @@
           "command": "postgresViz.treeOpenDdl",
           "when": "view == postgresVizExplorer && viewItem =~ /^(table|view|matview|foreign|function|column|trigger|constraint|index)$/",
           "group": "navigation@4"
+        },
+        {
+          "command": "postgresViz.impactAnalysis",
+          "when": "view == postgresVizExplorer && viewItem =~ /^(table|view|matview|foreign|function|column|trigger|constraint|index)$/",
+          "group": "navigation@5"
+        },
+        {
+          "command": "postgresViz.findPath",
+          "when": "view == postgresVizExplorer && viewItem =~ /^(table|view|matview|foreign|function|column|trigger|constraint|index)$/",
+          "group": "navigation@6"
         }
       ]
     },
@@ -147,6 +163,11 @@
         "title": "Postgres Viz: Show Logs"
       },
       {
+        "command": "postgresViz.showLoadDiagnostics",
+        "title": "Postgres Viz: Show Load Diagnostics",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "postgresViz.connectionMenu",
         "title": "Postgres Viz: Connection Actions",
         "icon": "$(database)"
@@ -165,6 +186,11 @@
         "command": "postgresViz.viewOptions",
         "title": "Postgres Viz: View Options",
         "icon": "$(filter)"
+      },
+      {
+        "command": "postgresViz.facetedFilters",
+        "title": "Postgres Viz: Faceted Filters",
+        "icon": "$(list-filter)"
       },
       {
         "command": "postgresViz.chooseLayout",
@@ -205,6 +231,41 @@
         "command": "postgresViz.treeOpenDdl",
         "title": "Open DDL",
         "icon": "$(file-code)"
+      },
+      {
+        "command": "postgresViz.impactAnalysis",
+        "title": "Postgres Viz: Impact Analysis",
+        "icon": "$(references)"
+      },
+      {
+        "command": "postgresViz.findPath",
+        "title": "Postgres Viz: Find Dependency Path",
+        "icon": "$(symbol-event)"
+      },
+      {
+        "command": "postgresViz.saveSnapshot",
+        "title": "Postgres Viz: Save Graph Snapshot",
+        "icon": "$(save)"
+      },
+      {
+        "command": "postgresViz.diffSnapshot",
+        "title": "Postgres Viz: Compare With Saved Snapshot",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "postgresViz.exportGraphJson",
+        "title": "Postgres Viz: Export Graph JSON",
+        "icon": "$(json)"
+      },
+      {
+        "command": "postgresViz.exportGraphPng",
+        "title": "Postgres Viz: Export Graph PNG",
+        "icon": "$(file-media)"
+      },
+      {
+        "command": "postgresViz.exportGraphSvg",
+        "title": "Postgres Viz: Export Graph SVG",
+        "icon": "$(file-code)"
       }
     ],
     "configuration": {
@@ -243,6 +304,17 @@
             "**/openspec/**"
           ],
           "description": "Glob patterns excluded when scanning the workspace for Atlas .hcl schema files (node_modules and .git are always excluded)."
+        },
+        "postgresViz.sqlMigrationExcludeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/.baltuta/**",
+            "**/openspec/**"
+          ],
+          "description": "Glob patterns excluded when scanning the workspace for folder/up.sql migrations (node_modules and .git are always excluded)."
         }
       }
     }
@@ -251,27 +323,29 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
-    "lint": "oxlint src webview test",
-    "format": "oxfmt src webview test esbuild.mjs",
-    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/webview.js && node dist-test/hcl.js && node dist-test/match.js && node dist-test/lenses.js && node dist-test/ddl-symbols.js",
+    "lint": "oxlint src webview test scripts",
+    "format": "oxfmt src webview test scripts esbuild.mjs",
+    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/db.js && node dist-test/ddl.js && node dist-test/connection-profiles.js && node dist-test/load-service.js && node dist-test/protocol.js && node dist-test/parser-worker-ipc.js && node dist-test/graph-diff.js && node dist-test/graph-index.js && node dist-test/graph-reports.js && node dist-test/tree-model.js && node dist-test/tree-provider.js && node dist-test/webview.js && node dist-test/webview-controller.js && node dist-test/hcl.js && node dist-test/sql-migrations.js && node dist-test/match.js && node dist-test/lenses.js && node dist-test/lens-providers.js && node dist-test/ddl-symbols.js && node dist-test/ddl-symbol-provider.js",
     "test:db": "node esbuild.mjs --smoke && node dist-test/integration.js",
+    "test:db:docker": "node scripts/test-db.mjs",
     "package": "pnpm build && vsce package --no-dependencies"
   },
   "dependencies": {
-    "pg": "^8.21.0",
+    "pg": "^8.22.0",
     "pg-query-emscripten": "^5.1.0"
   },
   "devDependencies": {
-    "@types/cytoscape": "^3.31.0",
-    "@types/node": "^25.9.2",
+    "@types/dagre": "^0.7.54",
+    "@types/node": "^26.1.0",
     "@types/pg": "^8.20.0",
-    "@types/vscode": "^1.120.0",
+    "@types/vscode": "^1.125.0",
     "@vscode-elements/elements": "^2.5.1",
     "@vscode/vsce": "^3.9.2",
     "cytoscape": "^3.34.0",
-    "esbuild": "^0.28.0",
-    "oxfmt": "^0.54.0",
-    "oxlint": "^1.69.0",
+    "dagre": "^0.8.5",
+    "esbuild": "^0.28.1",
+    "oxfmt": "^0.57.0",
+    "oxlint": "^1.72.0",
     "typescript": "^6.0.3"
   }
 }
