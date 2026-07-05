@@ -45,10 +45,16 @@ function missingFrom<T extends { id: string }>(source: Map<string, T>, other: Ma
 
 export function buildGraphDiffReport(snapshot: GraphSnapshot, current: GraphPayload): string {
   const diff = diffGraphs(snapshot.graph, current);
+  let snapshotSaved: string;
+  try {
+    snapshotSaved = new Date(snapshot.savedAt).toISOString();
+  } catch {
+    snapshotSaved = `${snapshot.savedAt} (invalid date)`;
+  }
   return `# Graph Snapshot Diff
 
 - Snapshot database: ${escapeMarkdownText(snapshot.database)}
-- Snapshot saved: ${formatSnapshotDate(snapshot.savedAt)}
+- Snapshot saved: ${snapshotSaved}
 
 ## Summary
 
@@ -171,14 +177,6 @@ function changedFields<T>(
 
 function formatValue(value: unknown): string {
   return value === undefined ? "unset" : escapeMarkdownText(JSON.stringify(value) ?? String(value));
-}
-
-function formatSnapshotDate(savedAt: number): string {
-  try {
-    return new Date(savedAt).toISOString();
-  } catch {
-    return `${savedAt} (invalid date)`;
-  }
 }
 
 function nodeLabel(n: GraphNodeData): string {
