@@ -62,6 +62,10 @@ function lineCommentText(text: string): string {
   return text.replace(/[\r\n]+/g, " ");
 }
 
+function ddlComment(label: string, suffix = ""): string {
+  return `-- ${lineCommentText(label)}${suffix}`;
+}
+
 export function renderTableDdl(
   label: string,
   columns: TableColumnDdl[],
@@ -75,7 +79,7 @@ export function renderTableDdl(
     .join(",\n");
   const display = objectName?.display ?? label;
   const qualifiedName = objectName ? quoteSqlObjectName(objectName) : quoteQualifiedSqlName(label);
-  return `-- ${lineCommentText(display)} (columns)\nCREATE TABLE ${qualifiedName} (\n${body}\n);`;
+  return `${ddlComment(display, " (columns)")}\nCREATE TABLE ${qualifiedName} (\n${body}\n);`;
 }
 
 export async function fetchDdl(
@@ -86,10 +90,10 @@ export async function fetchDdl(
   objectName?: SqlObjectName,
 ): Promise<string> {
   if (nodeType === "schema") {
-    return `-- ${lineCommentText(label)}: schemas do not have generated DDL documents`;
+    return ddlComment(label, ": schemas do not have generated DDL documents");
   }
   if (!conn || !Number.isFinite(oid)) {
-    return `-- ${lineCommentText(label)}: connect in the Postgres Viz panel first`;
+    return ddlComment(label, ": connect in the Postgres Viz panel first");
   }
   return withClient(conn, async (client) => {
     switch (nodeType) {
@@ -97,7 +101,7 @@ export async function fetchDdl(
       case "matview": {
         const def = (await client.query("SELECT pg_get_viewdef($1::oid, true) AS def", [oid]))
           .rows[0]?.def;
-        return `-- ${lineCommentText(label)}\n${def ?? ""}`;
+        return `${ddlComment(label)}\n${def ?? ""}`;
       }
       case "function":
         return (
@@ -112,7 +116,7 @@ export async function fetchDdl(
       case "constraint": {
         const def = (await client.query("SELECT pg_get_constraintdef($1::oid, true) AS def", [oid]))
           .rows[0]?.def;
-        return `-- ${lineCommentText(label)}\n${def ?? ""}`;
+        return `${ddlComment(label)}\n${def ?? ""}`;
       }
       case "index": {
         const def = (await client.query("SELECT pg_get_indexdef($1::oid, 0, true) AS def", [oid]))
