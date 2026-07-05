@@ -37,17 +37,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isSafeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value);
-}
-
-function replyId(value: unknown): number | undefined {
-  return isRecord(value) && isSafeInteger(value.id) ? value.id : undefined;
-}
-
 function parseReq(value: unknown): WorkerReq {
   if (!isRecord(value)) throw new Error("invalid parser request");
-  if (!isSafeInteger(value.id)) throw new Error("invalid parser request id");
+  if (typeof value.id !== "number" || !Number.isSafeInteger(value.id)) {
+    throw new Error("invalid parser request id");
+  }
   if (value.op !== "parseQuery" && value.op !== "parsePlPgSQL") {
     throw new Error(`unsupported parser op: ${String(value.op)}`);
   }
@@ -92,7 +86,10 @@ function send(res: WorkerRes): void {
 }
 
 process.on("message", (message: unknown) => {
-  const id = replyId(message);
+  const id =
+    isRecord(message) && typeof message.id === "number" && Number.isSafeInteger(message.id)
+      ? message.id
+      : undefined;
   void (async () => {
     try {
       const req = parseReq(message);
