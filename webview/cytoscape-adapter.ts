@@ -33,15 +33,6 @@ function aggregateEdgeKey(kind: string, source: string, target: string): string 
   return `${kind}|${source}|${target}`;
 }
 
-function canMaterializeDetailEdge(cy: Core, edge: EdgeDef): boolean {
-  const { id, source, target } = edge.data;
-  return (
-    cy.getElementById(id).empty() &&
-    cy.getElementById(source).nonempty() &&
-    cy.getElementById(target).nonempty()
-  );
-}
-
 export function initializeVirtualCards(cy: Core, rowsByCard: Map<string, NodeDef[]>): void {
   cy.nodes().forEach((n) => {
     if (rowsByCard.has(n.id())) n.addClass("virtual-card");
@@ -65,7 +56,12 @@ export function materializeCard(cy: Core, state: MaterializationState, cardId: s
       })),
     );
     for (const e of state.detailEdgesByCard.get(cardId) ?? []) {
-      if (canMaterializeDetailEdge(cy, e)) cy.add({ group: "edges" as const, data: e.data });
+      const { id, source, target } = e.data;
+      const endpointsPresent =
+        cy.getElementById(source).nonempty() && cy.getElementById(target).nonempty();
+      if (cy.getElementById(id).empty() && endpointsPresent) {
+        cy.add({ group: "edges" as const, data: e.data });
+      }
     }
   });
 }
