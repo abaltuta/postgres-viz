@@ -71,6 +71,12 @@ function savePrefs(): void {
   void workspaceState?.update(PREFS_KEY, prefs);
 }
 
+function setPrefs(next: Prefs): void {
+  prefs = next;
+  savePrefs();
+  postPrefs();
+}
+
 function postToWebview(message: HostToWebviewMessage): void {
   webviewController?.post(message);
 }
@@ -970,9 +976,7 @@ async function chooseLayout(): Promise<void> {
   if (!pick) return;
   const nextEngine = pick.engine ?? prefs.engine;
   if (pick.value === prefs.layout && nextEngine === prefs.engine) return;
-  prefs = { ...prefs, layout: pick.value, engine: nextEngine };
-  savePrefs();
-  postPrefs();
+  setPrefs({ ...prefs, layout: pick.value, engine: nextEngine });
 }
 
 async function chooseEdgeMode(): Promise<void> {
@@ -999,9 +1003,7 @@ async function chooseEdgeMode(): Promise<void> {
   ];
   const pick = await vscode.window.showQuickPick(items, { title: "Postgres Viz: edges" });
   if (!pick || pick.value === prefs.edgeMode) return;
-  prefs = { ...prefs, edgeMode: pick.value };
-  savePrefs();
-  postPrefs();
+  setPrefs({ ...prefs, edgeMode: pick.value });
 }
 
 async function viewOptions(context: vscode.ExtensionContext): Promise<void> {
@@ -1032,9 +1034,7 @@ async function viewOptions(context: vscode.ExtensionContext): Promise<void> {
   if (next.hideIsolated !== prefs.hideIsolated) {
     void context.workspaceState.update(HIDE_ISOLATED_TOUCHED_KEY, true);
   }
-  prefs = next;
-  savePrefs();
-  postPrefs();
+  setPrefs(next);
 }
 
 async function facetedFilters(): Promise<void> {
@@ -1065,14 +1065,12 @@ async function facetedFilters(): Promise<void> {
   );
   if (!nextEdgeKinds) return;
 
-  prefs = {
+  setPrefs({
     ...prefs,
     filterSchemas: nextSchemas as string[],
     filterNodeTypes: nextNodeTypes as NodeType[],
     filterEdgeKinds: nextEdgeKinds as EdgeKind[],
-  };
-  savePrefs();
-  postPrefs();
+  });
 }
 
 async function pickFacet<T extends string>(
