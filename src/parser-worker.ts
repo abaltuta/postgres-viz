@@ -91,10 +91,6 @@ function send(res: WorkerRes): void {
   }
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 process.on("message", (message: unknown) => {
   const id = replyId(message);
   void (async () => {
@@ -105,7 +101,9 @@ process.on("message", (message: unknown) => {
         req.op === "parseQuery" ? instance.parse(req.sql) : instance.parsePlpgsql(req.sql);
       send({ id: req.id, ok: true, result: parseResult(req, raw) });
     } catch (e) {
-      if (id !== undefined) send({ id, ok: false, error: messageOf(e) });
+      if (id !== undefined) {
+        send({ id, ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
     }
   })();
 });
