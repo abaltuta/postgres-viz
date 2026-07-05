@@ -121,10 +121,9 @@ export function fitTarget(cy: Core): CollectionReturnValue {
 export function suppressRedundantAggs<
   T extends { kind: string; counterUnit: string; out: boolean; agg?: boolean; detail?: boolean },
 >(rows: T[]): T[] {
-  const detailPairs = new Set(
-    rows.filter((r) => r.detail).map((r) => `${r.kind}|${r.counterUnit}|${r.out}`),
-  );
-  return rows.filter((r) => !(r.agg && detailPairs.has(`${r.kind}|${r.counterUnit}|${r.out}`)));
+  const keyOf = (row: T): string => `${row.kind}|${row.counterUnit}|${row.out}`;
+  const detailPairs = new Set(rows.filter((r) => r.detail).map(keyOf));
+  return rows.filter((r) => !(r.agg && detailPairs.has(keyOf(r))));
 }
 
 type AggregateMemberEdge = {

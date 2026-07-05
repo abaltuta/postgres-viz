@@ -22,13 +22,13 @@ export function diffGraphs(before: GraphPayload, after: GraphPayload): GraphDiff
   const afterEdges = dataById(after.edges);
 
   return {
-    addedNodes: [...afterNodes.values()].filter((n) => !beforeNodes.has(n.id)).sort(compareNode),
-    removedNodes: [...beforeNodes.values()].filter((n) => !afterNodes.has(n.id)).sort(compareNode),
+    addedNodes: missingFrom(afterNodes, beforeNodes).sort(compareNode),
+    removedNodes: missingFrom(beforeNodes, afterNodes).sort(compareNode),
     changedNodes: changed(beforeNodes, afterNodes, nodeComparable).sort((a, b) =>
       compareNode(a.after, b.after),
     ),
-    addedEdges: [...afterEdges.values()].filter((e) => !beforeEdges.has(e.id)).sort(compareEdge),
-    removedEdges: [...beforeEdges.values()].filter((e) => !afterEdges.has(e.id)).sort(compareEdge),
+    addedEdges: missingFrom(afterEdges, beforeEdges).sort(compareEdge),
+    removedEdges: missingFrom(beforeEdges, afterEdges).sort(compareEdge),
     changedEdges: changed(beforeEdges, afterEdges, edgeComparable).sort((a, b) =>
       compareEdge(a.after, b.after),
     ),
@@ -37,6 +37,10 @@ export function diffGraphs(before: GraphPayload, after: GraphPayload): GraphDiff
 
 function dataById<T extends { id: string }>(items: Array<{ data: T }>): Map<string, T> {
   return new Map(items.map(({ data }) => [data.id, data]));
+}
+
+function missingFrom<T extends { id: string }>(source: Map<string, T>, other: Map<string, T>): T[] {
+  return [...source.values()].filter((item) => !other.has(item.id));
 }
 
 export function buildGraphDiffReport(snapshot: GraphSnapshot, current: GraphPayload): string {
@@ -89,11 +93,15 @@ function changed<T extends { id: string }>(
   const out: { before: T; after: T }[] = [];
   for (const [id, next] of after) {
     const prev = before.get(id);
-    if (prev && JSON.stringify(comparable(prev)) !== JSON.stringify(comparable(next))) {
+    if (prev && !sameValue(comparable(prev), comparable(next))) {
       out.push({ before: prev, after: next });
     }
   }
   return out;
+}
+
+function sameValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function nodeComparable(n: GraphNodeData): Record<string, unknown> {
@@ -156,7 +164,7 @@ function changedFields<T>(
   const prev = comparable(before);
   const next = comparable(after);
   return [...new Set([...Object.keys(prev), ...Object.keys(next)])]
-    .filter((key) => JSON.stringify(prev[key]) !== JSON.stringify(next[key]))
+    .filter((key) => !sameValue(prev[key], next[key]))
     .map((key) => `${key}: ${formatValue(prev[key])} -> ${formatValue(next[key])}`)
     .join("; ");
 }
