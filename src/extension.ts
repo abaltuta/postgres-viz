@@ -1170,13 +1170,6 @@ function escapeMarkdownText(value: string): string {
   return value.replace(/[\\`*[\]<>]/g, "\\$&").replace(/\r?\n/g, " ");
 }
 
-function markdownInlineCode(value: string): string {
-  const longestTickRun = Math.max(0, ...Array.from(value.matchAll(/`+/g), (match) => match[0].length));
-  const fence = "`".repeat(longestTickRun + 1);
-  const padding = value.startsWith("`") || value.endsWith("`") ? " " : "";
-  return `${fence}${padding}${value}${padding}${fence}`;
-}
-
 function markdownList(values: string[], empty: string): string {
   return values.length > 0 ? values.map(escapeMarkdownText).join(", ") : empty;
 }
@@ -1267,6 +1260,7 @@ async function showLoadDiagnostics(): Promise<void> {
     d.warnings.length > 0
       ? d.warnings.map((w) => `- ${escapeMarkdownText(w)}`).join("\n")
       : "_None._";
+  const stats = JSON.stringify(d.graph.stats);
   await openMarkdownReport(`# Postgres Viz Load Diagnostics
 
 - Profile: ${activeProfileName ? escapeMarkdownText(activeProfileName) : "_none_"}
@@ -1294,7 +1288,7 @@ async function showLoadDiagnostics(): Promise<void> {
 
 - Nodes: ${d.graph.nodes}
 - Edges: ${d.graph.edges}
-- Stats: ${markdownInlineCode(JSON.stringify(d.graph.stats))}
+- Stats: \`${stats}\`
 
 ## Warnings
 
