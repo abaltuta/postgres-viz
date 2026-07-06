@@ -114,7 +114,12 @@ export function buildTreeModel(graph: GraphPayload): TreeModel {
     }
     return g;
   };
-  const sorted = [...graph.nodes].sort((a, b) => compareGraphNode(a.data, b.data));
+  const sorted = [...graph.nodes].sort(
+    (a, b) =>
+      compareText(a.data.schema, b.data.schema) ||
+      compareText(a.data.parent, b.data.parent) ||
+      compareNameTypeId(a.data, b.data),
+  );
   for (const { data: d } of sorted) {
     if (d.type === "schema") continue;
     if (ROWS.has(d.type)) {
@@ -127,41 +132,28 @@ export function buildTreeModel(graph: GraphPayload): TreeModel {
     const rel = node(d.label, d.type, groupOf(schema, d.type, title), d.id);
     relNodes.set(d.id, rel);
   }
-  for (const d of rows.sort(compareRows)) {
+  rows.sort(
+    (a, b) =>
+      compareText(a.parent, b.parent) ||
+      (a.ord ?? Number.MAX_SAFE_INTEGER) - (b.ord ?? Number.MAX_SAFE_INTEGER) ||
+      compareNameTypeId(a, b),
+  );
+  for (const d of rows) {
     const parent = relNodes.get(d.parent ?? "");
     if (parent) node(d.label, d.type, parent, d.id, d.detail);
   }
   roots.sort((a, b) => compareText(a.label, b.label));
   for (const schema of roots) {
-    schema.children.sort(compareGroups);
+    schema.children.sort(
+      (a, b) =>
+        (GROUP_ORDER.get(a.label) ?? Number.MAX_SAFE_INTEGER) -
+          (GROUP_ORDER.get(b.label) ?? Number.MAX_SAFE_INTEGER) ||
+        compareText(a.label, b.label) ||
+        compareText(a.id, b.id),
+    );
     for (const group of schema.children) group.children.sort(compareNameTypeId);
   }
   return { roots, byGraphId };
-}
-
-function compareGraphNode(a: GraphNodeData, b: GraphNodeData): number {
-  return (
-    compareText(a.schema, b.schema) ||
-    compareText(a.parent, b.parent) ||
-    compareNameTypeId(a, b)
-  );
-}
-
-function compareGroups(a: TreeNode, b: TreeNode): number {
-  return (
-    (GROUP_ORDER.get(a.label) ?? Number.MAX_SAFE_INTEGER) -
-      (GROUP_ORDER.get(b.label) ?? Number.MAX_SAFE_INTEGER) ||
-    compareText(a.label, b.label) ||
-    compareText(a.id, b.id)
-  );
-}
-
-function compareRows(a: GraphNodeData, b: GraphNodeData): number {
-  return (
-    compareText(a.parent, b.parent) ||
-    (a.ord ?? Number.MAX_SAFE_INTEGER) - (b.ord ?? Number.MAX_SAFE_INTEGER) ||
-    compareNameTypeId(a, b)
-  );
 }
 
 function compareNameTypeId(
