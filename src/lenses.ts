@@ -84,11 +84,6 @@ function resolveByRoutineName(
   return unique(hits);
 }
 
-function triggerMatchesOwner(all: Node[], trigger: Node, owner: string): boolean {
-  const parent = all.find((n) => n.id === trigger.parent);
-  return parent?.label === owner;
-}
-
 function resolveNode(entry: HclEntry, graph: GraphPayload): Node | undefined {
   const all = nodes(graph);
   const byType = (type: string): Node[] => all.filter((n) => n.type === type);
@@ -117,7 +112,9 @@ function resolveNode(entry: HclEntry, graph: GraphPayload): Node | undefined {
       );
       if (entry.owner) {
         const owner = entry.owner;
-        triggers = triggers.filter((n) => triggerMatchesOwner(all, n, owner));
+        triggers = triggers.filter(
+          (n) => all.find((parent) => parent.id === n.parent)?.label === owner,
+        );
       }
       return unique(triggers);
     }
