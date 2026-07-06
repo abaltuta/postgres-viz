@@ -70,7 +70,15 @@ export class HclHoverProvider implements vscode.HoverProvider {
     const anchors = buildLensAnchors(entries, graph);
     for (const anchor of anchors) {
       const range = anchorLabelRange(document, anchor);
-      if (!range || !containsExclusiveEnd(range, position)) continue;
+      if (
+        !range ||
+        position.line < range.start.line ||
+        position.line > range.end.line ||
+        (position.line === range.start.line && position.character < range.start.character) ||
+        (position.line === range.end.line && position.character >= range.end.character)
+      ) {
+        continue;
+      }
       const md = hoverMarkdown(anchor, graph);
       if (md) return new vscode.Hover(new vscode.MarkdownString(md), range);
     }
@@ -106,11 +114,4 @@ function labelEnd(text: string, start: number, fallbackLength: number): number {
     }
   }
   return Math.min(text.length, start + Math.max(1, fallbackLength));
-}
-
-function containsExclusiveEnd(range: vscode.Range, position: vscode.Position): boolean {
-  if (position.line < range.start.line || position.line > range.end.line) return false;
-  if (position.line === range.start.line && position.character < range.start.character) return false;
-  if (position.line === range.end.line && position.character >= range.end.character) return false;
-  return true;
 }
