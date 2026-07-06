@@ -188,15 +188,6 @@ async function promptAndSaveProfile(existing?: ConnectionProfile): Promise<strin
   return trimmed;
 }
 
-function clearLoadedGraph(): void {
-  currentGraph = null;
-  currentDatabase = "";
-  lastDiagnostics = undefined;
-  lastStatsText = "";
-  treeProvider?.setGraph(null);
-  updateStatusItem();
-}
-
 // ── native explorer: a real TreeView in the activity bar ──
 
 let treeProvider: DbTreeProvider | undefined;
@@ -937,7 +928,12 @@ async function connectionMenu(): Promise<void> {
       if (active) await connectionProfiles?.delete(active.id);
       lastConnection = undefined;
       activeProfileName = connectionProfiles?.activeProfile()?.name ?? "";
-      clearLoadedGraph();
+      currentGraph = null;
+      currentDatabase = "";
+      lastDiagnostics = undefined;
+      lastStatsText = "";
+      treeProvider?.setGraph(null);
+      updateStatusItem();
       break;
     }
   }
