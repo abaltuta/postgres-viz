@@ -831,16 +831,6 @@ function clearEdgeRouting(): void {
   adapterClearEdgeRouting(cy, routedEdges);
 }
 
-/** Absolute waypoints → cytoscape's relative segment-weights/-distances. */
-function applySegments(
-  e: EdgeSingular,
-  s: { x: number; y: number },
-  t: { x: number; y: number },
-  pts: { x: number; y: number }[],
-): void {
-  applyEdgeSegments(routedEdges, e, s, t, pts);
-}
-
 function routeEdgesAroundCards(): void {
   if (!cy) return;
   clearEdgeRouting();
@@ -869,7 +859,8 @@ function routeEdgesAroundCards(): void {
     const down = tp.y >= sp.y;
     const outY = down ? (sBox?.y2 ?? sp.y) + 6 : (sBox?.y1 ?? sp.y) - 6;
     const inY = down ? (tBox?.y1 ?? tp.y) - 6 : (tBox?.y2 ?? tp.y) + 6;
-    applySegments(e, sp, tp, [
+    // Absolute waypoints become cytoscape relative segment-weights/-distances.
+    applyEdgeSegments(routedEdges, e, sp, tp, [
       { x: sp.x, y: outY },
       { x: busX, y: outY },
       { x: busX, y: inY },
@@ -1194,15 +1185,6 @@ function wireHoverPreview(): void {
 
 // ── panel ──
 
-/**
- * The column pairs an aggregate edge stands for, from the payload (its member
- * detail edges may not be materialized): fk → "created_by→id, modified_by→id";
- * reads/writes/selects → the touched column names.
- */
-function aggMembers(data: GraphEdgeData): string {
-  return aggregateMemberLabels(data, detailEdgesByCard, nodeDefById, cardOfNode, ROW_TYPES);
-}
-
 /** Incoming relationships read passively: X *is called by* Y, never "Y calls". */
 const PASSIVE_KIND: Record<string, string> = {
   calls: "called by",
@@ -1225,7 +1207,7 @@ function renderPanel(node: NodeSingular): void {
   const d = node.data() as GraphNodeData;
   el("panel").classList.remove("hidden");
   const panel = el("panel-body");
-  syncExplorerSelection(node.id());
+  postToHost({ type: "nodeSelected", id: node.id() });
   const isCard = rowsByCard.has(node.id()) || node.isParent();
   const edges = (
     isCard ? node.union(node.descendants()).connectedEdges("[!detail]") : node.connectedEdges()
@@ -1265,7 +1247,10 @@ function renderPanel(node: NodeSingular): void {
     const display = owner ? `${owner}.${otherData.label}` : otherData.label;
     const kindWord = outgoing ? data.kind : (PASSIVE_KIND[data.kind] ?? `${data.kind} by`);
     const kindLabel = `${kindWord}${data.count && data.count > 1 ? ` ×${data.count}` : ""}`;
-    const cols = data.agg ? aggMembers(data) : "";
+    // Aggregate edge members come from the payload when detail edges are not materialized.
+    const cols = data.agg
+      ? aggregateMemberLabels(data, detailEdgesByCard, nodeDefById, cardOfNode, ROW_TYPES)
+      : "";
     (outgoing ? outRows : inRows).push(`<li data-node="${esc(other.id())}">
         <span class="kind" style="color:${EDGE_COLORS[data.kind] ?? "#8993A4"}">${outgoing ? "→" : "←"} ${esc(kindLabel)}</span>
         <span class="name">${esc(display)}</span>
@@ -1373,11 +1358,6 @@ function renderPanel(node: NodeSingular): void {
       }
     });
   });
-}
-
-/** The explorer is a native VS Code TreeView now — sync selection to it. */
-function syncExplorerSelection(id: string): void {
-  postToHost({ type: "nodeSelected", id });
 }
 
 /** Isolate one schema's tables/views/functions (clicking a schema in the tree). */

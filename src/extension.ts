@@ -1209,11 +1209,6 @@ function decodePngExport(dataUri: unknown): Buffer | undefined {
     : undefined;
 }
 
-function isSvgExport(svg: unknown): svg is string {
-  if (typeof svg !== "string") return false;
-  return /^<svg(?:\s|>)/i.test(svg.trimStart());
-}
-
 const EXPORT_FILENAME_FORBIDDEN = new Set(["<", ">", ":", "\"", "/", "\\", "|", "?", "*"]);
 
 function exportDefaultUri(extension: "png" | "svg"): vscode.Uri {
@@ -1348,7 +1343,7 @@ async function savePngExport(dataUri: string): Promise<void> {
 }
 
 async function saveSvgExport(svg: string): Promise<void> {
-  if (!isSvgExport(svg)) {
+  if (!/^<svg(?:\s|>)/i.test(svg.trimStart())) {
     vscode.window.showErrorMessage("Postgres Viz: invalid SVG export data.");
     return;
   }
