@@ -1447,7 +1447,7 @@ async function treeCallTree(n?: TreeNode): Promise<void> {
 async function treeGoToDef(n?: TreeNode): Promise<void> {
   const d = n?.graphId ? graphDataOf(n.graphId) : undefined;
   if (!d) return;
-  const owner = ownerLabelOf(d);
+  const owner = rowNode(d) && d.parent ? graphDataOf(d.parent)?.label : undefined;
   await openDefinition(
     d.type,
     d.oid,
@@ -1476,10 +1476,4 @@ async function treeOpenDdl(n?: TreeNode): Promise<void> {
   }
   const label = graphDisplayName(d.schema, d.label);
   await openDdl(d.type, d.oid, label, { schema: d.schema, name: d.label, display: label });
-}
-
-/** For row nodes, the owning table's label (owner arg for HCL lookups). */
-function ownerLabelOf(d: GraphNodeData): string {
-  if (!rowNode(d) || !d.parent) return "";
-  return graphDataOf(d.parent)?.label ?? "";
 }
