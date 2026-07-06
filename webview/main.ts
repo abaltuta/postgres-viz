@@ -141,19 +141,14 @@ const HEADER_H = 22;
 /** Art is a preview, not the ERD — a 200-column table must not dwarf the graph. */
 const MAX_ART_ROWS = 30;
 
-function cardDims(label: string, rows: NodeDef[], extraLines = 0): { w: number; h: number } {
-  let maxLen = label.length;
-  for (const r of rows) maxLen = Math.max(maxLen, String(r.data.label).length);
-  const w = Math.max(90, maxLen * 6.2 + 24);
-  const h = HEADER_H + (rows.length + extraLines) * ROW_H + 8;
-  return { w, h };
-}
-
 function buildCardArt(card: NodeDef): void {
   const all = rowsByCard.get(card.data.id) ?? [];
   const rows = all.slice(0, MAX_ART_ROWS);
   const extra = all.length - rows.length;
-  const { w, h } = cardDims(card.data.label, rows, extra > 0 ? 1 : 0);
+  let maxLabelLength = card.data.label.length;
+  for (const row of rows) maxLabelLength = Math.max(maxLabelLength, String(row.data.label).length);
+  const w = Math.max(90, maxLabelLength * 6.2 + 24);
+  const h = HEADER_H + (rows.length + (extra > 0 ? 1 : 0)) * ROW_H + 8;
   const dark = isDark();
   const textColor = dark ? "#9fadbc" : "#57606a";
   const stripe = dark ? "#ffffff" : "#000000";

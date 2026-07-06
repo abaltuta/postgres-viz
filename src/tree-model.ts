@@ -75,12 +75,10 @@ export function buildTreeModel(graph: GraphPayload): TreeModel {
   const schemaKey = (name: string): string => `schema:${name}`;
   const schemaNameById = (id: string | undefined): string | undefined =>
     id ? schemaNamesById.get(id) : undefined;
-  const schemaNameOf = (d: GraphNodeData): string | undefined => {
-    if (d.schema) return String(d.schema);
-    return schemaNameById(d.parent) ?? schemaNameById(d.schemaParent);
-  };
   const schemaOf = (d: GraphNodeData): TreeNode => {
-    const name = schemaNameOf(d);
+    const name = d.schema
+      ? String(d.schema)
+      : (schemaNameById(d.parent) ?? schemaNameById(d.schemaParent));
     const key = name === undefined ? UNKNOWN_SCHEMA_KEY : schemaKey(name);
     let s = bySchema.get(key);
     if (!s) {
