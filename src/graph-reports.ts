@@ -1,5 +1,5 @@
 import { GraphIndex, type GraphDirection, type GraphStep } from "./graph-index";
-import type { EdgeKind, GraphEdgeData, GraphNodeData, GraphPayload } from "./types";
+import type { EdgeKind, GraphNodeData, GraphPayload } from "./types";
 
 const ROW_TYPES = new Set<GraphNodeData["type"]>(["column", "trigger", "constraint", "index"]);
 
@@ -142,10 +142,11 @@ function formatSteps(index: GraphIndex, steps: GraphStep[], arrow: string): stri
   if (steps.length === 0) return ["_None._"];
   return [...steps]
     .sort((a, b) => compareStep(index, a, b))
-    .map(
-      (step) =>
-        `- depth ${step.depth}: ${formatEdge(step.edge)} ${arrow} ${formatNodeName(index, step.node)}`,
-    );
+    .map((step) => {
+      const suffix = step.edge.count && step.edge.count > 1 ? ` x${step.edge.count}` : "";
+      const edge = inlineCode(`${step.edge.kind}${suffix}`);
+      return `- depth ${step.depth}: ${edge} ${arrow} ${formatNodeName(index, step.node)}`;
+    });
 }
 
 function compareStep(index: GraphIndex, a: GraphStep, b: GraphStep): number {
@@ -172,11 +173,6 @@ function normalizeMaxDepth(value: number | undefined, fallback: number): number 
   if (value === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY;
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.floor(value));
-}
-
-function formatEdge(edge: GraphEdgeData): string {
-  const suffix = edge.count && edge.count > 1 ? ` x${edge.count}` : "";
-  return inlineCode(`${edge.kind}${suffix}`);
 }
 
 function formatNodeName(index: GraphIndex, nodeOrId: GraphNodeData | string): string {
