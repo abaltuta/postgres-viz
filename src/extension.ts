@@ -1231,17 +1231,13 @@ function isSvgExport(svg: unknown): svg is string {
 
 const EXPORT_FILENAME_FORBIDDEN = new Set(["<", ">", ":", "\"", "/", "\\", "|", "?", "*"]);
 
-function sanitizeExportNamePart(value: string): string {
-  let out = "";
-  for (const char of value) {
-    out += char.charCodeAt(0) < 32 || EXPORT_FILENAME_FORBIDDEN.has(char) ? "_" : char;
-  }
-  return out.replace(/\s+/g, " ").trim();
-}
-
 function exportDefaultUri(extension: "png" | "svg"): vscode.Uri {
   const source = currentDatabase || "graph";
-  const safeName = sanitizeExportNamePart(source);
+  let safeName = "";
+  for (const char of source) {
+    safeName += char.charCodeAt(0) < 32 || EXPORT_FILENAME_FORBIDDEN.has(char) ? "_" : char;
+  }
+  safeName = safeName.replace(/\s+/g, " ").trim();
   const fileName = `postgres-viz-${safeName || "graph"}.${extension}`;
   const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
   return folder ? vscode.Uri.joinPath(folder, fileName) : vscode.Uri.file(fileName);
