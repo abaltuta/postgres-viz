@@ -29,17 +29,6 @@ const CONTYPE_LABEL: Record<string, string> = {
   x: "EXCLUDE",
 };
 
-function triggerDesc(tgtype: number): string {
-  const timing = tgtype & 2 ? "BEFORE" : tgtype & 64 ? "INSTEAD OF" : "AFTER";
-  const events = [
-    tgtype & 4 ? "INSERT" : "",
-    tgtype & 8 ? "DELETE" : "",
-    tgtype & 16 ? "UPDATE" : "",
-    tgtype & 32 ? "TRUNCATE" : "",
-  ].filter(Boolean);
-  return `${timing} ${events.join(" OR ")} · ${tgtype & 1 ? "ROW" : "STATEMENT"}`;
-}
-
 export function buildGraph(
   catalog: Catalog,
   analysis: Map<number, FuncRefs>,
@@ -287,6 +276,15 @@ export function buildGraph(
     const rel = relByOid.get(t.relOid);
     if (!rel) continue;
     unitOfId.set(trgId(t.oid), relId(t.relOid));
+    const timing = t.tgtype & 2 ? "BEFORE" : t.tgtype & 64 ? "INSTEAD OF" : "AFTER";
+    const events = [
+      t.tgtype & 4 ? "INSERT" : "",
+      t.tgtype & 8 ? "DELETE" : "",
+      t.tgtype & 16 ? "UPDATE" : "",
+      t.tgtype & 32 ? "TRUNCATE" : "",
+    ]
+      .filter(Boolean)
+      .join(" OR ");
     nodes.push({
       data: {
         id: trgId(t.oid),
@@ -295,7 +293,7 @@ export function buildGraph(
         parent: relId(t.relOid),
         schema: rel.schema,
         oid: t.oid,
-        detail: triggerDesc(t.tgtype),
+        detail: `${timing} ${events} · ${t.tgtype & 1 ? "ROW" : "STATEMENT"}`,
         ord: 10_000,
       },
     });
