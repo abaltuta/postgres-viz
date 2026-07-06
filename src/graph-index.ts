@@ -358,14 +358,12 @@ function compareNode(a: GraphNodeData, b: GraphNodeData): number {
   );
 }
 
-function edgeKindRank(kind: EdgeKind): number {
-  const idx = EDGE_KIND_ORDER.indexOf(kind);
-  return idx < 0 ? Number.MAX_SAFE_INTEGER : idx;
-}
-
 function compareEdge(a: GraphEdgeData, b: GraphEdgeData): number {
+  const aKindRank = EDGE_KIND_ORDER.indexOf(a.kind);
+  const bKindRank = EDGE_KIND_ORDER.indexOf(b.kind);
   return (
-    edgeKindRank(a.kind) - edgeKindRank(b.kind) ||
+    (aKindRank < 0 ? Number.MAX_SAFE_INTEGER : aKindRank) -
+      (bKindRank < 0 ? Number.MAX_SAFE_INTEGER : bKindRank) ||
     a.source.localeCompare(b.source) ||
     a.target.localeCompare(b.target) ||
     Number(Boolean(a.detail)) - Number(Boolean(b.detail)) ||
