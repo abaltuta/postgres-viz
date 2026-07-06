@@ -118,16 +118,6 @@ interface GraphCacheEntry {
 const graphCache = new Map<string, GraphCacheEntry>();
 const GRAPH_CACHE_MAX = 4;
 
-function graphCacheKey(conn: string): string {
-  const cfg = vscode.workspace.getConfiguration("postgresViz");
-  return JSON.stringify([
-    conn,
-    cfg.get<string[]>("schemas") ?? [],
-    cfg.get<string[]>("excludeSchemas") ?? [],
-    cfg.get<boolean>("includeForeignKeys") ?? true,
-  ]);
-}
-
 function getOutput(): vscode.OutputChannel {
   output ??= vscode.window.createOutputChannel("Postgres Viz");
   return output;
@@ -631,7 +621,11 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
     logLine("load already in progress — ignoring request");
     return;
   }
-  const key = graphCacheKey(conn);
+  const cfg = vscode.workspace.getConfiguration("postgresViz");
+  const schemas = cfg.get<string[]>("schemas") ?? [];
+  const excludeSchemas = cfg.get<string[]>("excludeSchemas") ?? [];
+  const includeFks = cfg.get<boolean>("includeForeignKeys") ?? true;
+  const key = JSON.stringify([conn, schemas, excludeSchemas, includeFks]);
   if (!opts.force) {
     const cached = graphCache.get(key);
     if (cached) {
@@ -670,10 +664,6 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
           progress.report({ message: short });
           postToWebview({ type: "status", message: short });
         };
-        const cfg = vscode.workspace.getConfiguration("postgresViz");
-        const schemas = cfg.get<string[]>("schemas") ?? [];
-        const excludeSchemas = cfg.get<string[]>("excludeSchemas") ?? [];
-        const includeFks = cfg.get<boolean>("includeForeignKeys") ?? true;
         logLine(`─── visualize ${redact(conn)} ───`);
         log("connecting (10s timeout)…");
         const { graph, database, diagnostics } = await loadGraphFromDatabase({
