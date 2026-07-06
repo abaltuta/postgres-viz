@@ -1086,17 +1086,11 @@ function sortedUnique<T extends string>(values: T[]): T[] {
   return [...new Set(values)].sort();
 }
 
-/** Parent (table) label of a row node, for qualified row labels in the picker. */
-function labelByGraphId(): Map<string, string> {
-  const m = new Map<string, string>();
-  for (const { data: d } of currentGraph?.nodes ?? []) m.set(d.id, String(d.label));
-  return m;
-}
-
 async function searchGraph(): Promise<void> {
   const graph = requireGraph(CONNECT_DATABASE_FIRST);
   if (!graph) return;
-  const labelOf = labelByGraphId();
+  const labelOf = new Map<string, string>();
+  for (const { data: d } of graph.nodes) labelOf.set(d.id, String(d.label));
   type Item = vscode.QuickPickItem & { id: string };
   const items: Item[] = [];
   for (const { data: d } of graph.nodes) {
