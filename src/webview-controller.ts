@@ -138,7 +138,9 @@ export class WebviewController implements vscode.Disposable {
 
   private async handleMessage(msg: unknown): Promise<void> {
     try {
-      this.opts.logLine(`webview -> ${messageType(msg)}`);
+      this.opts.logLine(
+        `webview -> ${isRecord(msg) && typeof msg.type === "string" ? msg.type : "<invalid>"}`,
+      );
       if (!isRecord(msg)) return;
       if (msg.type === "ready") {
         this.ready = true;
@@ -207,30 +209,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function messageType(value: unknown): string {
-  return isRecord(value) && typeof value.type === "string" ? value.type : "<invalid>";
-}
-
-function ddlNodeType(value: unknown): DdlNodeType | undefined {
-  return typeof value === "string" && DDL_NODE_TYPES.has(value)
-    ? (value as DdlNodeType)
-    : undefined;
-}
-
-function positiveOid(value: unknown): number | undefined {
-  return typeof value === "number" &&
-    Number.isInteger(value) &&
-    value > 0 &&
-    value <= PG_OID_MAX
-    ? value
-    : undefined;
-}
-
 function parseDdlPayload(
   msg: Record<string, unknown>,
 ): { nodeType: DdlNodeType; oid: number } | undefined {
-  const nodeType = ddlNodeType(msg.nodeType);
-  const oid = positiveOid(msg.oid);
+  const nodeType =
+    typeof msg.nodeType === "string" && DDL_NODE_TYPES.has(msg.nodeType)
+      ? (msg.nodeType as DdlNodeType)
+      : undefined;
+  const oid =
+    typeof msg.oid === "number" &&
+    Number.isInteger(msg.oid) &&
+    msg.oid > 0 &&
+    msg.oid <= PG_OID_MAX
+      ? msg.oid
+      : undefined;
   return nodeType && oid !== undefined ? { nodeType, oid } : undefined;
 }
 
