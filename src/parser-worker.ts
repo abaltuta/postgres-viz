@@ -49,16 +49,13 @@ function parseReq(value: unknown): WorkerReq {
   return { id: value.id, op: value.op, sql: value.sql };
 }
 
-function parseError(value: unknown): string | null {
-  if (!isRecord(value) || value.error == null) return null;
-  const error = value.error;
-  if (isRecord(error) && typeof error.message === "string") return error.message;
-  return "parse error";
-}
-
 function parseResult(req: WorkerReq, raw: unknown): unknown {
-  const error = parseError(raw);
-  if (error) throw new Error(error);
+  if (isRecord(raw) && raw.error != null) {
+    const { error } = raw;
+    const message =
+      isRecord(error) && typeof error.message === "string" ? error.message : "parse error";
+    throw new Error(message);
+  }
   if (!isRecord(raw)) throw new Error("parser returned a non-object result");
 
   if (req.op === "parseQuery") {
