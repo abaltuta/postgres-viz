@@ -798,12 +798,6 @@ function requireGraph(message = LOAD_DATABASE_FIRST): GraphPayload | undefined {
   return undefined;
 }
 
-function requireLoadDiagnostics(): LoadDiagnostics | undefined {
-  if (lastDiagnostics) return lastDiagnostics;
-  vscode.window.showInformationMessage(LOAD_DATABASE_FIRST);
-  return undefined;
-}
-
 // ── native chrome: connection menu, layout / edge-mode / view-option pickers ──
 
 /**
@@ -1254,8 +1248,11 @@ function exportDefaultUri(extension: "png" | "svg"): vscode.Uri {
 }
 
 async function showLoadDiagnostics(): Promise<void> {
-  const d = requireLoadDiagnostics();
-  if (!d) return;
+  const d = lastDiagnostics;
+  if (!d) {
+    vscode.window.showInformationMessage(LOAD_DATABASE_FIRST);
+    return;
+  }
   const warnings =
     d.warnings.length > 0
       ? d.warnings.map((w) => `- ${escapeMarkdownText(w)}`).join("\n")
