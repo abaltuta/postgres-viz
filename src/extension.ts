@@ -577,14 +577,6 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("postgresViz.treeGoToDef", (n?: TreeNode) => treeGoToDef(n)),
     vscode.commands.registerCommand("postgresViz.treeOpenDdl", (n?: TreeNode) => treeOpenDdl(n)),
   );
-  // a stored active profile loads in the background at startup — tree + Cmd+T
-  // symbols are ready without opening the graph panel
-  void getActiveConnection().then((conn) => {
-    if (conn) {
-      logLine(`startup: loading ${activeProfileName} ${redact(conn)} in the background`);
-      return loadGraph(conn);
-    }
-  });
 }
 
 export function deactivate(): void {
@@ -600,7 +592,7 @@ async function visualize(): Promise<void> {
   // no stored profile -> the status bar item / sidebar drive connecting now
 }
 
-/** Load the graph WITHOUT opening the panel (sidebar welcome button / startup). */
+/** Load the graph WITHOUT opening the panel (sidebar welcome button). */
 async function load(): Promise<void> {
   let conn = await getActiveConnection();
   if (!conn) {
