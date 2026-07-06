@@ -141,24 +141,22 @@ export function buildPathReport(graph: GraphPayload, opts: PathReportOptions): s
 function formatSteps(index: GraphIndex, steps: GraphStep[], arrow: string): string[] {
   if (steps.length === 0) return ["_None._"];
   return [...steps]
-    .sort((a, b) => compareStep(index, a, b))
+    .sort((a, b) => {
+      const aName = nodeDisplayName(index, a.node);
+      const bName = nodeDisplayName(index, b.node);
+      return (
+        a.depth - b.depth ||
+        aName.localeCompare(bName) ||
+        a.node.id.localeCompare(b.node.id) ||
+        a.edge.kind.localeCompare(b.edge.kind) ||
+        a.edge.id.localeCompare(b.edge.id)
+      );
+    })
     .map((step) => {
       const suffix = step.edge.count && step.edge.count > 1 ? ` x${step.edge.count}` : "";
       const edge = inlineCode(`${step.edge.kind}${suffix}`);
       return `- depth ${step.depth}: ${edge} ${arrow} ${formatNodeName(index, step.node)}`;
     });
-}
-
-function compareStep(index: GraphIndex, a: GraphStep, b: GraphStep): number {
-  const aName = nodeDisplayName(index, a.node);
-  const bName = nodeDisplayName(index, b.node);
-  return (
-    a.depth - b.depth ||
-    aName.localeCompare(bName) ||
-    a.node.id.localeCompare(b.node.id) ||
-    a.edge.kind.localeCompare(b.edge.kind) ||
-    a.edge.id.localeCompare(b.edge.id)
-  );
 }
 
 function formatEdgeFilter(opts: EdgeReportOptions): string {
