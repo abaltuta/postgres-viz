@@ -62,7 +62,12 @@ export class ConnectionProfileStore {
     const existing = profileId ? state.profiles.find((p) => p.id === profileId) : undefined;
     const profile: ConnectionProfile = existing
       ? { ...existing, name, updatedAt: now }
-      : { id: createId(), name, createdAt: now, updatedAt: now };
+      : {
+          id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          name,
+          createdAt: now,
+          updatedAt: now,
+        };
     const profiles = existing
       ? state.profiles.map((p) => (p.id === profile.id ? profile : p))
       : [...state.profiles, profile];
@@ -128,10 +133,6 @@ export function defaultProfileName(conn: string): string {
   } catch {
     return "Default";
   }
-}
-
-function createId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
