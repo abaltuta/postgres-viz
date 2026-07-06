@@ -134,7 +134,7 @@ export function buildTreeModel(graph: GraphPayload): TreeModel {
   roots.sort((a, b) => compareText(a.label, b.label));
   for (const schema of roots) {
     schema.children.sort(compareGroups);
-    for (const group of schema.children) group.children.sort(compareTreeNode);
+    for (const group of schema.children) group.children.sort(compareNameTypeId);
   }
   return { roots, byGraphId };
 }
@@ -154,10 +154,6 @@ function compareGroups(a: TreeNode, b: TreeNode): number {
     compareText(a.label, b.label) ||
     compareText(a.id, b.id)
   );
-}
-
-function compareTreeNode(a: TreeNode, b: TreeNode): number {
-  return compareNameTypeId(a, b);
 }
 
 function compareRows(a: GraphNodeData, b: GraphNodeData): number {
