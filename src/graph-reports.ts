@@ -161,12 +161,9 @@ function compareStep(index: GraphIndex, a: GraphStep, b: GraphStep): number {
 }
 
 function formatEdgeFilter(opts: EdgeReportOptions): string {
-  return formatKindFilter(opts.kinds, opts.includeDetail ? "all edge levels" : "card-level edges");
-}
-
-function formatKindFilter(kinds: EdgeKind[] | undefined, level: string): string {
-  if (!kinds) return `all ${level}`;
-  const uniqueKinds = [...new Set(kinds)];
+  const level = opts.includeDetail ? "all edge levels" : "card-level edges";
+  if (!opts.kinds) return `all ${level}`;
+  const uniqueKinds = [...new Set(opts.kinds)];
   return uniqueKinds.length ? uniqueKinds.join(", ") : "no edge kinds";
 }
 
