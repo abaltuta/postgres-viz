@@ -95,11 +95,7 @@ function anchorLabelRange(
   }
   const text = document.lineAt(anchor.line).text;
   const start = Math.max(0, Math.min(anchor.col, text.length));
-  const end = labelEnd(text, start, anchor.name.length);
-  return new vscode.Range(anchor.line, start, anchor.line, end);
-}
-
-function labelEnd(text: string, start: number, fallbackLength: number): number {
+  let end = Math.min(text.length, start + Math.max(1, anchor.name.length));
   if (start > 0 && text[start - 1] === '"') {
     let escaped = false;
     for (let i = start; i < text.length; i++) {
@@ -109,9 +105,10 @@ function labelEnd(text: string, start: number, fallbackLength: number): number {
       } else if (ch === "\\") {
         escaped = true;
       } else if (ch === '"') {
-        return i;
+        end = i;
+        break;
       }
     }
   }
-  return Math.min(text.length, start + Math.max(1, fallbackLength));
+  return new vscode.Range(anchor.line, start, anchor.line, end);
 }
