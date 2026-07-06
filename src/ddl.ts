@@ -41,16 +41,16 @@ function splitQualifiedSqlName(label: string): string[] {
   return objectName ? [schema, objectName] : [schema];
 }
 
-function unquoteSqlIdent(name: string): string {
-  const trimmed = name.trim();
-  return trimmed.startsWith('"') && trimmed.endsWith('"')
-    ? trimmed.slice(1, -1).replace(/""/g, '"')
-    : name;
-}
-
 export function quoteQualifiedSqlName(label: string): string {
   return splitQualifiedSqlName(label)
-    .map((part) => quoteSqlIdent(unquoteSqlIdent(part)))
+    .map((part) => {
+      const trimmed = part.trim();
+      return quoteSqlIdent(
+        trimmed.startsWith('"') && trimmed.endsWith('"')
+          ? trimmed.slice(1, -1).replace(/""/g, '"')
+          : part,
+      );
+    })
     .join(".");
 }
 
