@@ -1116,14 +1116,12 @@ const EDGE_FILTERS: (vscode.QuickPickItem & { kinds?: EdgeKind[] })[] = [
   { label: "Keys / constraints / defaults", kinds: ["fk", "constrains", "indexes", "default"] },
 ];
 
-type NodePick = vscode.QuickPickItem & { id: string };
-
 function rowNode(d: GraphNodeData): boolean {
   return SYMBOL_ROWS.has(d.type);
 }
 
-function graphNodeItems(index: GraphIndex, excludeId?: string): NodePick[] {
-  return [...index.nodesById.values()]
+async function pickGraphNode(index: GraphIndex, title: string, excludeId?: string): Promise<string | undefined> {
+  const items = [...index.nodesById.values()]
     .filter((d) => d.type !== "schema" && d.id !== excludeId)
     .map((d) => ({
       id: d.id,
@@ -1131,10 +1129,7 @@ function graphNodeItems(index: GraphIndex, excludeId?: string): NodePick[] {
       description: String(d.type),
     }))
     .sort((a, b) => a.label.localeCompare(b.label));
-}
-
-async function pickGraphNode(index: GraphIndex, title: string, excludeId?: string): Promise<string | undefined> {
-  const pick = await vscode.window.showQuickPick(graphNodeItems(index, excludeId), {
+  const pick = await vscode.window.showQuickPick(items, {
     title,
     placeHolder: "search nodes...",
     matchOnDescription: true,
