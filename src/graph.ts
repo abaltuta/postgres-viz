@@ -357,42 +357,43 @@ export function buildGraph(
     (e) => nodeIds.has(e.data.source) && nodeIds.has(e.data.target),
   );
 
-  // ── Aggregation: roll row-level (detail) edges up to one card-level edge per
-  // (kind, source card, target card) with a count, so the overview shows a few
-  // hundred card edges instead of thousands of column edges.
+  // ── Aggregation: roll every cross-card relationship up to one directed
+  // card-pair bundle. Original typed edges stay in the payload for reports,
+  // focus views and "all" mode; overview mode draws only these bundles.
   //
   // Invariants the webview relies on:
   //  - `detail: true` ⟺ at least one endpoint is a row (column/trigger/
   //    constraint); these are the edges hidden by default and materialized
   //    lazily.
-  //  - intra-card pairs (constrains, update-of) never aggregate — containment
-  //    already shows them.
-  //  - if a REAL unit-level edge with the same (kind, src, tgt) exists (e.g. a
-  //    whole-table read with no column info, or fn→fn calls), no aggregate is
-  //    emitted: one pair, one card-level edge, never both. ──
-  const unitLevelKeys = new Set<string>();
+  //  - intra-card pairs (constrains, update-of) never aggregate because
+  //    containment already shows them. ──
+  const bundleCounts = new Map<string, Map<EdgeKind, number>>();
   for (const e of edgeList) {
     const [su, tu] = edgeUnits(e.data);
-    if (su === e.data.source && tu === e.data.target) {
-      unitLevelKeys.add(edgeKey(e.data.kind, su, tu));
-    } else {
-      e.data.detail = true;
-    }
+    if (su !== e.data.source || tu !== e.data.target) e.data.detail = true;
+    if (su === tu) continue;
+    const key = `${su}|${tu}`;
+    const counts = bundleCounts.get(key) ?? new Map<EdgeKind, number>();
+    counts.set(e.data.kind, (counts.get(e.data.kind) ?? 0) + 1);
+    bundleCounts.set(key, counts);
   }
-  const aggCounts = new Map<string, number>();
-  for (const e of edgeList) {
-    if (!e.data.detail) continue;
-    const [su, tu] = edgeUnits(e.data);
-    if (su === tu) continue; // intra-card (constrains, update-of, …)
-    const key = edgeKey(e.data.kind, su, tu);
-    aggCounts.set(key, (aggCounts.get(key) ?? 0) + 1);
-  }
-  for (const [key, count] of aggCounts) {
-    if (unitLevelKeys.has(key)) continue; // a real card-level edge already covers the pair
-    const [kind, source, target] = key.split("|") as [EdgeKind, string, string];
-    const data: GraphEdgeData = { id: `agg|${key}`, source, target, kind, agg: true, count };
+  for (const [key, counts] of bundleCounts) {
+    const [source, target] = key.split("|") as [string, string];
+    const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1] || cmp(a[0], b[0]));
+    const kind = ranked[0]![0];
+    const count = ranked.reduce((sum, entry) => sum + entry[1], 0);
+    const data: GraphEdgeData = {
+      id: `agg|${key}`,
+      source,
+      target,
+      kind,
+      agg: true,
+      count,
+      kinds: Object.fromEntries(ranked),
+    };
     const hint = kind === "fk" ? fkLabelHint.get(`${source}|${target}`) : undefined;
-    const suffix = count > 1 ? `×${count}` : "";
+    const suffix =
+      ranked.length > 1 ? `${ranked.length} kinds · ×${count}` : count > 1 ? `×${count}` : "";
     const label = [hint, suffix].filter(Boolean).join(" ");
     if (label) data.label = label;
     edgeList.push({ data });

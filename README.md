@@ -33,7 +33,9 @@ Open the folder in VS Code and press **F5** (Run Extension). In the dev host:
 3. Editor-title commands: search, grid/tree layout selection, edge display mode, view options, faceted filters, fit, relayout, and refresh.
 4. Command palette / connection menu: impact analysis, dependency path reports, snapshot save/diff, JSON/PNG/SVG export, and load diagnostics.
 
-Columns and triggers are drawn *inside* their table (compound nodes). Only columns that participate in at least one dependency are drawn. Table-level edges collapse/expand automatically when you toggle the columns filter.
+Columns and triggers are drawn *inside* their table (compound nodes). Only columns that participate in at least one dependency are drawn. Card mode shows one directional bundle per object pair; selecting an object reveals its typed relationships. All mode hides those bundles and expands row-level detail up to a fixed rendering budget, so large schemas remain responsive.
+
+The graph footer reports visible objects and connections rather than raw database totals. Active schema, object-type, and edge-kind filters are shown with a one-click reset. Row-type filters also update virtual card previews without materializing every table.
 
 ### Settings
 
@@ -78,6 +80,7 @@ pnpm test:db         # uses DATABASE_URL, or postgres://postgres:pg@localhost:54
 - `src/extension.ts` — VS Code command chrome, connection menu, graph cache, reports/exports, DDL viewer.
 - `webview/core.ts` — read-only webview graph helpers for class-derived visibility, unit ownership, call-tree closure, and position snapshots.
 - `webview/cytoscape-adapter.ts` — the only webview layer that writes Cytoscape elements, classes, positions, parent moves, styles, and edge routes.
+- `webview/router.ts` — spatial obstacle index used by optional edge routing; bounded and benchmarked for dense graphs.
 - `webview/main.ts` — webview orchestration, Cytoscape rendering decisions, grid/tree layouts (including dagre-backed tree v2), filters, search, and detail panel.
 
 ## Known limitations

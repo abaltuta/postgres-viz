@@ -18,6 +18,7 @@ export interface MaterializationState {
   cardOfNode: Map<string, string>;
   materialized: Set<string>;
   materializeCap: number;
+  materializeAllRowsCap?: number;
 }
 
 type UnitOfNode = (n: NodeSingular) => NodeSingular;
@@ -66,7 +67,11 @@ export function materializeCard(cy: Core, state: MaterializationState, cardId: s
   });
 }
 
-export function materializeNeighborhood(cy: Core, state: MaterializationState, unitId: string): void {
+export function materializeNeighborhood(
+  cy: Core,
+  state: MaterializationState,
+  unitId: string,
+): void {
   materializeCard(cy, state, unitId);
   const counters = new Set<string>();
   for (const e of state.detailEdgesByCard.get(unitId) ?? []) {
@@ -82,8 +87,21 @@ export function materializeNeighborhood(cy: Core, state: MaterializationState, u
   }
 }
 
-export function materializeAll(cy: Core, state: MaterializationState): void {
-  for (const id of state.rowsByCard.keys()) materializeCard(cy, state, id);
+export function materializeAll(cy: Core, state: MaterializationState, prefs: Prefs): void {
+  const schemaFilter = new Set(prefs.filterSchemas);
+  const typeFilter = new Set<string>(prefs.filterNodeTypes);
+  let rows = 0;
+  for (const [id, definitions] of state.rowsByCard) {
+    const card = cy.getElementById(id);
+    if (card.empty()) continue;
+    const schema = String(card.data("schema") ?? "");
+    const type = String(card.data("type") ?? "");
+    if (schemaFilter.size > 0 && !schemaFilter.has(schema)) continue;
+    if (typeFilter.size > 0 && !typeFilter.has(type)) continue;
+    if (rows + definitions.length > (state.materializeAllRowsCap ?? 4_000)) break;
+    materializeCard(cy, state, id);
+    rows += definitions.length;
+  }
 }
 
 export function dematerializeCard(cy: Core, state: MaterializationState, id: string): void {
@@ -129,7 +147,7 @@ export function applyFilterClasses(
   const typeFilter = new Set<string>(prefs.filterNodeTypes ?? []);
   const edgeKindFilter = new Set<string>(prefs.filterEdgeKinds ?? []);
   if (edgeMode === "all" && state.materialized.size < state.rowsByCard.size && !viewActive) {
-    materializeAll(cy, state);
+    materializeAll(cy, state, prefs);
   }
   cy.batch(() => {
     cy.elements().removeClass("facet-hidden");
@@ -154,8 +172,28 @@ export function applyFilterClasses(
       });
     }
     cy.edges().forEach((e) => {
+      const kindCounts = e.data("kinds") as Record<string, number> | undefined;
+      if (kindCounts) {
+        const visibleKinds = Object.entries(kindCounts).filter(
+          ([kind]) => edgeKindFilter.size === 0 || edgeKindFilter.has(kind),
+        );
+        const visibleCount = visibleKinds.reduce((sum, entry) => sum + entry[1], 0);
+        e.data(
+          "displayLabel",
+          edgeKindFilter.size === 0
+            ? String(e.data("label") ?? "")
+            : visibleKinds.length > 1
+              ? `${visibleKinds.length} kinds · ×${visibleCount}`
+              : visibleCount > 1
+                ? `×${visibleCount}`
+                : "",
+        );
+      }
       if (
-        (edgeKindFilter.size > 0 && !edgeKindFilter.has(String(e.data("kind")))) ||
+        (edgeKindFilter.size > 0 &&
+          !(kindCounts
+            ? Object.keys(kindCounts).some((kind) => edgeKindFilter.has(kind))
+            : edgeKindFilter.has(String(e.data("kind"))))) ||
         hasFacetHiddenAncestor(e.source() as NodeSingular) ||
         hasFacetHiddenAncestor(e.target() as NodeSingular)
       ) {
@@ -163,12 +201,13 @@ export function applyFilterClasses(
       }
     });
     if (edgeMode === "off") cy.edges().addClass("edge-off");
-    else if (edgeMode === "cards") cy.edges("[?detail]").addClass("edge-off");
+    else if (edgeMode === "cards") cy.edges("[!agg]").addClass("edge-off");
+    else cy.edges("[?agg]").addClass("edge-off");
 
     cy.nodes().removeClass("isolated-hidden");
     if (prefs.hideIsolated) {
       const keep = new Set<string>();
-      cy.edges("[!detail]").forEach((e) => {
+      cy.edges("[?agg]").forEach((e) => {
         if (edgeHidden(e as EdgeSingular)) return;
         keep.add(e.source().id());
         keep.add(e.target().id());
@@ -279,13 +318,13 @@ export function markSingleCardEdgesOrthogonal(cy: Core): void {
     const b = e.target().id();
     return a < b ? `${a}|${b}` : `${b}|${a}`;
   };
-  cy.edges("[!detail]").forEach((e) => {
+  cy.edges("[?agg]").forEach((e) => {
     const edge = e as EdgeSingular;
     if (edgeHidden(edge)) return;
     const k = pairKey(edge);
     pairCount.set(k, (pairCount.get(k) ?? 0) + 1);
   });
-  cy.edges("[!detail]").forEach((e) => {
+  cy.edges("[?agg]").forEach((e) => {
     const edge = e as EdgeSingular;
     edge.toggleClass("ortho", !edgeHidden(edge) && (pairCount.get(pairKey(edge)) ?? 0) === 1);
   });
@@ -336,21 +375,8 @@ export function applySelectionClasses(cy: Core, node: NodeSingular, unitOfNode: 
   const core = node.union(node.descendants());
   const detailEdges = core.connectedEdges("[?detail]");
   const unit = unitOfNode(node);
-  const revealedAggKeys = new Set<string>();
-  detailEdges.forEach((e) => {
-    const unitIds = edgeUnitIds(e as EdgeSingular, unitOfNode);
-    revealedAggKeys.add(aggregateEdgeKey(String(e.data("kind")), unitIds.source, unitIds.target));
-  });
-  unit
-    .union(unit.descendants())
-    .connectedEdges("[?agg]")
-    .forEach((e) => {
-      const key = aggregateEdgeKey(String(e.data("kind")), e.source().id(), e.target().id());
-      if (revealedAggKeys.has(key)) {
-        e.addClass("agg-suppressed");
-      }
-    });
-  const revealed = detailEdges.union(core.connectedEdges("[!detail]"));
+  unit.union(unit.descendants()).connectedEdges("[?agg]").addClass("agg-suppressed");
+  const revealed = detailEdges.union(core.connectedEdges("[!agg]"));
   revealed.addClass("revealed hot");
   const hood = core.closedNeighborhood().union(revealed.connectedNodes()).union(node.ancestors());
   const withParents = hood.union(hood.nodes().ancestors());
@@ -358,7 +384,11 @@ export function applySelectionClasses(cy: Core, node: NodeSingular, unitOfNode: 
   withParents.removeClass("dimmed");
 }
 
-export function applyCallTreeColumnFilter(cy: Core, onlyTouched: boolean, touchedRows: ReadonlySet<string>): void {
+export function applyCallTreeColumnFilter(
+  cy: Core,
+  onlyTouched: boolean,
+  touchedRows: ReadonlySet<string>,
+): void {
   cy.batch(() => {
     cy.nodes(':parent[type != "schema"]').forEach((p) => {
       p.children().forEach((r) => {
@@ -421,12 +451,13 @@ export function revealCallTreeEdges(
     e.addClass("revealed");
     revealedPairs.add(aggregateEdgeKey(k, unitIds.source, unitIds.target));
   });
-  cy.edges("[!detail]").forEach((e) => {
+  cy.edges("[!agg][!detail]").forEach((e) => {
     const su = e.source().id();
     const tu = e.target().id();
     const k = String(e.data("kind"));
     if (!onChain(k, su, tu, tu)) return;
-    if (e.data("agg") && revealedPairs.has(aggregateEdgeKey(k, su, tu))) e.addClass("agg-suppressed");
+    if (e.data("agg") && revealedPairs.has(aggregateEdgeKey(k, su, tu)))
+      e.addClass("agg-suppressed");
     else e.addClass("revealed");
   });
 }
@@ -454,7 +485,7 @@ export function clearHoverReveal(cy: Core): void {
 }
 
 export function setHoverReveal(unit: NodeSingular): void {
-  unit.union(unit.descendants()).connectedEdges("[!detail]").addClass("hover-reveal");
+  unit.union(unit.descendants()).connectedEdges("[?agg]").addClass("hover-reveal");
 }
 
 export function resetViewState(cy: Core): void {

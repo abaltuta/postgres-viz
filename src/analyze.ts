@@ -33,13 +33,6 @@ export interface PgParser {
 
 let cachedParser: PgParser | null | undefined;
 
-/**
- * A long-lived pg-query-emscripten instance accumulates WASM heap state and,
- * after a few hundred parse calls, can lock up in a synchronous (and therefore
- * uninterruptible) loop. Instantiation costs ~2 ms, so recycle aggressively.
- */
-const RECYCLE_AFTER_CALLS = 25;
-
 /** A parse stuck in synchronous WASM can only be recovered by killing the worker. */
 const PARSE_TIMEOUT_MS = 5_000;
 const WORKER_RECYCLE_AFTER = 500;
@@ -143,7 +136,30 @@ class WorkerParser implements PgParser {
   }
 }
 
-let workerParser: WorkerParser | null = null;
+class WorkerParserPool implements PgParser {
+  private readonly workers: WorkerParser[];
+  private next = 0;
+
+  constructor(workerPath: string, size: number) {
+    this.workers = Array.from({ length: size }, () => new WorkerParser(workerPath));
+  }
+
+  parseQuery(sql: string): Promise<Json> {
+    const worker = this.workers[this.next++ % this.workers.length]!;
+    return worker.parseQuery(sql);
+  }
+
+  parsePlPgSQL(sql: string): Promise<Json> {
+    const worker = this.workers[this.next++ % this.workers.length]!;
+    return worker.parsePlPgSQL(sql);
+  }
+
+  kill(): void {
+    for (const worker of this.workers) worker.kill();
+  }
+}
+
+let workerParser: WorkerParserPool | null = null;
 
 export function disposeParser(): void {
   workerParser?.kill();
@@ -152,9 +168,8 @@ export function disposeParser(): void {
 }
 
 /**
- * pg-query-emscripten (the real Postgres parser compiled to WASM) is optional at
- * runtime: if it fails to load we fall back to regexes. Its API reports parse
- * failures via an `error` field rather than throwing — normalize to throws.
+ * pg-query-emscripten runs only out of process. If the worker cannot start we
+ * fall back to regex analysis rather than risking synchronous WASM in the host.
  */
 export async function getParser(): Promise<PgParser | null> {
   if (cachedParser !== undefined) return cachedParser;
@@ -162,7 +177,7 @@ export async function getParser(): Promise<PgParser | null> {
   try {
     const workerPath = path.join(__dirname, "parser-worker.js");
     if (existsSync(workerPath)) {
-      workerParser = new WorkerParser(workerPath);
+      workerParser = new WorkerParserPool(workerPath, 2);
       await workerParser.parseQuery("SELECT 1"); // health check
       cachedParser = workerParser;
       return cachedParser;
@@ -171,44 +186,7 @@ export async function getParser(): Promise<PgParser | null> {
     workerParser?.kill();
     workerParser = null;
   }
-  // In-process fallback with instance recycling.
-  try {
-    const mod: Json = await import("pg-query-emscripten");
-    const factory = typeof mod === "function" ? mod : (mod?.default ?? mod);
-    if (typeof factory !== "function") {
-      cachedParser = null;
-      return cachedParser;
-    }
-    let instance: Json = null;
-    let calls = 0;
-    const get = async (): Promise<Json> => {
-      if (!instance || calls >= RECYCLE_AFTER_CALLS) {
-        instance = await factory();
-        calls = 0;
-      }
-      calls++;
-      return instance;
-    };
-    const probe = await get();
-    if (typeof probe?.parse !== "function" || typeof probe?.parsePlpgsql !== "function") {
-      cachedParser = null;
-      return cachedParser;
-    }
-    cachedParser = {
-      async parseQuery(sql: string): Promise<Json> {
-        const r = (await get()).parse(sql);
-        if (r?.error) throw new Error(String(r.error.message ?? "parse error"));
-        return r?.parse_tree;
-      },
-      async parsePlPgSQL(sql: string): Promise<Json> {
-        const r = (await get()).parsePlpgsql(sql);
-        if (r?.error) throw new Error(String(r.error.message ?? "parse error"));
-        return r;
-      },
-    };
-  } catch {
-    cachedParser = null;
-  }
+  cachedParser = null;
   return cachedParser;
 }
 
@@ -1044,19 +1022,27 @@ export async function analyzeAll(
   );
 
   const out = new Map<number, FuncRefs>();
+  let next = 0;
   let done = 0;
-  for (const fn of candidates) {
-    await yieldEventLoop();
-    const start = Date.now();
-    const refs = await analyzeFunc(fn, resolver, triggerRelsByFunc.get(fn.oid) ?? [], parser);
-    out.set(fn.oid, refs);
-    done++;
-    log(
-      `[${done}/${candidates.length}] ${fn.schema}.${fn.name}(): ` +
-        `${refs.parsed ? "parsed" : "regex fallback"} — ` +
-        `${refs.reads.size} read rels, ${refs.inserts.size + refs.updates.size + refs.deletes.size + refs.writes.size} write rels, ` +
-        `${refs.modifies.size} modified rels, ${refs.calls.size} calls (${Date.now() - start} ms)`,
-    );
-  }
+  await Promise.all(
+    Array.from({ length: Math.min(2, candidates.length) }, async () => {
+      for (;;) {
+        const index = next++;
+        const fn = candidates[index];
+        if (!fn) return;
+        await yieldEventLoop();
+        const start = Date.now();
+        const refs = await analyzeFunc(fn, resolver, triggerRelsByFunc.get(fn.oid) ?? [], parser);
+        out.set(fn.oid, refs);
+        done++;
+        log(
+          `[${done}/${candidates.length}] ${fn.schema}.${fn.name}(): ` +
+            `${refs.parsed ? "parsed" : "regex fallback"} — ` +
+            `${refs.reads.size} read rels, ${refs.inserts.size + refs.updates.size + refs.deletes.size + refs.writes.size} write rels, ` +
+            `${refs.modifies.size} modified rels, ${refs.calls.size} calls (${Date.now() - start} ms)`,
+        );
+      }
+    }),
+  );
   return out;
 }

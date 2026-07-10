@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { withConnectedClient, type PgClientLike } from "../src/db";
+import { ClientCancelledError, withConnectedClient, type PgClientLike } from "../src/db";
 
 class FakeClient implements PgClientLike {
   calls: string[] = [];
@@ -36,6 +36,44 @@ async function main(): Promise<void> {
     const value = await withConnectedClient(client, async () => 42);
     assert.equal(value, 42);
     assert.deepEqual(client.calls, ["connect", "end"], "successful use closes the client");
+  }
+
+  {
+    const client = new FakeClient();
+    let cancelled = false;
+    let cancelListener = (): void => undefined;
+    let finish = (_value: number): void => undefined;
+    const operation = withConnectedClient(
+      client,
+      async () =>
+        new Promise<number>((resolve) => {
+          finish = resolve;
+        }),
+      {
+        get isCancellationRequested() {
+          return cancelled;
+        },
+        onCancellationRequested(listener) {
+          cancelListener = listener;
+          return { dispose: () => undefined };
+        },
+      },
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    cancelled = true;
+    cancelListener();
+    finish(42);
+    await assert.rejects(
+      operation,
+      ClientCancelledError,
+      "cancellation closes active database work",
+    );
+    assert.equal(
+      client.calls.filter((call) => call === "end").length,
+      1,
+      "cancellation closes once",
+    );
   }
 
   {
@@ -95,7 +133,7 @@ async function main(): Promise<void> {
     assert.equal(reason, undefined, "undefined cleanup errors still reject after success");
   }
 
-  console.log("db OK - client lifecycle cleanup preserves all rejection reasons");
+  console.log("db OK - client lifecycle cleanup, cancellation, and rejection reasons");
 }
 
 main().catch((err) => {

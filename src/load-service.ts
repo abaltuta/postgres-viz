@@ -1,12 +1,8 @@
 import { analyzeAll } from "./analyze";
-import { withClient } from "./db";
+import { ClientCancelledError, withClient, type CancellationLike } from "./db";
 import { buildGraph } from "./graph";
 import { introspect, type Log } from "./introspect";
 import type { GraphPayload } from "./types";
-
-export interface CancellationLike {
-  readonly isCancellationRequested: boolean;
-}
 
 export interface LoadServiceOptions {
   conn: string;
@@ -96,62 +92,67 @@ export async function loadGraphFromDatabase(opts: LoadServiceOptions): Promise<L
   const { include, exclude } = normalizeSchemaFilter(opts.schemas, opts.excludeSchemas);
 
   throwIfCancelled(opts.cancellation);
-  return withClient(opts.conn, async (client) => {
-    throwIfCancelled(opts.cancellation);
-    log("connected; introspecting catalogs...");
-    const catalog = await introspect(
-      client,
-      { include, exclude },
-      (msg) => {
+  try {
+    return await withClient(
+      opts.conn,
+      async (client) => {
         throwIfCancelled(opts.cancellation);
-        log(msg);
+        log("connected; introspecting catalogs...");
+        const catalog = await introspect(client, { include, exclude }, (msg) => {
+          throwIfCancelled(opts.cancellation);
+          log(msg);
+        });
+
+        throwIfCancelled(opts.cancellation);
+        const analysis = await analyzeAll(catalog, (msg) => {
+          throwIfCancelled(opts.cancellation);
+          analysisLog(msg);
+        });
+
+        throwIfCancelled(opts.cancellation);
+        log("building graph...");
+        const graph = buildGraph(catalog, analysis, { includeFks: opts.includeFks });
+        throwIfCancelled(opts.cancellation);
+        const database: string = (await client.query("SELECT current_database() AS db")).rows[0].db;
+        const parserFallbacks = [...analysis.values()].filter((refs) => !refs.parsed).length;
+        const warnings =
+          graph.nodes.length > 3000
+            ? ['large graph - set "postgresViz.schemas" to a subset (e.g. ["public"]) to trim it']
+            : [];
+
+        return {
+          graph,
+          database,
+          diagnostics: {
+            elapsedMs: Date.now() - startedAt,
+            database,
+            schemas: { include, exclude },
+            catalog: {
+              relations: catalog.rels.length,
+              columns: catalog.cols.length,
+              functions: catalog.funcs.length,
+              triggers: catalog.triggers.length,
+              constraints: catalog.constraints.length,
+              indexes: catalog.indexes.length,
+            },
+            analysis: {
+              analyzedFunctions: analysis.size,
+              parserFallbacks,
+              skippedFunctions: catalog.funcs.length - analysis.size,
+            },
+            graph: {
+              nodes: graph.nodes.length,
+              edges: graph.edges.length,
+              stats: graph.stats,
+            },
+            warnings,
+          },
+        };
       },
+      opts.cancellation,
     );
-
-    throwIfCancelled(opts.cancellation);
-    const analysis = await analyzeAll(catalog, (msg) => {
-      throwIfCancelled(opts.cancellation);
-      analysisLog(msg);
-    });
-
-    throwIfCancelled(opts.cancellation);
-    log("building graph...");
-    const graph = buildGraph(catalog, analysis, { includeFks: opts.includeFks });
-    throwIfCancelled(opts.cancellation);
-    const database: string = (await client.query("SELECT current_database() AS db")).rows[0].db;
-    const parserFallbacks = [...analysis.values()].filter((refs) => !refs.parsed).length;
-    const warnings =
-      graph.nodes.length > 3000
-        ? ['large graph - set "postgresViz.schemas" to a subset (e.g. ["public"]) to trim it']
-        : [];
-
-    return {
-      graph,
-      database,
-      diagnostics: {
-        elapsedMs: Date.now() - startedAt,
-        database,
-        schemas: { include, exclude },
-        catalog: {
-          relations: catalog.rels.length,
-          columns: catalog.cols.length,
-          functions: catalog.funcs.length,
-          triggers: catalog.triggers.length,
-          constraints: catalog.constraints.length,
-          indexes: catalog.indexes.length,
-        },
-        analysis: {
-          analyzedFunctions: analysis.size,
-          parserFallbacks,
-          skippedFunctions: catalog.funcs.length - analysis.size,
-        },
-        graph: {
-          nodes: graph.nodes.length,
-          edges: graph.edges.length,
-          stats: graph.stats,
-        },
-        warnings,
-      },
-    };
-  });
+  } catch (error) {
+    if (error instanceof ClientCancelledError) throw new LoadCancelledError();
+    throw error;
+  }
 }

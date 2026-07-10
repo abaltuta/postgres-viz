@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { createHash } from "node:crypto";
 import { disposeParser } from "./analyze";
 import {
   ConnectionProfileStore,
@@ -12,7 +13,12 @@ import { GraphIndex } from "./graph-index";
 import { buildImpactReport, buildPathReport, nodeDisplayName } from "./graph-reports";
 import { indexEntries, keyVariants, type LocatedEntry, parseHclSymbols } from "./hcl";
 import { HclHoverProvider, HclLensProvider } from "./lens-providers";
-import { loadGraphFromDatabase, LoadCancelledError, type LoadDiagnostics } from "./load-service";
+import {
+  loadGraphFromDatabase,
+  LoadCancelledError,
+  type LoadDiagnostics,
+  type LoadServiceResult,
+} from "./load-service";
 import { fuzzyIncludes } from "./match";
 import {
   DEFAULT_PREFS,
@@ -49,6 +55,7 @@ function legacySecretKey(): string {
 }
 
 let lastConnection: string | undefined;
+let activeProfileId = "";
 let activeProfileName = "";
 let lastDiagnostics: LoadDiagnostics | undefined;
 let output: vscode.OutputChannel | undefined;
@@ -112,6 +119,7 @@ function updateStatusItem(): void {
 interface GraphCacheEntry {
   graph: GraphPayload;
   database: string;
+  profileId: string;
   diagnostics?: LoadDiagnostics;
   builtAt: number;
 }
@@ -143,11 +151,13 @@ async function getActiveConnection(): Promise<string | undefined> {
   const active = await connectionProfiles?.activeConnection();
   if (!active) {
     lastConnection = undefined;
+    activeProfileId = "";
     activeProfileName = "";
     updateStatusItem();
     return undefined;
   }
   lastConnection = active.conn;
+  activeProfileId = active.profile.id;
   activeProfileName = active.profile.name;
   updateStatusItem();
   return active.conn;
@@ -155,7 +165,9 @@ async function getActiveConnection(): Promise<string | undefined> {
 
 async function promptAndSaveProfile(existing?: ConnectionProfile): Promise<string | undefined> {
   const conn = await vscode.window.showInputBox({
-    title: existing ? `Postgres Viz: edit ${existing.name}` : "Postgres Viz: add connection profile",
+    title: existing
+      ? `Postgres Viz: edit ${existing.name}`
+      : "Postgres Viz: add connection profile",
     prompt: "Postgres connection string",
     placeHolder: "postgres://user:password@localhost:5432/dbname",
     ignoreFocusOut: true,
@@ -173,6 +185,7 @@ async function promptAndSaveProfile(existing?: ConnectionProfile): Promise<strin
   const profile = await connectionProfiles?.save(name.trim(), trimmed, existing?.id);
   if (!profile) return undefined;
   activeProfileName = profile.name;
+  activeProfileId = profile.id;
   lastConnection = trimmed;
   updateStatusItem();
   return trimmed;
@@ -354,6 +367,7 @@ let sqlMigrationIndex: SqlMigrationIndex | undefined;
 /** the most recently loaded graph — backs the symbol provider */
 let currentGraph: GraphPayload | null = null;
 let currentDatabase = "";
+let cachedGraphProfileId = "";
 
 const SYMBOL_KINDS: Partial<Record<NodeType, vscode.SymbolKind>> = {
   table: vscode.SymbolKind.Class,
@@ -504,6 +518,14 @@ export function activate(context: vscode.ExtensionContext): void {
       updateStatusItem();
     },
     onRefresh: reloadLastGraph,
+    onResetFilters: () => {
+      setPrefs({
+        ...prefs,
+        filterSchemas: [],
+        filterNodeTypes: [],
+        filterEdgeKinds: [],
+      });
+    },
     onOpenDdl: async (nodeType, oid, label, schema, name) => {
       await openDdl(nodeType, oid, label, name ? { schema, name, display: label } : undefined);
     },
@@ -602,22 +624,31 @@ async function load(): Promise<void> {
   await loadGraph(conn);
 }
 
-let loading = false;
+let loadGeneration = 0;
+let activeLoadCancellation: vscode.CancellationTokenSource | undefined;
 
 async function reloadLastGraph(): Promise<void> {
   if (lastConnection) await loadGraph(lastConnection, { force: true });
 }
 
 async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<void> {
-  if (loading) {
-    logLine("load already in progress — ignoring request");
-    return;
-  }
+  const generation = ++loadGeneration;
+  activeLoadCancellation?.cancel();
+  activeLoadCancellation?.dispose();
+  const loadCancellation = new vscode.CancellationTokenSource();
+  activeLoadCancellation = loadCancellation;
+  const profileId = activeProfileId;
   const cfg = vscode.workspace.getConfiguration("postgresViz");
   const schemas = cfg.get<string[]>("schemas") ?? [];
   const excludeSchemas = cfg.get<string[]>("excludeSchemas") ?? [];
   const includeFks = cfg.get<boolean>("includeForeignKeys") ?? true;
-  const key = JSON.stringify([conn, schemas, excludeSchemas, includeFks]);
+  const key = JSON.stringify([
+    profileId,
+    createHash("sha256").update(conn).digest("hex"),
+    schemas,
+    excludeSchemas,
+    includeFks,
+  ]);
   if (!opts.force) {
     const cached = graphCache.get(key);
     if (cached) {
@@ -625,6 +656,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
       logLine(`cache hit — serving graph built ${age}s ago (refresh to rebuild)`);
       currentGraph = cached.graph;
       currentDatabase = cached.database;
+      cachedGraphProfileId = profileId;
       lastDiagnostics = cached.diagnostics;
       treeProvider?.setGraph(cached.graph);
       hclLensProvider?.refresh();
@@ -636,14 +668,27 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
       });
       postPrefs();
       updateStatusItem();
+      loadCancellation.dispose();
+      if (activeLoadCancellation === loadCancellation) activeLoadCancellation = undefined;
       return;
     }
   }
-  loading = true;
+  const switchingProfiles = Boolean(currentGraph && cachedGraphProfileId !== profileId);
+  if (switchingProfiles) {
+    currentGraph = null;
+    currentDatabase = "";
+    cachedGraphProfileId = "";
+    lastDiagnostics = undefined;
+    lastStatsText = "";
+    treeProvider?.setGraph(null);
+    postToWebview({ type: "clear", message: `Loading ${activeProfileName}...` });
+    updateStatusItem();
+  }
   try {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: "Postgres Viz", cancellable: true },
       async (progress, token) => {
+        const progressCancellation = token.onCancellationRequested(() => loadCancellation.cancel());
         const log = (msg: string): void => {
           logLine(msg);
           progress.report({ message: msg.length > 64 ? `${msg.slice(0, 61)}…` : msg });
@@ -658,15 +703,24 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
         };
         logLine(`─── visualize ${redact(conn)} ───`);
         log("connecting (10s timeout)…");
-        const { graph, database, diagnostics } = await loadGraphFromDatabase({
-          conn,
-          schemas,
-          excludeSchemas,
-          includeFks,
-          log,
-          analysisLog,
-          cancellation: token,
-        });
+        let result: LoadServiceResult;
+        try {
+          result = await loadGraphFromDatabase({
+            conn,
+            schemas,
+            excludeSchemas,
+            includeFks,
+            log,
+            analysisLog,
+            cancellation: loadCancellation.token,
+          });
+        } finally {
+          progressCancellation.dispose();
+        }
+        const { graph, database, diagnostics } = result;
+        if (generation !== loadGeneration || profileId !== activeProfileId) {
+          throw new LoadCancelledError();
+        }
         logLine(
           `graph ready: ${graph.nodes.length} nodes, ${graph.edges.length} edges ` +
             `(${JSON.stringify(graph.stats)}) — total ${diagnostics.elapsedMs} ms; ` +
@@ -674,13 +728,14 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
         );
         for (const warning of diagnostics.warnings) logLine(`note: ${warning}`);
         graphCache.delete(key); // re-insert so Map order stays LRU
-        graphCache.set(key, { graph, database, diagnostics, builtAt: Date.now() });
+        graphCache.set(key, { graph, database, profileId, diagnostics, builtAt: Date.now() });
         if (graphCache.size > GRAPH_CACHE_MAX) {
           const oldest = graphCache.keys().next().value;
           if (oldest !== undefined) graphCache.delete(oldest);
         }
         currentGraph = graph;
         currentDatabase = database;
+        cachedGraphProfileId = profileId;
         lastDiagnostics = diagnostics;
         treeProvider?.setGraph(graph);
         hclLensProvider?.refresh();
@@ -692,10 +747,13 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
     );
   } catch (err) {
     if (err instanceof LoadCancelledError) {
-      logLine("load cancelled");
-      postToWebview({ type: "status", message: "load cancelled" });
+      if (generation === loadGeneration) {
+        logLine("load cancelled");
+        postToWebview({ type: "status", message: "load cancelled" });
+      }
       return;
     }
+    if (generation !== loadGeneration) return;
     logLine(`ERROR: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
     postToWebview({
       type: "error",
@@ -703,7 +761,11 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
     });
     showError(err);
   } finally {
-    loading = false;
+    if (activeLoadCancellation === loadCancellation) {
+      activeLoadCancellation.dispose();
+      activeLoadCancellation = undefined;
+    }
+    updateStatusItem();
   }
 }
 
@@ -796,7 +858,7 @@ async function connectionMenu(): Promise<void> {
   const profileItems: Item[] =
     connectionProfiles?.list().map((profile) => ({
       id: `profile:${profile.id}`,
-      label: `${profile.name === activeProfileName ? "$(check) " : ""}${profile.name}`,
+      label: `${profile.id === activeProfileId ? "$(check) " : ""}${profile.name}`,
       description: "switch profile",
     })) ?? [];
   const items: Item[] = [
@@ -902,19 +964,34 @@ async function connectionMenu(): Promise<void> {
       const active = connectionProfiles?.activeProfile();
       if (!active) return;
       const conn = await promptAndSaveProfile(active);
-      if (conn) await loadGraph(conn, { force: true });
+      if (conn) {
+        for (const [key, entry] of graphCache) {
+          if (entry.profileId === active.id) graphCache.delete(key);
+        }
+        await loadGraph(conn, { force: true });
+      }
       break;
     }
     case "forget": {
       const active = connectionProfiles?.activeProfile();
       if (active) await connectionProfiles?.delete(active.id);
+      if (active) {
+        for (const [key, entry] of graphCache) {
+          if (entry.profileId === active.id) graphCache.delete(key);
+        }
+      }
+      loadGeneration++;
+      activeLoadCancellation?.cancel();
       lastConnection = undefined;
+      activeProfileId = connectionProfiles?.activeProfile()?.id ?? "";
       activeProfileName = connectionProfiles?.activeProfile()?.name ?? "";
       currentGraph = null;
       currentDatabase = "";
+      cachedGraphProfileId = "";
       lastDiagnostics = undefined;
       lastStatsText = "";
       treeProvider?.setGraph(null);
+      postToWebview({ type: "clear", message: "No database loaded." });
       updateStatusItem();
       break;
     }
@@ -963,13 +1040,13 @@ async function chooseEdgeMode(): Promise<void> {
     {
       value: "cards",
       label: "Cards",
-      description: "one rolled-up edge per pair of tables/functions",
+      description: "one bundled connection per pair of tables/functions",
       picked: prefs.edgeMode === "cards",
     },
     {
       value: "all",
       label: "All",
-      description: "every per-column edge",
+      description: "typed and per-column edges within the detail budget",
       picked: prefs.edgeMode === "all",
     },
   ];
@@ -1016,9 +1093,7 @@ async function facetedFilters(): Promise<void> {
     graph.nodes.map((n) => n.data.schema).filter((s): s is string => Boolean(s)),
   );
   const nodeTypes = sortedUnique(
-    graph.nodes
-      .map((n) => n.data.type)
-      .filter((t): t is NodeType => t !== "schema"),
+    graph.nodes.map((n) => n.data.type).filter((t): t is NodeType => t !== "schema"),
   );
   const edgeKinds = sortedUnique(graph.edges.map((e) => e.data.kind));
 
@@ -1098,7 +1173,11 @@ function rowNode(d: GraphNodeData): boolean {
   return SYMBOL_ROWS.has(d.type);
 }
 
-async function pickGraphNode(index: GraphIndex, title: string, excludeId?: string): Promise<string | undefined> {
+async function pickGraphNode(
+  index: GraphIndex,
+  title: string,
+  excludeId?: string,
+): Promise<string | undefined> {
   const items = [...index.nodesById.values()]
     .filter((d) => d.type !== "schema" && d.id !== excludeId)
     .map((d) => ({
@@ -1191,7 +1270,7 @@ function decodePngExport(dataUri: unknown): Buffer | undefined {
     : undefined;
 }
 
-const EXPORT_FILENAME_FORBIDDEN = new Set(["<", ">", ":", "\"", "/", "\\", "|", "?", "*"]);
+const EXPORT_FILENAME_FORBIDDEN = new Set(["<", ">", ":", '"', "/", "\\", "|", "?", "*"]);
 
 function exportDefaultUri(extension: "png" | "svg"): vscode.Uri {
   const source = currentDatabase || "graph";

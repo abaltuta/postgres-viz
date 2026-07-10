@@ -172,6 +172,8 @@ export interface GraphEdgeData {
   agg?: boolean;
   /** number of detail edges this aggregate stands for */
   count?: number;
+  /** per-kind counts for a card-pair overview bundle */
+  kinds?: Partial<Record<EdgeKind, number>>;
 }
 
 export interface GraphPayload {

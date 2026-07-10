@@ -2,7 +2,7 @@
   "name": "postgres-viz",
   "displayName": "Postgres Viz",
   "description": "Call-graph & dependency visualizer for PostgreSQL: triggers, views, PL/pgSQL functions, tables and columns.",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "publisher": "baltuta",
   "private": true,
   "packageManager": "pnpm@11.9.0",
@@ -325,7 +325,7 @@
     "typecheck": "tsc --noEmit -p . && tsc --noEmit -p webview",
     "lint": "oxlint src webview test scripts",
     "format": "oxfmt src webview test scripts esbuild.mjs",
-    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/db.js && node dist-test/ddl.js && node dist-test/connection-profiles.js && node dist-test/load-service.js && node dist-test/protocol.js && node dist-test/parser-worker-ipc.js && node dist-test/graph-diff.js && node dist-test/graph-index.js && node dist-test/graph-reports.js && node dist-test/tree-model.js && node dist-test/tree-provider.js && node dist-test/webview.js && node dist-test/webview-controller.js && node dist-test/hcl.js && node dist-test/sql-migrations.js && node dist-test/match.js && node dist-test/lenses.js && node dist-test/lens-providers.js && node dist-test/ddl-symbols.js && node dist-test/ddl-symbol-provider.js",
+    "smoke": "node esbuild.mjs --smoke && node dist-test/smoke.js && node dist-test/db.js && node dist-test/ddl.js && node dist-test/connection-profiles.js && node dist-test/load-service.js && node dist-test/protocol.js && node dist-test/parser-worker-ipc.js && node dist-test/graph-diff.js && node dist-test/graph-index.js && node dist-test/graph-reports.js && node dist-test/tree-model.js && node dist-test/tree-provider.js && node dist-test/webview.js && node dist-test/webview-controller.js && node dist-test/router.js && node dist-test/hcl.js && node dist-test/sql-migrations.js && node dist-test/match.js && node dist-test/lenses.js && node dist-test/lens-providers.js && node dist-test/ddl-symbols.js && node dist-test/ddl-symbol-provider.js",
     "test:db": "node esbuild.mjs --smoke && node dist-test/integration.js",
     "test:db:docker": "node scripts/test-db.mjs",
     "package": "pnpm build && vsce package --no-dependencies"

@@ -7,7 +7,7 @@ import {
   type Prefs,
   type WebviewToHostMessage,
 } from "../src/protocol";
-import type { GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
+import type { EdgeKind, GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
 import {
   aggregateMemberLabels,
   allCardUnits as coreCardUnits,
@@ -51,6 +51,7 @@ import {
   revealCallTreeEdges,
   setHoverReveal,
 } from "./cytoscape-adapter";
+import { ObstacleIndex } from "./router";
 
 const vscode = acquireVsCodeApi();
 
@@ -92,7 +93,6 @@ const ROW_TYPES = new Set(["column", "trigger", "constraint", "index"]);
 
 let cy: Core | null = null;
 let database = "";
-let lastStats: Record<string, number> = {};
 
 /**
  * Virtual rows: the full row set lives in these maps; column/trigger/constraint
@@ -105,11 +105,13 @@ const cardOfNode = new Map<string, string>(); // row id → card id
 const nodeDefById = new Map<string, NodeDef>();
 const materialized = new Set<string>();
 const MATERIALIZE_CAP = 30;
+const MATERIALIZE_ALL_ROWS_CAP = 4_000;
 
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
 function hidePanel(): void {
   el("panel").classList.add("hidden");
+  requestAnimationFrame(() => cy?.resize());
 }
 
 function materializationState() {
@@ -119,6 +121,7 @@ function materializationState() {
     cardOfNode,
     materialized,
     materializeCap: MATERIALIZE_CAP,
+    materializeAllRowsCap: MATERIALIZE_ALL_ROWS_CAP,
   };
 }
 
@@ -142,7 +145,10 @@ const HEADER_H = 22;
 const MAX_ART_ROWS = 30;
 
 function buildCardArt(card: NodeDef): void {
-  const all = rowsByCard.get(card.data.id) ?? [];
+  const rowTypeFilter = new Set(prefs.filterNodeTypes);
+  const all = (rowsByCard.get(card.data.id) ?? []).filter(
+    (row) => rowTypeFilter.size === 0 || rowTypeFilter.has(row.data.type),
+  );
   const rows = all.slice(0, MAX_ART_ROWS);
   const extra = all.length - rows.length;
   let maxLabelLength = card.data.label.length;
@@ -349,7 +355,9 @@ function buildStyle(): cytoscape.StylesheetJson {
       style: {
         width: 1.4,
         opacity: 0.55,
-        label: "data(label)",
+        label: "data(displayLabel)",
+        "line-color": "#8993A4",
+        "target-arrow-color": "#8993A4",
         "font-size": 8,
         "min-zoomed-font-size": 7,
         color: text,
@@ -455,7 +463,6 @@ function render(graph: GraphPayload): void {
   window.clearTimeout(zoomNudge);
   clearViewUiState();
   hidePanel();
-  lastStats = graph.stats;
   applySchemaGrouping(false);
   applyFilters();
   runLayout();
@@ -481,6 +488,7 @@ function applyFilters(): void {
   applyFilterClasses(cy, materializationState(), prefs, edgeMode(), Boolean(view));
   restackRows();
   updateStats();
+  buildLegend();
 }
 
 /**
@@ -653,7 +661,7 @@ function unitAdjacency(units: NodeSingular[]): {
     out.set(u.id(), new Set());
     degree.set(u.id(), 0);
   }
-  cy!.edges("[!detail]").forEach((e) => {
+  cy!.edges("[?agg]").forEach((e) => {
     if (edgeHidden(e as EdgeSingular)) return;
     const s = e.source().id();
     const t = e.target().id();
@@ -773,40 +781,6 @@ function layoutTree(units: NodeSingular[]): void {
 // the target from its open side. Routed edges use per-edge style bypasses
 // (curve-style: segments), cleared and recomputed after every layout/reveal.
 
-interface Box {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-}
-
-/** Liang-Barsky style segment-vs-rect test. */
-function segmentHitsBox(ax: number, ay: number, bx: number, by: number, r: Box): boolean {
-  let t0 = 0;
-  let t1 = 1;
-  const dx = bx - ax;
-  const dy = by - ay;
-  const clip = (p: number, q: number): boolean => {
-    if (p === 0) return q >= 0;
-    const t = q / p;
-    if (p < 0) {
-      if (t > t1) return false;
-      if (t > t0) t0 = t;
-    } else {
-      if (t < t0) return false;
-      if (t < t1) t1 = t;
-    }
-    return true;
-  };
-  return (
-    clip(-dx, ax - r.x1) &&
-    clip(dx, r.x2 - ax) &&
-    clip(-dy, ay - r.y1) &&
-    clip(dy, r.y2 - ay) &&
-    t0 <= t1
-  );
-}
-
 /** True when an edge is actually being drawn right now (class-derived). */
 function edgeShownForRouting(e: EdgeSingular): boolean {
   if (e.hasClass("agg-suppressed") || edgeHidden(e)) return false;
@@ -814,7 +788,8 @@ function edgeShownForRouting(e: EdgeSingular): boolean {
   if (!revealed) {
     const mode = edgeMode();
     if (mode === "off") return false;
-    if (mode === "cards" && e.data("detail")) return false;
+    if (mode === "cards" && !e.data("agg")) return false;
+    if (mode === "all" && e.data("agg")) return false;
   }
   return isShown(e.source() as NodeSingular) && isShown(e.target() as NodeSingular);
 }
@@ -836,29 +811,28 @@ function routeEdgesAroundCards(): void {
     return { id: u.id(), box: { x1: b.x1 - 10, y1: b.y1 - 10, x2: b.x2 + 10, y2: b.y2 + 10 } };
   });
   if (boxes.length === 0) return;
-  const busX = Math.min(...boxes.map((b) => b.box.x1)) - 60;
+  const obstacleIndex = new ObstacleIndex(boxes);
+  let inspected = 0;
   cy.edges().forEach((edge) => {
     const e = edge as EdgeSingular;
-    if (!edgeShownForRouting(e)) return;
+    if (!edgeShownForRouting(e) || inspected++ >= 2_000) return;
     const sU = unitOf(e.source() as NodeSingular).id();
     const tU = unitOf(e.target() as NodeSingular).id();
     if (sU === tU) return;
     const sp = e.source().position();
     const tp = e.target().position();
-    const blocked = boxes.some(
-      (b) => b.id !== sU && b.id !== tU && segmentHitsBox(sp.x, sp.y, tp.x, tp.y, b.box),
-    );
+    const blocked = obstacleIndex.intersects(sp.x, sp.y, tp.x, tp.y, sU, tU);
     if (!blocked) return;
-    const sBox = boxes.find((b) => b.id === sU)?.box;
-    const tBox = boxes.find((b) => b.id === tU)?.box;
+    const sBox = obstacleIndex.box(sU);
+    const tBox = obstacleIndex.box(tU);
     const down = tp.y >= sp.y;
     const outY = down ? (sBox?.y2 ?? sp.y) + 6 : (sBox?.y1 ?? sp.y) - 6;
     const inY = down ? (tBox?.y1 ?? tp.y) - 6 : (tBox?.y2 ?? tp.y) + 6;
     // Absolute waypoints become cytoscape relative segment-weights/-distances.
     applyEdgeSegments(routedEdges, e, sp, tp, [
       { x: sp.x, y: outY },
-      { x: busX, y: outY },
-      { x: busX, y: inY },
+      { x: obstacleIndex.busX, y: outY },
+      { x: obstacleIndex.busX, y: inY },
       { x: tp.x, y: inY },
     ]);
   });
@@ -1045,7 +1019,7 @@ function focusNode(node: NodeSingular): void {
   if (!cy) return;
   const unit = unitOf(node);
   const keep = new Set<string>([unit.id()]);
-  cy.edges("[!detail]").forEach((e) => {
+  cy.edges("[?agg]").forEach((e) => {
     if (edgeHidden(e as EdgeSingular)) return;
     if (e.source().id() === unit.id()) keep.add(e.target().id());
     if (e.target().id() === unit.id()) keep.add(e.source().id());
@@ -1201,11 +1175,15 @@ const PASSIVE_KIND: Record<string, string> = {
 function renderPanel(node: NodeSingular): void {
   const d = node.data() as GraphNodeData;
   el("panel").classList.remove("hidden");
+  requestAnimationFrame(() => {
+    cy?.resize();
+    if (cy) cy.animate({ center: { eles: node }, duration: 150 } as never);
+  });
   const panel = el("panel-body");
   postToHost({ type: "nodeSelected", id: node.id() });
   const isCard = rowsByCard.has(node.id()) || node.isParent();
   const edges = (
-    isCard ? node.union(node.descendants()).connectedEdges("[!detail]") : node.connectedEdges()
+    isCard ? node.union(node.descendants()).connectedEdges("[?agg]") : node.connectedEdges("[!agg]")
   ).filter((e) => edgeShownByClasses(e as EdgeSingular));
   const records: {
     kind: string;
@@ -1240,14 +1218,35 @@ function renderPanel(node: NodeSingular): void {
       ? String(other.parent().first().data("label") ?? "")
       : "";
     const display = owner ? `${owner}.${otherData.label}` : otherData.label;
-    const kindWord = outgoing ? data.kind : (PASSIVE_KIND[data.kind] ?? `${data.kind} by`);
-    const kindLabel = `${kindWord}${data.count && data.count > 1 ? ` ×${data.count}` : ""}`;
+    const visibleKindCounts = data.kinds
+      ? Object.fromEntries(
+          Object.entries(data.kinds).filter(
+            ([kind]) =>
+              prefs.filterEdgeKinds.length === 0 ||
+              prefs.filterEdgeKinds.includes(kind as EdgeKind),
+          ),
+        )
+      : undefined;
+    const kindLabel = visibleKindCounts
+      ? Object.entries(visibleKindCounts)
+          .map(
+            ([kind, count]) =>
+              `${outgoing ? kind : (PASSIVE_KIND[kind] ?? `${kind} by`)}${count > 1 ? ` ×${count}` : ""}`,
+          )
+          .join(", ")
+      : `${outgoing ? data.kind : (PASSIVE_KIND[data.kind] ?? `${data.kind} by`)}${data.count && data.count > 1 ? ` ×${data.count}` : ""}`;
     // Aggregate edge members come from the payload when detail edges are not materialized.
     const cols = data.agg
-      ? aggregateMemberLabels(data, detailEdgesByCard, nodeDefById, cardOfNode, ROW_TYPES)
+      ? aggregateMemberLabels(
+          { ...data, kinds: visibleKindCounts },
+          detailEdgesByCard,
+          nodeDefById,
+          cardOfNode,
+          ROW_TYPES,
+        )
       : "";
     (outgoing ? outRows : inRows).push(`<li data-node="${esc(other.id())}">
-        <span class="kind" style="color:${EDGE_COLORS[data.kind] ?? "#8993A4"}">${outgoing ? "→" : "←"} ${esc(kindLabel)}</span>
+        <span class="kind" style="color:${data.agg ? "#8993A4" : (EDGE_COLORS[data.kind] ?? "#8993A4")}">${outgoing ? "→" : "←"} ${esc(kindLabel)}</span>
         <span class="name">${esc(display)}</span>
         <small>${esc(otherData.type)}</small>
         ${cols ? `<span class="cols">${esc(cols)}</span>` : ""}
@@ -1269,8 +1268,8 @@ function renderPanel(node: NodeSingular): void {
       <button id="focus-btn" class="${view?.mode === "focus" && view.rootId === node.id() ? "active-focus" : ""}">Focus</button>
       ${canCallTree ? `<button id="calltree-btn" class="${view?.mode === "calltree" && view.rootId === node.id() ? "active-calltree" : ""}">Call tree</button>` : ""}
     </div>
-    ${outRows.length > 0 ? `<details open><summary>Uses (${outRows.length})</summary><ul class="edge-list">${outRows.join("")}</ul></details>` : ""}
-    ${inRows.length > 0 ? `<details open><summary>Used by (${inRows.length})</summary><ul class="edge-list">${inRows.join("")}</ul></details>` : ""}
+    ${outRows.length > 0 ? `<details ${outRows.length <= 12 ? "open" : ""}><summary>Uses (${outRows.length})</summary><ul class="edge-list">${outRows.join("")}</ul></details>` : ""}
+    ${inRows.length > 0 ? `<details ${inRows.length <= 12 ? "open" : ""}><summary>Used by (${inRows.length})</summary><ul class="edge-list">${inRows.join("")}</ul></details>` : ""}
     ${outRows.length === 0 && inRows.length === 0 ? "<h3>No connections</h3>" : ""}`;
   panel.querySelector("#panel-close")?.addEventListener("click", () => {
     if (view) {
@@ -1386,12 +1385,25 @@ function jumpToNode(id: string): void {
 }
 
 function updateStats(): void {
-  const parts = Object.entries(lastStats)
-    .filter(([, n]) => n > 0)
-    .map(([k, n]) => {
-      const name = k.replace(/([A-Z])/g, (m) => ` ${m.toLowerCase()}`);
-      return `${n} ${name}${n === 1 || name.endsWith("s") ? "" : "s"}`;
-    });
+  if (!cy) return;
+  const units = coreCardUnits(cy);
+  const visibleUnits = units.filter((node) => isShown(node)).length;
+  const visibleEdges = cy
+    .edges()
+    .filter((edge) => edgeShownForRouting(edge as EdgeSingular)).length;
+  const activeFilters =
+    prefs.filterSchemas.length + prefs.filterNodeTypes.length + prefs.filterEdgeKinds.length;
+  const totalRows = [...rowsByCard.values()].reduce((sum, rows) => sum + rows.length, 0);
+  const liveRows = [...materialized].reduce(
+    (sum, id) => sum + (rowsByCard.get(id)?.length ?? 0),
+    0,
+  );
+  const parts = [
+    `${visibleUnits}/${units.length} objects`,
+    `${visibleEdges} connections`,
+    activeFilters > 0 ? `${activeFilters} filters` : "",
+    edgeMode() === "all" && liveRows < totalRows ? `detail budget ${liveRows}/${totalRows}` : "",
+  ].filter(Boolean);
   const text = `${database ? `${database} · ` : ""}${parts.join(" · ")}`;
   // on-canvas overlay (bottom-right, like the legend)…
   el("stats").textContent = text;
@@ -1400,15 +1412,53 @@ function updateStats(): void {
 }
 
 function buildLegend(): void {
+  if (!cy) {
+    el("legend").textContent = "";
+    return;
+  }
+  const nodeTypes = new Set(
+    cy
+      .nodes()
+      .filter((node) => isShown(node as NodeSingular) && node.data("type") !== "schema")
+      .map((node) => String(node.data("type"))),
+  );
+  const edgeKinds = new Set<string>();
+  cy.edges("[?agg]").forEach((edge) => {
+    if (!edgeShownByClasses(edge as EdgeSingular)) return;
+    const kinds = edge.data("kinds") as Record<string, number> | undefined;
+    for (const kind of kinds ? Object.keys(kinds) : [String(edge.data("kind"))]) {
+      if (prefs.filterEdgeKinds.length === 0 || prefs.filterEdgeKinds.includes(kind as EdgeKind)) {
+        edgeKinds.add(kind);
+      }
+    }
+  });
+  const groups = [
+    { name: "data", color: EDGE_COLORS.reads, kinds: DATA_KINDS },
+    { name: "calls", color: EDGE_COLORS.calls, kinds: new Set(["calls", "executes"]) },
+    {
+      name: "structure",
+      color: EDGE_COLORS.fk,
+      kinds: new Set(["fk", "constrains", "indexes", "default", "update-of"]),
+    },
+  ];
   const items = [
-    ...Object.entries(NODE_COLORS).map(
-      ([name, color]) => `<span><i class="dot" style="background:${color}"></i>${name}</span>`,
-    ),
-    ...Object.entries(EDGE_COLORS).map(
-      ([name, color]) => `<span><i class="line" style="background:${color}"></i>${name}</span>`,
-    ),
+    ...Object.entries(NODE_COLORS)
+      .filter(([name]) => nodeTypes.has(name))
+      .map(
+        ([name, color]) => `<span><i class="dot" style="background:${color}"></i>${name}</span>`,
+      ),
+    ...groups
+      .filter((group) => [...group.kinds].some((kind) => edgeKinds.has(kind)))
+      .map(
+        (group) =>
+          `<span><i class="line" style="background:${group.color}"></i>${group.name}</span>`,
+      ),
   ];
   el("legend").innerHTML = items.join("");
+  el("reset-filters").classList.toggle(
+    "hidden",
+    prefs.filterSchemas.length + prefs.filterNodeTypes.length + prefs.filterEdgeKinds.length === 0,
+  );
 }
 
 // ── wiring ──
@@ -1426,6 +1476,19 @@ function applyPrefs(next: Prefs): void {
   const prev = prefs;
   prefs = next;
   if (!cy) return;
+  if (!sameList(next.filterNodeTypes, prev.filterNodeTypes)) {
+    for (const id of rowsByCard.keys()) {
+      const definition = nodeDefById.get(id);
+      if (!definition) continue;
+      buildCardArt(definition);
+      const card = cy.getElementById(id);
+      if (card.nonempty()) {
+        card.data("svg", definition.data.svg);
+        card.data("cardW", definition.data.cardW);
+        card.data("cardH", definition.data.cardH);
+      }
+    }
+  }
   // engine swaps the tree/call-graph layout — re-run if it changed, or if the
   // layout shape changed. In a call-tree view, relayout in place so the chain
   // re-ranks without exiting the view.
@@ -1553,6 +1616,13 @@ window.addEventListener("message", (ev: MessageEvent) => {
       pendingRevealId = null;
       jumpToNode(id);
     }
+  } else if (msg.type === "clear") {
+    cy?.destroy();
+    cy = null;
+    hidePanel();
+    hideCrumb();
+    el("empty").style.display = "flex";
+    el("empty").textContent = msg.message;
   } else if (msg.type === "prefs") {
     applyPrefs(normalizePrefs(msg.prefs));
   } else if (msg.type === "reveal") {
@@ -1607,6 +1677,7 @@ window.addEventListener("keydown", (ev) => {
     if (!resizing) return;
     const width = Math.min(680, Math.max(220, window.innerWidth - ev.clientX - 8));
     panelEl.style.width = `${width}px`;
+    cy?.resize();
   });
   handle.addEventListener("pointerup", (ev) => {
     resizing = false;
@@ -1614,4 +1685,5 @@ window.addEventListener("keydown", (ev) => {
   });
 }
 buildLegend();
+el("reset-filters").addEventListener("click", () => postToHost({ type: "resetFilters" }));
 postToHost({ type: "ready" });

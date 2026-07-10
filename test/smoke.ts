@@ -244,7 +244,12 @@ WHERE EXISTS (
 }
 
 function runGraphBuilderSmoke(): void {
-  const parent: CatalogRel = { oid: GRAPH_PARENT, schema: "public", name: "parents", kind: "table" };
+  const parent: CatalogRel = {
+    oid: GRAPH_PARENT,
+    schema: "public",
+    name: "parents",
+    kind: "table",
+  };
   const child: CatalogRel = { oid: GRAPH_CHILD, schema: "public", name: "children", kind: "table" };
   const fn: CatalogFunc = {
     oid: GRAPH_FN,
@@ -270,16 +275,10 @@ function runGraphBuilderSmoke(): void {
     refCols: [1],
   };
   const analysisA = new Map<number, FuncRefs>([
-    [
-      GRAPH_FN,
-      refs({ reads: new Map([[GRAPH_CHILD, new Set([3, 2])]]) }),
-    ],
+    [GRAPH_FN, refs({ reads: new Map([[GRAPH_CHILD, new Set([3, 2])]]) })],
   ]);
   const analysisB = new Map<number, FuncRefs>([
-    [
-      GRAPH_FN,
-      refs({ reads: new Map([[GRAPH_CHILD, new Set([2, 3])]]) }),
-    ],
+    [GRAPH_FN, refs({ reads: new Map([[GRAPH_CHILD, new Set([2, 3])]]) })],
   ]);
   const graphA = buildGraph(
     emptyCatalog({
@@ -302,6 +301,19 @@ function runGraphBuilderSmoke(): void {
     { includeFks: true },
   );
   assert.deepEqual(graphB, graphA, "buildGraph output should be deterministic");
+  const bundles = graphA.edges.filter((edge) => edge.data.agg);
+  assert.equal(
+    new Set(bundles.map((edge) => `${edge.data.source}|${edge.data.target}`)).size,
+    bundles.length,
+    "overview has at most one directed bundle per card pair",
+  );
+  for (const bundle of bundles) {
+    assert.equal(
+      Object.values(bundle.data.kinds ?? {}).reduce((sum, count) => sum + count, 0),
+      bundle.data.count,
+      "bundle count equals its per-kind counts",
+    );
+  }
   assert.equal(
     graphA.nodes.find((n) => n.data.id === "f3003")?.data.label,
     "touch_children(tenant_id integer, amount numeric(12,2))",

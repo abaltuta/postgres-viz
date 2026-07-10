@@ -140,7 +140,12 @@ type AggregateMemberNode = {
  * on the target side (function/view -> table.column) must search both cards.
  */
 export function aggregateMemberLabels(
-  data: { source: string; target: string; kind: string },
+  data: {
+    source: string;
+    target: string;
+    kind: string;
+    kinds?: Partial<Record<string, number>>;
+  },
   detailEdgesByCard: ReadonlyMap<string, readonly AggregateMemberEdge[]>,
   nodeDefById: ReadonlyMap<string, AggregateMemberNode>,
   cardOfNode: ReadonlyMap<string, string>,
@@ -154,13 +159,14 @@ export function aggregateMemberLabels(
   };
   const seen = new Set<string>();
   const members: string[] = [];
+  const aggregateKinds = data.kinds ? new Set(Object.keys(data.kinds)) : undefined;
   for (const card of [data.source, data.target]) {
     for (const e of detailEdgesByCard.get(card) ?? []) {
       const edgeKey = e.data.id ?? `${e.data.kind}|${e.data.source}|${e.data.target}`;
       if (seen.has(edgeKey)) continue;
       seen.add(edgeKey);
       if (
-        e.data.kind !== data.kind ||
+        (aggregateKinds ? !aggregateKinds.has(e.data.kind) : e.data.kind !== data.kind) ||
         unitOfId(e.data.source) !== data.source ||
         unitOfId(e.data.target) !== data.target
       ) {
@@ -219,7 +225,7 @@ export function callTreeClosure(
     for (const id of frontier) {
       if (fns.has(id)) continue;
       fns.add(id);
-      cy.edges('[!detail][kind="calls"], [!detail][kind="executes"]').forEach((e) => {
+      cy.edges('[!agg][!detail][kind="calls"], [!agg][!detail][kind="executes"]').forEach((e) => {
         if (e.source().id() === id && !fns.has(e.target().id())) next.push(e.target().id());
       });
     }
@@ -227,13 +233,19 @@ export function callTreeClosure(
   }
   const keep = new Set<string>(fns);
   keep.add(startUnit.id());
-  cy.edges("[!detail]").forEach((e) => {
-    if (DATA_KINDS.has(String(e.data("kind"))) && fns.has(e.source().id())) {
+  cy.edges("[?agg], [!agg][!detail]").forEach((e) => {
+    const kinds = e.data("kinds") as Record<string, number> | undefined;
+    if (
+      (kinds
+        ? Object.keys(kinds).some((kind) => DATA_KINDS.has(kind))
+        : DATA_KINDS.has(String(e.data("kind")))) &&
+      fns.has(e.source().id())
+    ) {
       keep.add(e.target().id());
     }
   });
   // context: who calls / fires the root
-  cy.edges('[!detail][kind="calls"], [!detail][kind="executes"]').forEach((e) => {
+  cy.edges('[!agg][!detail][kind="calls"], [!agg][!detail][kind="executes"]').forEach((e) => {
     if (roots.has(e.target().id())) keep.add(e.source().id());
   });
   return { fns, keep, roots };

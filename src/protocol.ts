@@ -109,6 +109,7 @@ export const HIDE_ISOLATED_TOUCHED_KEY = "postgresViz.userTouchedHideIsolated";
 
 export type HostToWebviewMessage =
   | { type: "graph"; graph: GraphPayload; database: string }
+  | { type: "clear"; message: string }
   | { type: "prefs"; prefs: Prefs }
   | { type: "reveal"; id: string }
   | { type: "searchSelect"; id: string }
@@ -124,6 +125,7 @@ export type HostToWebviewMessage =
 export type WebviewToHostMessage =
   | { type: "ready" }
   | { type: "refresh" }
+  | { type: "resetFilters" }
   | { type: "pngExport"; dataUri: string }
   | { type: "svgExport"; svg: string }
   | { type: "stats"; text?: string }

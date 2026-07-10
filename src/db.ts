@@ -5,6 +5,18 @@ export interface PgClientLike {
   end(): Promise<void>;
 }
 
+export interface CancellationLike {
+  readonly isCancellationRequested: boolean;
+  onCancellationRequested?(listener: () => void): { dispose(): unknown };
+}
+
+export class ClientCancelledError extends Error {
+  constructor() {
+    super("database operation cancelled");
+    this.name = "ClientCancelledError";
+  }
+}
+
 type Settled<T> = { ok: true; value: T } | { ok: false; reason: unknown };
 
 async function settle<T>(fn: () => Promise<T>): Promise<Settled<T>> {
@@ -15,7 +27,11 @@ async function settle<T>(fn: () => Promise<T>): Promise<Settled<T>> {
   }
 }
 
-export async function withClient<T>(conn: string, fn: (client: Client) => Promise<T>): Promise<T> {
+export async function withClient<T>(
+  conn: string,
+  fn: (client: Client) => Promise<T>,
+  cancellation?: CancellationLike,
+): Promise<T> {
   // hard timeouts: a wrong host or a blocked catalog query should fail with a
   // real error instead of spinning on "introspecting catalogs…" forever
   const client = new Client({
@@ -25,16 +41,22 @@ export async function withClient<T>(conn: string, fn: (client: Client) => Promis
     statement_timeout: 60_000,
     query_timeout: 90_000,
   });
-  return withConnectedClient(client, fn);
+  return withConnectedClient(client, fn, cancellation);
 }
 
 export async function withConnectedClient<T, C extends PgClientLike>(
   client: C,
   fn: (client: C) => Promise<T>,
+  cancellation?: CancellationLike,
 ): Promise<T> {
   // belt and braces on top of connectionTimeoutMillis — never hang on connect
   let connectTimer: ReturnType<typeof setTimeout> | undefined;
+  let closeResult: Promise<Settled<void>> | undefined;
+  const cancellationDisposable = cancellation?.onCancellationRequested?.(() => {
+    closeResult ??= settle(() => client.end());
+  });
   try {
+    if (cancellation?.isCancellationRequested) throw new ClientCancelledError();
     await Promise.race([
       client.connect(),
       new Promise<never>((_, reject) => {
@@ -42,13 +64,16 @@ export async function withConnectedClient<T, C extends PgClientLike>(
       }),
     ]);
   } catch (err) {
-    await settle(() => client.end());
-    throw err;
+    await (closeResult ??= settle(() => client.end()));
+    cancellationDisposable?.dispose();
+    throw cancellation?.isCancellationRequested ? new ClientCancelledError() : err;
   } finally {
     clearTimeout(connectTimer);
   }
   const result = await settle(() => fn(client));
-  const closed = await settle(() => client.end());
+  const closed = await (closeResult ??= settle(() => client.end()));
+  cancellationDisposable?.dispose();
+  if (cancellation?.isCancellationRequested) throw new ClientCancelledError();
   if (!result.ok) throw result.reason;
   if (!closed.ok) throw closed.reason;
   return result.value;

@@ -90,6 +90,7 @@ async function main(): Promise<void> {
   const prefs: Prefs = { ...DEFAULT_PREFS, edgeMode: "all" };
   const openDdlCalls: unknown[][] = [];
   const openDefinitionCalls: unknown[][] = [];
+  let resetFiltersCalls = 0;
   const controller = new WebviewController({
     extensionUri: { toString: () => "ext:\"&<>'" } as never,
     logLine: () => undefined,
@@ -98,6 +99,9 @@ async function main(): Promise<void> {
     prefs: () => prefs,
     onStats: () => undefined,
     onRefresh: async () => undefined,
+    onResetFilters: () => {
+      resetFiltersCalls++;
+    },
     onOpenDdl: async (...args) => {
       openDdlCalls.push(args);
     },
@@ -131,6 +135,11 @@ async function main(): Promise<void> {
     /script-src vscode-resource:&quot;&amp;&lt;&gt;&#39;;/,
     "CSP source is escaped inside the content attribute",
   );
+  assert.match(
+    panel.webview.html,
+    /<div id="canvas">[\s\S]*<button id="reset-filters"[\s\S]*<\/div>\s*<aside id="panel"/,
+    "canvas overlays share a bounded surface and the details panel is a flex sibling",
+  );
 
   controller.revealNode("first");
   controller.revealNode("second");
@@ -148,6 +157,8 @@ async function main(): Promise<void> {
     ],
     "ready replay sends graph, prefs, and deduped pending commands in order",
   );
+  panel.webview.receive({ type: "resetFilters" });
+  assert.equal(resetFiltersCalls, 1, "filter reset messages reach the host callback");
 
   panel.webview.receive({ type: "openDdl", nodeType: "schema", oid: 1, label: "public" });
   panel.webview.receive({ type: "openDdl", nodeType: "table", oid: 0, label: "orders" });
@@ -160,11 +171,7 @@ async function main(): Promise<void> {
     name: "orders",
   });
   assert.deepEqual(openDdlCalls, [], "malformed openDdl messages are ignored");
-  assert.deepEqual(
-    openDefinitionCalls,
-    [],
-    "malformed openDefinition messages are ignored",
-  );
+  assert.deepEqual(openDefinitionCalls, [], "malformed openDefinition messages are ignored");
 
   panel.webview.receive({
     type: "openDdl",

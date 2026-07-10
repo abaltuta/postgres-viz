@@ -61,6 +61,7 @@ const smokeTest = {
     "test/tree-provider.ts",
     "test/webview.ts",
     "test/webview-controller.ts",
+    "test/router.ts",
     "test/hcl.ts",
     "test/sql-migrations.ts",
     "test/match.ts",

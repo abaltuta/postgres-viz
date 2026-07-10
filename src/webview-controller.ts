@@ -34,6 +34,7 @@ export interface WebviewControllerOptions {
   prefs: () => Prefs;
   onStats: (text: string) => void;
   onRefresh: () => Promise<void>;
+  onResetFilters: () => void;
   onOpenDdl: (
     nodeType: NodeType,
     oid: number,
@@ -149,6 +150,8 @@ export class WebviewController implements vscode.Disposable {
         this.opts.onStats(String(msg.text ?? ""));
       } else if (msg.type === "refresh") {
         await this.opts.onRefresh();
+      } else if (msg.type === "resetFilters") {
+        this.opts.onResetFilters();
       } else if (msg.type === "openDdl") {
         const payload = parseDdlPayload(msg);
         if (!payload) return;
@@ -217,10 +220,7 @@ function parseDdlPayload(
       ? (msg.nodeType as DdlNodeType)
       : undefined;
   const oid =
-    typeof msg.oid === "number" &&
-    Number.isInteger(msg.oid) &&
-    msg.oid > 0 &&
-    msg.oid <= PG_OID_MAX
+    typeof msg.oid === "number" && Number.isInteger(msg.oid) && msg.oid > 0 && msg.oid <= PG_OID_MAX
       ? msg.oid
       : undefined;
   return nodeType && oid !== undefined ? { nodeType, oid } : undefined;
@@ -251,15 +251,18 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </head>
 <body>
   <div id="content">
-    <div id="cy"></div>
-    <div id="crumb" class="hidden"></div>
-    <div id="legend"></div>
-    <div id="stats"></div>
+    <div id="canvas">
+      <div id="cy"></div>
+      <div id="crumb" class="hidden"></div>
+      <button id="reset-filters" class="hidden" title="clear active graph filters">Clear filters</button>
+      <div id="legend"></div>
+      <div id="stats"></div>
+      <div id="empty">No connection - use the Postgres Viz status bar item or the sidebar to connect.</div>
+    </div>
     <aside id="panel" class="hidden">
       <div id="panel-resize" title="drag to resize"></div>
       <div id="panel-body"></div>
     </aside>
-    <div id="empty">No connection - use the Postgres Viz status bar item or the sidebar to connect.</div>
   </div>
   <script src="${escapedScriptUri}"></script>
 </body>

@@ -439,8 +439,8 @@ function build(): Core {
     elements: {
       nodes: [{ data: { id: "a", type: "table" } }, { data: { id: "b", type: "table" } }],
       edges: [
-        { data: { id: "visible", source: "a", target: "b", kind: "reads" } },
-        { data: { id: "filtered", source: "a", target: "b", kind: "calls" } },
+        { data: { id: "visible", source: "a", target: "b", kind: "reads", agg: true } },
+        { data: { id: "filtered", source: "a", target: "b", kind: "calls", agg: true } },
       ],
     },
   });
@@ -475,7 +475,7 @@ function build(): Core {
   );
 }
 
-// ── 14. row selection suppresses only matching aggregate kind+direction ──
+// ── 14. row selection suppresses every overview bundle touching its card ──
 {
   const cy = cytoscape({
     headless: true,
@@ -515,12 +515,12 @@ function build(): Core {
     "matching aggregate is suppressed when its detail row is revealed",
   );
   assert.ok(
-    !cy.getElementById("agg_writes").hasClass("agg-suppressed"),
-    "same endpoint pair with a different kind stays visible",
+    cy.getElementById("agg_writes").hasClass("agg-suppressed"),
+    "parallel overview bundles are suppressed while typed edges are revealed",
   );
   assert.ok(
-    !cy.getElementById("agg_reverse_reads").hasClass("agg-suppressed"),
-    "same endpoint pair in the opposite direction stays visible",
+    cy.getElementById("agg_reverse_reads").hasClass("agg-suppressed"),
+    "reverse overview bundles touching the selected card are suppressed",
   );
 }
 
@@ -652,6 +652,85 @@ function build(): Core {
   assert.ok(yOf("orders_name") < yOf("orders_nan"), "malformed ord stacks after ordered rows");
 }
 
+// ── 17. edge modes separate bundles/details and cap eager row materialization ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "a", label: "a", type: "table", schema: "public" } },
+        { data: { id: "b", label: "b", type: "table", schema: "public" } },
+      ],
+      edges: [
+        {
+          data: {
+            id: "bundle",
+            source: "a",
+            target: "b",
+            kind: "reads",
+            agg: true,
+            count: 5,
+            kinds: { reads: 3, calls: 2 },
+            label: "2 kinds · ×5",
+          },
+        },
+        { data: { id: "typed", source: "a", target: "b", kind: "reads" } },
+      ],
+    },
+  });
+  const state: MaterializationState = {
+    rowsByCard: new Map([
+      [
+        "a",
+        [
+          {
+            data: { id: "a1", label: "a1", type: "column", parent: "a", schema: "public", oid: 1 },
+          },
+          {
+            data: { id: "a2", label: "a2", type: "column", parent: "a", schema: "public", oid: 1 },
+          },
+        ],
+      ],
+      [
+        "b",
+        [
+          {
+            data: { id: "b1", label: "b1", type: "column", parent: "b", schema: "public", oid: 2 },
+          },
+        ],
+      ],
+    ]),
+    detailEdgesByCard: new Map(),
+    cardOfNode: new Map(),
+    materialized: new Set(),
+    materializeCap: 30,
+    materializeAllRowsCap: 2,
+  };
+  applyFilterClasses(cy, state, DEFAULT_PREFS, "all", false);
+  assert.ok(cy.getElementById("bundle").hasClass("edge-off"), "all mode hides overview bundles");
+  assert.ok(!cy.getElementById("typed").hasClass("edge-off"), "all mode shows typed edges");
+  assert.deepEqual([...state.materialized], ["a"], "all mode honors the eager row budget");
+
+  applyFilterClasses(
+    cy,
+    state,
+    { ...DEFAULT_PREFS, filterEdgeKinds: ["calls"] },
+    "cards",
+    false,
+  );
+  assert.ok(!cy.getElementById("bundle").hasClass("edge-off"), "cards mode shows overview bundles");
+  assert.ok(
+    !cy.getElementById("bundle").hasClass("facet-hidden"),
+    "a bundle survives when any member kind matches",
+  );
+  assert.equal(
+    cy.getElementById("bundle").data("displayLabel"),
+    "×2",
+    "bundle labels show only the active kind count",
+  );
+  assert.ok(cy.getElementById("typed").hasClass("edge-off"), "cards mode hides typed edges");
+}
+
 console.log(
-  "webview OK — closure, stale-row, fit, agg members, agg dedupe, class ownership, positions, demat, keep-mask, facets, routing, panel visibility, selection aggs, row neighborhoods, row order",
+  "webview OK — closure, stale-row, fit, agg members, agg dedupe, class ownership, positions, demat, keep-mask, facets, routing, panel visibility, selection aggs, row neighborhoods, row order, edge budgets",
 );
