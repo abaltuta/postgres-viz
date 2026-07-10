@@ -17,9 +17,13 @@ export interface MaterializationState {
   detailEdgesByCard: Map<string, EdgeDef[]>;
   cardOfNode: Map<string, string>;
   materialized: Set<string>;
+  limited: Set<string>;
+  rowTypeFilter?: ReadonlySet<string>;
   materializeCap: number;
   materializeAllRowsCap?: number;
 }
+
+export const ROW_TYPES = new Set(["column", "trigger", "constraint", "index"]);
 
 type UnitOfNode = (n: NodeSingular) => NodeSingular;
 
@@ -40,13 +44,34 @@ export function initializeVirtualCards(cy: Core, rowsByCard: Map<string, NodeDef
   });
 }
 
+function materializableRows(state: MaterializationState, cardId: string): NodeDef[] {
+  const rows = state.rowsByCard.get(cardId) ?? [];
+  return state.rowTypeFilter ? rows.filter((row) => state.rowTypeFilter!.has(row.data.type)) : rows;
+}
+
+export function materializationRowCounts(state: MaterializationState): {
+  materialized: number;
+  total: number;
+} {
+  let materialized = 0;
+  let total = 0;
+  for (const id of state.rowsByCard.keys()) {
+    const count = materializableRows(state, id).length;
+    total += count;
+    if (state.materialized.has(id)) materialized += count;
+  }
+  return { materialized, total };
+}
+
 export function materializeCard(cy: Core, state: MaterializationState, cardId: string): void {
   if (state.materialized.has(cardId) || !state.rowsByCard.has(cardId)) return;
   const card = cy.getElementById(cardId);
   if (card.empty()) return;
   const center = { ...card.position() };
-  const rows = state.rowsByCard.get(cardId)!;
+  const rows = materializableRows(state, cardId);
+  if (rows.length === 0) return;
   state.materialized.add(cardId);
+  state.limited.delete(cardId);
   cy.batch(() => {
     card.removeClass("virtual-card");
     cy.add(
@@ -82,26 +107,72 @@ export function materializeNeighborhood(
   }
   let n = 0;
   for (const c of counters) {
-    if (n++ >= state.materializeCap) break;
+    if (n++ >= state.materializeCap) {
+      state.limited.add(c);
+      continue;
+    }
     materializeCard(cy, state, c);
+  }
+}
+
+export function materializeWithinBudget(
+  cy: Core,
+  state: MaterializationState,
+  cardIds: Iterable<string>,
+  rowCap = state.materializeAllRowsCap ?? 4_000,
+): void {
+  let rows = 0;
+  for (const id of state.materialized) rows += materializableRows(state, id).length;
+  for (const id of cardIds) {
+    if (state.materialized.has(id) || state.limited.has(id)) continue;
+    const definitions = materializableRows(state, id);
+    if (definitions.length === 0) continue;
+    if (rows + definitions.length > rowCap) {
+      state.limited.add(id);
+      continue;
+    }
+    materializeCard(cy, state, id);
+    rows += definitions.length;
   }
 }
 
 export function materializeAll(cy: Core, state: MaterializationState, prefs: Prefs): void {
   const schemaFilter = new Set(prefs.filterSchemas);
   const typeFilter = new Set<string>(prefs.filterNodeTypes);
-  let rows = 0;
+  const extent = cy.extent();
+  const center = { x: (extent.x1 + extent.x2) / 2, y: (extent.y1 + extent.y2) / 2 };
+  const candidates: { id: string; priority: number; distance: number }[] = [];
   for (const [id, definitions] of state.rowsByCard) {
     const card = cy.getElementById(id);
     if (card.empty()) continue;
     const schema = String(card.data("schema") ?? "");
     const type = String(card.data("type") ?? "");
     if (schemaFilter.size > 0 && !schemaFilter.has(schema)) continue;
-    if (typeFilter.size > 0 && !typeFilter.has(type)) continue;
-    if (rows + definitions.length > (state.materializeAllRowsCap ?? 4_000)) break;
-    materializeCard(cy, state, id);
-    rows += definitions.length;
+    if (
+      typeFilter.size > 0 &&
+      !typeFilter.has(type) &&
+      !definitions.some((row) => typeFilter.has(row.data.type))
+    ) {
+      continue;
+    }
+    const position = card.position();
+    const inViewport =
+      position.x >= extent.x1 &&
+      position.x <= extent.x2 &&
+      position.y >= extent.y1 &&
+      position.y <= extent.y2;
+    candidates.push({
+      id,
+      priority: card.selected() ? 0 : inViewport ? 1 : 2,
+      distance: Math.hypot(position.x - center.x, position.y - center.y),
+    });
   }
+  candidates.sort((a, b) => a.priority - b.priority || a.distance - b.distance);
+  materializeWithinBudget(
+    cy,
+    state,
+    candidates.map((candidate) => candidate.id),
+  );
 }
 
 export function dematerializeCard(cy: Core, state: MaterializationState, id: string): void {
@@ -146,6 +217,10 @@ export function applyFilterClasses(
   const schemaFilter = new Set<string>(prefs.filterSchemas ?? []);
   const typeFilter = new Set<string>(prefs.filterNodeTypes ?? []);
   const edgeKindFilter = new Set<string>(prefs.filterEdgeKinds ?? []);
+  state.rowTypeFilter =
+    typeFilter.size === 0
+      ? undefined
+      : new Set([...typeFilter].filter((type) => ROW_TYPES.has(type)));
   if (edgeMode === "all" && state.materialized.size < state.rowsByCard.size && !viewActive) {
     materializeAll(cy, state, prefs);
   }
@@ -158,7 +233,11 @@ export function applyFilterClasses(
         const schema =
           type === "schema" ? String(n.data("label") ?? "") : String(n.data("schema") ?? "");
         const schemaHidden = schemaFilter.size > 0 && !schemaFilter.has(schema);
-        const typeHidden = typeFilter.size > 0 && type !== "schema" && !typeFilter.has(type);
+        const typeHidden =
+          typeFilter.size > 0 &&
+          type !== "schema" &&
+          !typeFilter.has(type) &&
+          !(state.rowsByCard.get(n.id()) ?? []).some((row) => typeFilter.has(row.data.type));
         if (schemaHidden || typeHidden) n.addClass("facet-hidden");
       });
       cy.nodes('[type="schema"]').forEach((s) => {
@@ -358,6 +437,7 @@ export function applyEdgeSegments(
 }
 
 export function clearSelectionClasses(cy: Core): void {
+  cy.nodes().unselect();
   cy.elements().removeClass("dimmed");
   cy.edges().removeClass("hot revealed agg-suppressed");
 }
@@ -371,10 +451,13 @@ export function markCallTreeHot(unit: NodeSingular): void {
 }
 
 export function applySelectionClasses(cy: Core, node: NodeSingular, unitOfNode: UnitOfNode): void {
+  cy.nodes().unselect();
   cy.edges().removeClass("hot revealed agg-suppressed");
   const core = node.union(node.descendants());
   const detailEdges = core.connectedEdges("[?detail]");
   const unit = unitOfNode(node);
+  node.select();
+  unit.select();
   unit.union(unit.descendants()).connectedEdges("[?agg]").addClass("agg-suppressed");
   const revealed = detailEdges.union(core.connectedEdges("[!agg]"));
   revealed.addClass("revealed hot");
@@ -490,6 +573,7 @@ export function setHoverReveal(unit: NodeSingular): void {
 
 export function resetViewState(cy: Core): void {
   cy.batch(() => {
+    cy.nodes().unselect();
     cy.elements().removeClass(VIEW_OWNED_CLASSES.join(" "));
   });
 }

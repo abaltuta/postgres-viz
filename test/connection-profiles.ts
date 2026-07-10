@@ -10,12 +10,17 @@ const STATE_KEY = "postgresViz.connectionProfiles";
 
 class FakeState implements WorkspaceStateLike {
   values = new Map<string, unknown>();
+  failNextUpdate = false;
 
   get<T>(key: string): T | undefined {
     return this.values.get(key) as T | undefined;
   }
 
   async update(key: string, value: unknown): Promise<void> {
+    if (this.failNextUpdate) {
+      this.failNextUpdate = false;
+      throw new Error("state update failed");
+    }
     this.values.set(key, value);
   }
 }
@@ -66,7 +71,11 @@ async function main(): Promise<void> {
     assert.equal(profiles.activeProfile()?.id, zeta.id, "editing keeps the edited profile active");
 
     await profiles.delete(zeta.id);
-    assert.equal(profiles.activeProfile()?.id, alpha.id, "deleting the active profile picks a survivor");
+    assert.equal(
+      profiles.activeProfile()?.id,
+      alpha.id,
+      "deleting the active profile picks a survivor",
+    );
     assert.equal(await profiles.connection(zeta.id), undefined, "deleting removes its secret");
   }
 
@@ -84,6 +93,55 @@ async function main(): Promise<void> {
       first.id,
       "delete normalizes a stale active profile id",
     );
+  }
+
+  {
+    const state = new FakeState();
+    const secrets = new FakeSecrets();
+    const profiles = store(state, secrets);
+    state.failNextUpdate = true;
+    await assert.rejects(
+      profiles.save("orphan", "postgres://u@host/orphan"),
+      /state update failed/,
+    );
+    assert.equal(secrets.values.size, 0, "failed metadata save removes the new secret");
+
+    const saved = await profiles.save("stable", "postgres://u@host/stable");
+    state.failNextUpdate = true;
+    await assert.rejects(
+      profiles.save("edited", "postgres://u@host/edited", saved.id),
+      /state update failed/,
+    );
+    assert.equal(
+      await profiles.connection(saved.id),
+      "postgres://u@host/stable",
+      "failed profile edit restores the previous secret",
+    );
+
+    state.failNextUpdate = true;
+    await assert.rejects(profiles.delete(saved.id), /state update failed/);
+    assert.equal(
+      await profiles.connection(saved.id),
+      "postgres://u@host/stable",
+      "failed profile delete restores the secret",
+    );
+    assert.equal(profiles.activeProfile()?.id, saved.id, "failed delete keeps profile metadata");
+  }
+
+  {
+    const state = new FakeState();
+    const secrets = new FakeSecrets();
+    const profiles = store(state, secrets);
+    await Promise.all([
+      profiles.save("concurrent a", "postgres://u@host/a"),
+      profiles.save("concurrent b", "postgres://u@host/b"),
+    ]);
+    assert.deepEqual(
+      profiles.list().map((profile) => profile.name),
+      ["concurrent a", "concurrent b"],
+      "concurrent saves are serialized without losing profile metadata",
+    );
+    assert.equal(secrets.values.size, 2, "serialized saves keep one secret per profile");
   }
 
   {
@@ -128,8 +186,14 @@ async function main(): Promise<void> {
         "not-a-profile",
       ],
     });
-    secrets.values.set("postgresViz.connectionProfile:workspace-a:valid", "postgres://u@host/valid");
-    secrets.values.set("postgresViz.connectionProfile:workspace-a:padded", "postgres://u@host/padded");
+    secrets.values.set(
+      "postgresViz.connectionProfile:workspace-a:valid",
+      "postgres://u@host/valid",
+    );
+    secrets.values.set(
+      "postgresViz.connectionProfile:workspace-a:padded",
+      "postgres://u@host/padded",
+    );
     const profiles = store(state, secrets);
 
     assert.deepEqual(

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import type { GraphPayload } from "../src/types";
 import type { Prefs } from "../src/protocol";
@@ -10,6 +11,7 @@ class FakeWebview {
   cspSource = "vscode-resource:\"&<>'";
   html = "";
   readonly messages: unknown[] = [];
+  nextPostResult: boolean | Error | undefined;
   private messageHandler: MessageHandler | undefined;
 
   asWebviewUri(uri: { toString(): string }): { toString(): string } {
@@ -20,7 +22,9 @@ class FakeWebview {
 
   postMessage(message: unknown): PromiseLike<boolean> {
     this.messages.push(message);
-    return Promise.resolve(true);
+    const result = this.nextPostResult;
+    this.nextPostResult = undefined;
+    return result instanceof Error ? Promise.reject(result) : Promise.resolve(result ?? true);
   }
 
   onDidReceiveMessage(handler: MessageHandler): { dispose(): void } {
@@ -90,6 +94,7 @@ async function main(): Promise<void> {
   const prefs: Prefs = { ...DEFAULT_PREFS, edgeMode: "all" };
   const openDdlCalls: unknown[][] = [];
   const openDefinitionCalls: unknown[][] = [];
+  const errors: unknown[] = [];
   let resetFiltersCalls = 0;
   const controller = new WebviewController({
     extensionUri: { toString: () => "ext:\"&<>'" } as never,
@@ -111,9 +116,7 @@ async function main(): Promise<void> {
     onNodeSelected: () => undefined,
     onPngExport: () => undefined,
     onSvgExport: () => undefined,
-    onError: (err) => {
-      throw err;
-    },
+    onError: (error) => errors.push(error),
   });
 
   controller.ensure();
@@ -140,6 +143,30 @@ async function main(): Promise<void> {
     /<div id="canvas">[\s\S]*<button id="reset-filters"[\s\S]*<\/div>\s*<aside id="panel"/,
     "canvas overlays share a bounded surface and the details panel is a flex sibling",
   );
+  assert.match(
+    panel.webview.html,
+    /<footer id="canvas-footer">[\s\S]*id="legend"[\s\S]*id="stats"[\s\S]*<\/footer>/,
+    "legend and stats share a responsive footer",
+  );
+  assert.match(
+    panel.webview.html,
+    /id="cy" role="region"[^>]*aria-label="Database graph\.[^"]+" tabindex="0"/,
+    "the graph surface exposes keyboard navigation semantics",
+  );
+  assert.match(panel.webview.html, /id="empty" role="status"/);
+  assert.match(panel.webview.html, /id="stats" aria-live="polite"/);
+  assert.match(panel.webview.html, /id="panel" class="hidden" aria-label="Object details"/);
+  assert.match(
+    panel.webview.html,
+    /id="panel-resize" role="separator"[\s\S]*aria-valuenow="300"[\s\S]*tabindex="0"/,
+    "details splitter exposes keyboard separator semantics",
+  );
+  const style = readFileSync("media/style.css", "utf8");
+  assert.match(style, /#canvas\s*\{[^}]*container-type:\s*inline-size/s);
+  assert.match(style, /@container \(max-width: 700px\)/);
+  assert.match(style, /@media \(max-width: 620px\)[\s\S]*flex-direction:\s*column/);
+  assert.match(style, /#cy:focus-visible[\s\S]*vscode-focusBorder/);
+  assert.match(style, /\.edge-link:focus-visible[\s\S]*vscode-focusBorder/);
 
   controller.revealNode("first");
   controller.revealNode("second");
@@ -147,6 +174,7 @@ async function main(): Promise<void> {
   assert.deepEqual(panel.webview.messages, [], "commands are queued until ready");
 
   panel.webview.receive({ type: "ready" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(
     panel.webview.messages,
     [
@@ -157,6 +185,21 @@ async function main(): Promise<void> {
     ],
     "ready replay sends graph, prefs, and deduped pending commands in order",
   );
+  panel.webview.messages.length = 0;
+  panel.webview.nextPostResult = false;
+  controller.exportSvg();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.match(String(errors.at(-1)), /webview rejected host message: exportSvg/);
+  panel.webview.receive({ type: "ready" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    panel.webview.messages.slice(-3),
+    [{ type: "graph", graph, database: "db" }, { type: "prefs", prefs }, { type: "exportSvg" }],
+    "failed commands remain queued until a successful ready replay",
+  );
+  panel.webview.receive({ type: "svgExport", svg: "<svg><script/></svg>" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.match(String(errors.at(-1)), /unsupported active or external content/);
   panel.webview.receive({ type: "resetFilters" });
   assert.equal(resetFiltersCalls, 1, "filter reset messages reach the host callback");
 

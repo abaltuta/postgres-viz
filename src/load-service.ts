@@ -1,5 +1,5 @@
 import { analyzeAll } from "./analyze";
-import { ClientCancelledError, withClient, type CancellationLike } from "./db";
+import { ClientCancelledError, withClientPool, type CancellationLike } from "./db";
 import { buildGraph } from "./graph";
 import { introspect, type Log } from "./introspect";
 import type { GraphPayload } from "./types";
@@ -93,7 +93,7 @@ export async function loadGraphFromDatabase(opts: LoadServiceOptions): Promise<L
 
   throwIfCancelled(opts.cancellation);
   try {
-    return await withClient(
+    return await withClientPool(
       opts.conn,
       async (client) => {
         throwIfCancelled(opts.cancellation);
@@ -113,7 +113,10 @@ export async function loadGraphFromDatabase(opts: LoadServiceOptions): Promise<L
         log("building graph...");
         const graph = buildGraph(catalog, analysis, { includeFks: opts.includeFks });
         throwIfCancelled(opts.cancellation);
-        const database: string = (await client.query("SELECT current_database() AS db")).rows[0].db;
+        const database = String(
+          (await client.query("SELECT current_database() AS db")).rows[0]?.db ?? "",
+        );
+        if (!database) throw new Error("current_database() returned no database name");
         const parserFallbacks = [...analysis.values()].filter((refs) => !refs.parsed).length;
         const warnings =
           graph.nodes.length > 3000

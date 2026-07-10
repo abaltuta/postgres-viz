@@ -7,6 +7,18 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pg
+        ports:
+          - 54339:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -20,3 +32,18 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm smoke
+      - run: pnpm test:db
+        env:
+          DATABASE_URL: postgres://postgres:pg@localhost:54339/postgres
+      - run: pnpm build
+      - uses: browser-actions/setup-chrome@v1
+        id: setup-chrome
+      - run: pnpm test:ui
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webview-screenshots
+          path: /tmp/postgres-viz-ui-*.png
+      - run: pnpm exec vsce package --no-dependencies --allow-missing-repository --out /tmp/postgres-viz-ci.vsix

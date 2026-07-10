@@ -49,29 +49,45 @@ interface WorkerRes {
  * the worker is SIGKILLed and respawned, and the affected function falls back
  * to regex extraction — a poisoned input can never freeze the host again.
  */
-class WorkerParser implements PgParser {
+export interface ParserWorker extends PgParser {
+  kill(): void;
+}
+
+export class WorkerParser implements ParserWorker {
   private child: ChildProcess | null = null;
   private nextId = 1;
-  private pending = new Map<number, { resolve: (v: Json) => void; reject: (e: Error) => void }>();
+  private pending = new Map<
+    number,
+    { child: ChildProcess; resolve: (v: Json) => void; reject: (e: Error) => void }
+  >();
   private requests = 0;
 
-  constructor(private readonly workerPath: string) {}
+  constructor(
+    private readonly workerPath: string,
+    private readonly spawn: (workerPath: string) => ChildProcess = (workerPath) =>
+      fork(workerPath, [], { silent: true }),
+    private readonly recycleAfter = WORKER_RECYCLE_AFTER,
+    private readonly timeoutMs = PARSE_TIMEOUT_MS,
+  ) {}
 
   private ensure(): ChildProcess {
     if (this.child) return this.child;
-    const child = fork(this.workerPath, [], { silent: true });
+    const child = this.spawn(this.workerPath);
     child.on("message", (res: WorkerRes) => {
       const p = this.pending.get(res.id);
-      if (!p) return;
+      if (!p || p.child !== child) return;
       this.pending.delete(res.id);
       if (res.ok) p.resolve(res.result);
       else p.reject(new Error(res.error ?? "parse error"));
     });
-    child.on("error", () => this.kill());
+    child.on("error", (error) => {
+      if (this.child === child) this.child = null;
+      child.kill("SIGKILL");
+      this.rejectChild(child, error instanceof Error ? error : new Error(String(error)));
+    });
     child.on("exit", () => {
       if (this.child === child) this.child = null;
-      for (const p of this.pending.values()) p.reject(new Error("parser worker exited"));
-      this.pending.clear();
+      this.rejectChild(child, new Error("parser worker exited"));
     });
     // never keep the parent process alive: hold a ref only while a request is in flight
     child.unref();
@@ -86,8 +102,16 @@ class WorkerParser implements PgParser {
     if (this.pending.size === 0) (this.child as Json)?.channel?.unref?.();
   }
 
+  private rejectChild(child: ChildProcess, error: Error): void {
+    for (const [id, pending] of this.pending) {
+      if (pending.child !== child) continue;
+      this.pending.delete(id);
+      pending.reject(error);
+    }
+  }
+
   private request(op: "parseQuery" | "parsePlPgSQL", sql: string): Promise<Json> {
-    if (this.requests >= WORKER_RECYCLE_AFTER) this.kill();
+    if (this.requests >= this.recycleAfter) this.kill();
     const child = this.ensure();
     this.requests++;
     return new Promise<Json>((resolve, reject) => {
@@ -96,8 +120,9 @@ class WorkerParser implements PgParser {
         this.pending.delete(id);
         this.kill();
         reject(new Error(`parse timed out: ${sql.slice(0, 60)}`));
-      }, PARSE_TIMEOUT_MS);
+      }, this.timeoutMs);
       this.pending.set(id, {
+        child,
         resolve: (v) => {
           clearTimeout(timer);
           this.idleUnref();
@@ -136,25 +161,55 @@ class WorkerParser implements PgParser {
   }
 }
 
-class WorkerParserPool implements PgParser {
-  private readonly workers: WorkerParser[];
-  private next = 0;
+export class WorkerParserPool implements PgParser {
+  private readonly workers: ParserWorker[];
+  private readonly available: ParserWorker[];
+  private readonly queue: {
+    op: "parseQuery" | "parsePlPgSQL";
+    sql: string;
+    resolve: (value: Json) => void;
+    reject: (error: Error) => void;
+  }[] = [];
+  private stopped = false;
 
-  constructor(workerPath: string, size: number) {
-    this.workers = Array.from({ length: size }, () => new WorkerParser(workerPath));
+  constructor(workerFactory: () => ParserWorker, size: number) {
+    this.workers = Array.from({ length: size }, workerFactory);
+    this.available = [...this.workers];
   }
 
   parseQuery(sql: string): Promise<Json> {
-    const worker = this.workers[this.next++ % this.workers.length]!;
-    return worker.parseQuery(sql);
+    return this.enqueue("parseQuery", sql);
   }
 
   parsePlPgSQL(sql: string): Promise<Json> {
-    const worker = this.workers[this.next++ % this.workers.length]!;
-    return worker.parsePlPgSQL(sql);
+    return this.enqueue("parsePlPgSQL", sql);
+  }
+
+  private enqueue(op: "parseQuery" | "parsePlPgSQL", sql: string): Promise<Json> {
+    if (this.stopped) return Promise.reject(new Error("parser pool disposed"));
+    return new Promise<Json>((resolve, reject) => {
+      this.queue.push({ op, sql, resolve, reject });
+      this.dispatch();
+    });
+  }
+
+  private dispatch(): void {
+    while (!this.stopped && this.available.length > 0 && this.queue.length > 0) {
+      const worker = this.available.pop()!;
+      const job = this.queue.shift()!;
+      const request =
+        job.op === "parseQuery" ? worker.parseQuery(job.sql) : worker.parsePlPgSQL(job.sql);
+      void request.then(job.resolve, job.reject).finally(() => {
+        if (this.stopped) return;
+        this.available.push(worker);
+        this.dispatch();
+      });
+    }
   }
 
   kill(): void {
+    this.stopped = true;
+    for (const job of this.queue.splice(0)) job.reject(new Error("parser pool disposed"));
     for (const worker of this.workers) worker.kill();
   }
 }
@@ -177,7 +232,7 @@ export async function getParser(): Promise<PgParser | null> {
   try {
     const workerPath = path.join(__dirname, "parser-worker.js");
     if (existsSync(workerPath)) {
-      workerParser = new WorkerParserPool(workerPath, 2);
+      workerParser = new WorkerParserPool(() => new WorkerParser(workerPath), 2);
       await workerParser.parseQuery("SELECT 1"); // health check
       cachedParser = workerParser;
       return cachedParser;

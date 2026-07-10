@@ -1,4 +1,4 @@
-import type { Client } from "pg";
+import { settle, type QueryClient } from "./db";
 import type {
   Catalog,
   CatalogCol,
@@ -72,14 +72,12 @@ function isMissingProsqlbody(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const err = error as { code?: unknown; message?: unknown };
   return (
-    err.code === "42703" &&
-    typeof err.message === "string" &&
-    err.message.includes("prosqlbody")
+    err.code === "42703" && typeof err.message === "string" && err.message.includes("prosqlbody")
   );
 }
 
 export async function introspect(
-  client: Client,
+  client: QueryClient,
   filter: SchemaFilter,
   log: Log = () => {},
 ): Promise<Catalog> {
@@ -90,6 +88,25 @@ export async function introspect(
       : `introspecting all non-system schemas${
           filter.exclude.length > 0 ? ` except: ${filter.exclude.join(", ")}` : ""
         }`,
+  );
+
+  // These two scans are independent of the relation catalogs below. The load
+  // service supplies dedicated clients, so starting them now hides their
+  // round-trip and server execution latency behind the remaining catalog work.
+  const funcsPromise = settle(() =>
+    fetchFuncs(
+      client,
+      `p.prokind IN ('f','p') AND ${schemaPred("n.nspname")}
+       AND ${notExtensionOwned("pg_proc", "p.oid")}`,
+      params,
+    ),
+  );
+  const sqlBodyDepsPromise = settle(() =>
+    fetchSqlBodyDeps(
+      client,
+      `${schemaPred("n.nspname")} AND ${notExtensionOwned("pg_proc", "p.oid")}`,
+      params,
+    ),
   );
 
   let stepStart = Date.now();
@@ -321,11 +338,9 @@ export async function introspect(
   log(`pg_depend: ${constraintFuncDeps.length} constraint→function deps — ${took()}`);
 
   // Exact relation deps of new-style (BEGIN ATOMIC) SQL functions — tracked by pg_depend.
-  const sqlBodyDeps = await fetchSqlBodyDeps(
-    client,
-    `${schemaPred("n.nspname")} AND ${notExtensionOwned("pg_proc", "p.oid")}`,
-    params,
-  );
+  const sqlBodyDepsResult = await sqlBodyDepsPromise;
+  if (!sqlBodyDepsResult.ok) throw sqlBodyDepsResult.reason;
+  const sqlBodyDeps = sqlBodyDepsResult.value;
   log(`pg_depend: ${sqlBodyDeps.length} SQL-body (BEGIN ATOMIC) function deps — ${took()}`);
 
   // Column defaults & generated columns: what other columns/functions they reference.
@@ -359,12 +374,9 @@ export async function introspect(
   }));
   log(`pg_attrdef/pg_depend: ${defaultDeps.length} default/generated-column deps — ${took()}`);
 
-  const funcs = await fetchFuncs(
-    client,
-    `p.prokind IN ('f','p') AND ${schemaPred("n.nspname")}
-     AND ${notExtensionOwned("pg_proc", "p.oid")}`,
-    params,
-  );
+  const funcsResult = await funcsPromise;
+  if (!funcsResult.ok) throw funcsResult.reason;
+  const funcs = funcsResult.value;
   log(
     `pg_proc: ${funcs.length} functions/procedures ` +
       `(${countBy(funcs, (f) => f.language)}) — ${took()}`,
@@ -439,7 +451,7 @@ export async function introspect(
 }
 
 async function fetchSqlBodyDeps(
-  client: Client,
+  client: QueryClient,
   procPredicate: string,
   params: unknown[],
 ): Promise<SqlBodyDep[]> {
@@ -465,7 +477,7 @@ async function fetchSqlBodyDeps(
 }
 
 async function fetchFuncs(
-  client: Client,
+  client: QueryClient,
   where: string,
   params: unknown[],
 ): Promise<CatalogFunc[]> {

@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="/media/style.css" />
+    <title>Postgres Viz UI Harness</title>
+    <script>
+      const targets = Array.from({ length: 60 }, (_, index) => ({
+        data: {
+          id: `target${String(index).padStart(2, "0")}`,
+          label: `Target ${index}`,
+          type: "table",
+          schema: "public",
+          oid: index + 2,
+        },
+      }));
+      const graph = {
+        nodes: [
+          { data: { id: "hub", label: "Hub", type: "function", schema: "public", oid: 1 } },
+          ...targets,
+        ],
+        edges: targets.map((target, index) => ({
+          data: {
+            id: `edge${index}`,
+            source: "hub",
+            target: target.data.id,
+            kind: "calls",
+            agg: true,
+            count: 1,
+            kinds: { calls: 1 },
+          },
+        })),
+        stats: { function: 1, table: 60, edges: 60, cardEdges: 60 },
+      };
+      const prefs = {
+        layout: "grid",
+        edgeMode: "cards",
+        schemaGroup: false,
+        route: false,
+        hideIsolated: false,
+        engine: "v1",
+        filterSchemas: [],
+        filterNodeTypes: [],
+        filterEdgeKinds: [],
+      };
+      globalThis.__hostMessages = [];
+      globalThis.acquireVsCodeApi = () => ({
+        postMessage(message) {
+          globalThis.__hostMessages.push(message);
+          if (message.type === "ready") {
+            setTimeout(() => {
+              window.dispatchEvent(
+                new MessageEvent("message", {
+                  data: { type: "graph", graph, database: "ui-test" },
+                }),
+              );
+              window.dispatchEvent(new MessageEvent("message", { data: { type: "prefs", prefs } }));
+              setTimeout(
+                () =>
+                  window.dispatchEvent(
+                    new MessageEvent("message", { data: { type: "searchSelect", id: "hub" } }),
+                  ),
+                100,
+              );
+            }, 0);
+          }
+        },
+      });
+    </script>
+  </head>
+  <body class="vscode-dark">
+    <div id="content">
+      <div id="canvas">
+        <div
+          id="cy"
+          role="region"
+          aria-label="Database graph. Use arrow keys to navigate objects and Enter to open details."
+          tabindex="0"
+        ></div>
+        <div id="crumb" class="hidden"></div>
+        <button id="reset-filters" class="hidden">Clear filters</button>
+        <div id="empty" role="status">Loading</div>
+        <footer id="canvas-footer">
+          <div id="legend"></div>
+          <div id="stats"></div>
+        </footer>
+      </div>
+      <aside id="panel" class="hidden" aria-label="Object details">
+        <div
+          id="panel-resize"
+          role="separator"
+          aria-label="Resize details panel"
+          aria-orientation="vertical"
+          aria-valuemin="220"
+          aria-valuemax="680"
+          aria-valuenow="300"
+          tabindex="0"
+        ></div>
+        <div id="panel-body"></div>
+      </aside>
+    </div>
+    <script src="/media/webview.js"></script>
+    <script>
+      setTimeout(() => {
+        const errors = [];
+        const canvas = document.querySelector("#canvas");
+        const graphSurface = document.querySelector("#cy");
+        const panel = document.querySelector("#panel");
+        const renderedCanvas = graphSurface.querySelector("canvas");
+        const connectionButtons = panel.querySelectorAll(".edge-link");
+        if (panel.classList.contains("hidden")) errors.push("details panel did not open");
+        if (!renderedCanvas || renderedCanvas.width === 0 || renderedCanvas.height === 0) {
+          errors.push("cytoscape canvas is blank");
+        }
+        const surfaces = [...graphSurface.querySelectorAll("canvas")];
+        const graphPainted = surfaces.some((surface) => {
+          const pixels = surface
+            .getContext("2d")
+            ?.getImageData(0, 0, surface.width, surface.height).data;
+          if (!pixels) return false;
+          for (let offset = 3; offset < pixels.length; offset += 4) {
+            if (pixels[offset] !== 0) return true;
+          }
+          return false;
+        });
+        if (!graphPainted) {
+          const instance = graphSurface._cyreg?.cy;
+          const diagnostics = {
+            canvases: surfaces.map((surface) => `${surface.width}x${surface.height}`),
+            edges: instance?.edges().length,
+            firstNode: instance
+              ? {
+                  box: instance.nodes().first().renderedBoundingBox(),
+                  display: instance.nodes().first().style("display"),
+                  opacity: instance.nodes().first().style("opacity"),
+                  position: instance.nodes().first().renderedPosition(),
+                }
+              : undefined,
+            nodes: instance?.nodes().length,
+            pan: instance?.pan(),
+            zoom: instance?.zoom(),
+          };
+          errors.push(`cytoscape canvas has no painted pixels ${JSON.stringify(diagnostics)}`);
+        }
+        if (connectionButtons.length !== 40)
+          errors.push(`initial connection page=${connectionButtons.length}`);
+        const showMore = panel.querySelector(".show-more");
+        if (!showMore) errors.push("show-more control missing");
+        const selectedBefore = globalThis.__hostMessages.filter(
+          (message) => message.type === "nodeSelected",
+        ).length;
+        showMore?.click();
+        const expandedButtons = panel.querySelectorAll(".edge-link").length;
+        const selectedAfter = globalThis.__hostMessages.filter(
+          (message) => message.type === "nodeSelected",
+        ).length;
+        if (expandedButtons !== 60) errors.push(`expanded connection page=${expandedButtons}`);
+        if (selectedAfter !== selectedBefore) errors.push("paging repeated node selection");
+        graphSurface.focus();
+        graphSurface.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+        );
+        graphSurface.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        if (!/Press Enter to open details/.test(graphSurface.getAttribute("aria-label") ?? "")) {
+          errors.push("keyboard focus label did not update");
+        }
+        const canvasRect = canvas.getBoundingClientRect();
+        const panelRect = panel.getBoundingClientRect();
+        if (innerWidth > 620 && canvasRect.right > panelRect.left + 1)
+          errors.push("wide panel overlaps canvas");
+        if (innerWidth <= 620 && canvasRect.bottom > panelRect.top + 1)
+          errors.push("narrow panel overlaps canvas");
+        if (panelRect.height < 100 || panelRect.bottom > innerHeight + 1) {
+          errors.push(
+            `details panel outside viewport ${JSON.stringify({ bottom: panelRect.bottom, height: panelRect.height, viewport: innerHeight })}`,
+          );
+        }
+        if (document.documentElement.scrollWidth > innerWidth + 1)
+          errors.push("horizontal overflow");
+        const result = document.createElement("div");
+        result.id = "ui-test-result";
+        result.dataset.result = errors.length === 0 ? "pass" : "fail";
+        result.dataset.details = encodeURIComponent(JSON.stringify(errors));
+        document.body.append(result);
+      }, 900);
+    </script>
+  </body>
+</html>

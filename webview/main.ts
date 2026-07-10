@@ -7,16 +7,14 @@ import {
   type Prefs,
   type WebviewToHostMessage,
 } from "../src/protocol";
-import type { EdgeKind, GraphEdgeData, GraphNodeData, GraphPayload } from "../src/types";
+import type { EdgeKind, GraphNodeData, GraphPayload } from "../src/types";
 import {
-  aggregateMemberLabels,
   allCardUnits as coreCardUnits,
   callTreeClosure,
   fitTarget,
   isShownByClasses,
   type PositionSnapshot,
   snapshotPositions,
-  suppressRedundantAggs,
   unitOf,
 } from "./core";
 import {
@@ -40,6 +38,8 @@ import {
   initializeVirtualCards,
   materializeCard as adapterMaterializeCard,
   materializeNeighborhood as adapterMaterializeNeighborhood,
+  materializationRowCounts,
+  materializeWithinBudget,
   type EdgeDef,
   markCallTreeHot,
   markSingleCardEdgesOrthogonal,
@@ -49,9 +49,13 @@ import {
   restackRows as adapterRestackRows,
   restoreViewPositions,
   revealCallTreeEdges,
+  ROW_TYPES,
   setHoverReveal,
 } from "./cytoscape-adapter";
-import { ObstacleIndex } from "./router";
+import { EdgeRoutingPlanner } from "./router";
+import { GraphExporter } from "./graph-exporter";
+import { ConnectionList, type ConnectionListOptions } from "./connection-list";
+import { GraphKeyboardNavigator, type GraphKeyboardNavigatorOptions } from "./keyboard-navigator";
 
 const vscode = acquireVsCodeApi();
 
@@ -89,8 +93,6 @@ const EDGE_COLORS: Record<string, string> = {
   default: "#998DD9",
 };
 
-const ROW_TYPES = new Set(["column", "trigger", "constraint", "index"]);
-
 let cy: Core | null = null;
 let database = "";
 
@@ -104,6 +106,7 @@ const detailEdgesByCard = new Map<string, EdgeDef[]>();
 const cardOfNode = new Map<string, string>(); // row id → card id
 const nodeDefById = new Map<string, NodeDef>();
 const materialized = new Set<string>();
+const limitedCards = new Set<string>();
 const MATERIALIZE_CAP = 30;
 const MATERIALIZE_ALL_ROWS_CAP = 4_000;
 
@@ -120,6 +123,11 @@ function materializationState() {
     detailEdgesByCard,
     cardOfNode,
     materialized,
+    limited: limitedCards,
+    rowTypeFilter:
+      prefs.filterNodeTypes.length === 0
+        ? undefined
+        : new Set(prefs.filterNodeTypes.filter((type) => ROW_TYPES.has(type))),
     materializeCap: MATERIALIZE_CAP,
     materializeAllRowsCap: MATERIALIZE_ALL_ROWS_CAP,
   };
@@ -205,6 +213,7 @@ function materializeNeighborhood(unitId: string): void {
 function dematerializeAll(): void {
   if (!cy) return;
   adapterDematerializeAll(cy, materializationState());
+  limitedCards.clear();
 }
 
 // ── styles ──
@@ -408,6 +417,7 @@ function render(graph: GraphPayload): void {
   cardOfNode.clear();
   nodeDefById.clear();
   materialized.clear();
+  limitedCards.clear();
 
   const liveNodes: NodeDef[] = [];
   for (const n of graph.nodes) nodeDefById.set(n.data.id, n);
@@ -434,6 +444,7 @@ function render(graph: GraphPayload): void {
       }
     }
   }
+  connectionList.reindex();
   for (const n of liveNodes) {
     if (rowsByCard.has(n.data.id)) buildCardArt(n);
   }
@@ -450,7 +461,7 @@ function render(graph: GraphPayload): void {
     layout: { name: "preset" },
     wheelSensitivity: 0.2,
     hideEdgesOnViewport: true,
-    motionBlur: true,
+    motionBlur: false,
     pixelRatio: 1,
     boxSelectionEnabled: false,
     // dragging always pans the canvas — node positions are layout-owned
@@ -466,7 +477,6 @@ function render(graph: GraphPayload): void {
   applySchemaGrouping(false);
   applyFilters();
   runLayout();
-  updateStats();
   cy.on("tap", "node", (ev) => {
     const n = ev.target as NodeSingular;
     const unit = unitOf(n);
@@ -487,7 +497,6 @@ function applyFilters(): void {
   if (!cy) return;
   applyFilterClasses(cy, materializationState(), prefs, edgeMode(), Boolean(view));
   restackRows();
-  updateStats();
   buildLegend();
 }
 
@@ -527,7 +536,7 @@ function canvasAspect(): number {
   return Math.min(5, Math.max(1, raw)) * 1.3;
 }
 
-/** Animated fit — every viewport change eases instead of teleporting. */
+/** Fit synchronously so follow-up selection animations cannot interrupt it. */
 function fitView(eles?: cytoscape.CollectionArgument, padding = 50): void {
   if (!cy) return;
   cy.stop();
@@ -535,11 +544,7 @@ function fitView(eles?: cytoscape.CollectionArgument, padding = 50): void {
   // after the batched class changes of focus/call-tree, so `:visible` fits
   // would cover the long-hidden full-graph extent and zoom way out
   const target = eles ?? fitTarget(cy);
-  cy.animate({
-    fit: { eles: target as never, padding },
-    duration: 250,
-    easing: "ease-in-out-cubic",
-  } as never);
+  cy.fit(target, padding);
 }
 
 // visibility/unit helpers live in core.ts so headless tests can cover them
@@ -794,7 +799,36 @@ function edgeShownForRouting(e: EdgeSingular): boolean {
   return isShown(e.source() as NodeSingular) && isShown(e.target() as NodeSingular);
 }
 
+const graphExporter = new GraphExporter({
+  graph: () => cy,
+  dark: isDark,
+  nodeShown: isShown,
+  edgeShown: edgeShownForRouting,
+  nodeColors: NODE_COLORS,
+  edgeColors: EDGE_COLORS,
+});
+
+const connectionList = new ConnectionList({
+  root: el("panel-body") as unknown as ConnectionListOptions["root"],
+  graph: () => cy,
+  prefs: () => prefs,
+  edgeColors: EDGE_COLORS,
+  detailEdgesByCard,
+  nodeDefById,
+  cardOfNode,
+  isShown,
+  onSelect: (node) => {
+    selectNode(node);
+    cy?.animate({ center: { eles: node }, duration: 200 } as never);
+  },
+  onPage: (html) => {
+    const sections = el("panel-body").querySelector<HTMLElement>("#connection-sections");
+    if (sections) sections.innerHTML = html;
+  },
+});
+
 const routedEdges = new Set<string>();
+let routingLimited = 0;
 
 function clearEdgeRouting(): void {
   if (!cy) return;
@@ -804,38 +838,51 @@ function clearEdgeRouting(): void {
 function routeEdgesAroundCards(): void {
   if (!cy) return;
   clearEdgeRouting();
-  if (!prefs.route) return;
+  routingLimited = 0;
+  if (!prefs.route) {
+    updateStats();
+    return;
+  }
   const units = cardUnits();
   const boxes = units.map((u) => {
     const b = unitBox(u);
     return { id: u.id(), box: { x1: b.x1 - 10, y1: b.y1 - 10, x2: b.x2 + 10, y2: b.y2 + 10 } };
   });
-  if (boxes.length === 0) return;
-  const obstacleIndex = new ObstacleIndex(boxes);
-  let inspected = 0;
+  if (boxes.length === 0) {
+    updateStats();
+    return;
+  }
+  const planner = new EdgeRoutingPlanner<EdgeSingular>(boxes, 2_000);
+  const extent = cy.extent();
+  const center = { x: (extent.x1 + extent.x2) / 2, y: (extent.y1 + extent.y2) / 2 };
   cy.edges().forEach((edge) => {
     const e = edge as EdgeSingular;
-    if (!edgeShownForRouting(e) || inspected++ >= 2_000) return;
-    const sU = unitOf(e.source() as NodeSingular).id();
-    const tU = unitOf(e.target() as NodeSingular).id();
-    if (sU === tU) return;
-    const sp = e.source().position();
-    const tp = e.target().position();
-    const blocked = obstacleIndex.intersects(sp.x, sp.y, tp.x, tp.y, sU, tU);
-    if (!blocked) return;
-    const sBox = obstacleIndex.box(sU);
-    const tBox = obstacleIndex.box(tU);
-    const down = tp.y >= sp.y;
-    const outY = down ? (sBox?.y2 ?? sp.y) + 6 : (sBox?.y1 ?? sp.y) - 6;
-    const inY = down ? (tBox?.y1 ?? tp.y) - 6 : (tBox?.y2 ?? tp.y) + 6;
-    // Absolute waypoints become cytoscape relative segment-weights/-distances.
-    applyEdgeSegments(routedEdges, e, sp, tp, [
-      { x: sp.x, y: outY },
-      { x: obstacleIndex.busX, y: outY },
-      { x: obstacleIndex.busX, y: inY },
-      { x: tp.x, y: inY },
-    ]);
+    if (!edgeShownForRouting(e)) return;
+    const source = e.source() as NodeSingular;
+    const target = e.target() as NodeSingular;
+    const sourceUnit = unitOf(source).id();
+    const targetUnit = unitOf(target).id();
+    const sp = source.position();
+    const tp = target.position();
+    const inViewport =
+      (sp.x >= extent.x1 && sp.x <= extent.x2 && sp.y >= extent.y1 && sp.y <= extent.y2) ||
+      (tp.x >= extent.x1 && tp.x <= extent.x2 && tp.y >= extent.y1 && tp.y <= extent.y2);
+    planner.add(
+      e,
+      sourceUnit,
+      targetUnit,
+      sp,
+      tp,
+      source.selected() || target.selected() ? 0 : inViewport ? 1 : 2,
+      Math.hypot((sp.x + tp.x) / 2 - center.x, (sp.y + tp.y) / 2 - center.y),
+    );
   });
+  const planned = planner.result();
+  routingLimited = planned.omitted;
+  for (const route of planned.routes) {
+    applyEdgeSegments(routedEdges, route.value, route.source, route.target, route.waypoints);
+  }
+  updateStats();
 }
 
 function runLayout(): void {
@@ -1059,8 +1106,15 @@ function applyCallTreePresentation(): void {
     return false;
   };
 
-  // make the chain's column detail available, then reveal ONLY the chain
-  for (const id of keep) materializeCard(id);
+  // A base "all" view may already have spent the full row budget on unrelated
+  // cards. Rebuild detail from the call-tree set so the budget serves this view.
+  dematerializeAll();
+  // Prioritize the origin, then the call-chain order, but keep the same hard
+  // row budget as the all-connections view. Oversized cards stay compact.
+  const rootCard = cardOfNode.get(spec.rootId) ?? spec.rootId;
+  const detailCards = [...keep].filter((id) => rowsByCard.has(id));
+  detailCards.sort((a, b) => (a === rootCard ? -1 : b === rootCard ? 1 : 0));
+  materializeWithinBudget(cy, materializationState(), detailCards);
   applyFilters();
   const touchedRows = collectCallTreeTouchedRows(cy, ROW_TYPES, unitOf, onChain);
 
@@ -1154,24 +1208,6 @@ function wireHoverPreview(): void {
 
 // ── panel ──
 
-/** Incoming relationships read passively: X *is called by* Y, never "Y calls". */
-const PASSIVE_KIND: Record<string, string> = {
-  calls: "called by",
-  executes: "executed by",
-  reads: "read by",
-  inserts: "inserted by",
-  updates: "updated by",
-  deletes: "deleted by",
-  writes: "written by",
-  modifies: "modified by",
-  selects: "selected by",
-  fk: "referenced by",
-  constrains: "constrained by",
-  indexes: "indexed by",
-  "update-of": "update-of by",
-  default: "default of",
-};
-
 function renderPanel(node: NodeSingular): void {
   const d = node.data() as GraphNodeData;
   el("panel").classList.remove("hidden");
@@ -1181,82 +1217,12 @@ function renderPanel(node: NodeSingular): void {
   });
   const panel = el("panel-body");
   postToHost({ type: "nodeSelected", id: node.id() });
-  const isCard = rowsByCard.has(node.id()) || node.isParent();
-  const edges = (
-    isCard ? node.union(node.descendants()).connectedEdges("[?agg]") : node.connectedEdges("[!agg]")
-  ).filter((e) => edgeShownByClasses(e as EdgeSingular));
-  const records: {
-    kind: string;
-    counterUnit: string;
-    out: boolean;
-    agg?: boolean;
-    detail?: boolean;
-    data: GraphEdgeData;
-    other: NodeSingular;
-  }[] = [];
-  edges.forEach((e: EdgeSingular) => {
-    const data = e.data() as GraphEdgeData;
-    const outgoing = node.union(node.descendants()).contains(e.source());
-    const other = (outgoing ? e.target() : e.source()) as NodeSingular;
-    records.push({
-      kind: data.kind,
-      counterUnit: unitOf(other).id(),
-      out: outgoing,
-      agg: data.agg,
-      detail: data.detail,
-      data,
-      other,
-    });
-  });
-  const outRows: string[] = [];
-  const inRows: string[] = [];
-  // when a relationship's columns are listed, its table-level rollup is noise
-  for (const rec of suppressRedundantAggs(records)) {
-    const { data, other, out: outgoing } = rec;
-    const otherData = other.data() as GraphNodeData;
-    const owner = ROW_TYPES.has(otherData.type)
-      ? String(other.parent().first().data("label") ?? "")
-      : "";
-    const display = owner ? `${owner}.${otherData.label}` : otherData.label;
-    const visibleKindCounts = data.kinds
-      ? Object.fromEntries(
-          Object.entries(data.kinds).filter(
-            ([kind]) =>
-              prefs.filterEdgeKinds.length === 0 ||
-              prefs.filterEdgeKinds.includes(kind as EdgeKind),
-          ),
-        )
-      : undefined;
-    const kindLabel = visibleKindCounts
-      ? Object.entries(visibleKindCounts)
-          .map(
-            ([kind, count]) =>
-              `${outgoing ? kind : (PASSIVE_KIND[kind] ?? `${kind} by`)}${count > 1 ? ` ×${count}` : ""}`,
-          )
-          .join(", ")
-      : `${outgoing ? data.kind : (PASSIVE_KIND[data.kind] ?? `${data.kind} by`)}${data.count && data.count > 1 ? ` ×${data.count}` : ""}`;
-    // Aggregate edge members come from the payload when detail edges are not materialized.
-    const cols = data.agg
-      ? aggregateMemberLabels(
-          { ...data, kinds: visibleKindCounts },
-          detailEdgesByCard,
-          nodeDefById,
-          cardOfNode,
-          ROW_TYPES,
-        )
-      : "";
-    (outgoing ? outRows : inRows).push(`<li data-node="${esc(other.id())}">
-        <span class="kind" style="color:${data.agg ? "#8993A4" : (EDGE_COLORS[data.kind] ?? "#8993A4")}">${outgoing ? "→" : "←"} ${esc(kindLabel)}</span>
-        <span class="name">${esc(display)}</span>
-        <small>${esc(otherData.type)}</small>
-        ${cols ? `<span class="cols">${esc(cols)}</span>` : ""}
-      </li>`);
-  }
+  const connections = connectionList.render(node);
   const ownerTable = ROW_TYPES.has(d.type) ? String(node.parent().first().data("label") ?? "") : "";
   const where = ownerTable ? `${d.schema ?? ""}.${ownerTable}` : (d.schema ?? "");
   const canCallTree = d.type === "function" || d.type === "trigger";
   panel.innerHTML = `
-    <button class="close" id="panel-close" title="close">✕</button>
+    <button class="close" id="panel-close" title="Close details" aria-label="Close details">x</button>
     <h2>${esc(d.label)}</h2>
     <p class="meta">
       <span class="chip" style="background:${NODE_COLORS[d.type] ?? "#888"}">${esc(d.type)}</span>
@@ -1268,9 +1234,7 @@ function renderPanel(node: NodeSingular): void {
       <button id="focus-btn" class="${view?.mode === "focus" && view.rootId === node.id() ? "active-focus" : ""}">Focus</button>
       ${canCallTree ? `<button id="calltree-btn" class="${view?.mode === "calltree" && view.rootId === node.id() ? "active-calltree" : ""}">Call tree</button>` : ""}
     </div>
-    ${outRows.length > 0 ? `<details ${outRows.length <= 12 ? "open" : ""}><summary>Uses (${outRows.length})</summary><ul class="edge-list">${outRows.join("")}</ul></details>` : ""}
-    ${inRows.length > 0 ? `<details ${inRows.length <= 12 ? "open" : ""}><summary>Used by (${inRows.length})</summary><ul class="edge-list">${inRows.join("")}</ul></details>` : ""}
-    ${outRows.length === 0 && inRows.length === 0 ? "<h3>No connections</h3>" : ""}`;
+    ${connections}`;
   panel.querySelector("#panel-close")?.addEventListener("click", () => {
     if (view) {
       // keep the view, just dismiss the panel — clearSelection in focus mode
@@ -1341,17 +1305,6 @@ function renderPanel(node: NodeSingular): void {
       if (live) showCallTree(live);
     }
   });
-  panel.querySelectorAll<HTMLElement>("li[data-node]").forEach((li) => {
-    li.addEventListener("click", () => {
-      const other = cy?.getElementById(li.dataset.node!);
-      // never navigate to a node the current view hides — the camera would
-      // fly to its off-view saved position and show blank space
-      if (other && other.nonempty() && isShown(other as unknown as NodeSingular)) {
-        selectNode(other as unknown as NodeSingular);
-        cy?.animate({ center: { eles: other }, duration: 200 } as never);
-      }
-    });
-  });
 }
 
 /** Isolate one schema's tables/views/functions (clicking a schema in the tree). */
@@ -1393,16 +1346,16 @@ function updateStats(): void {
     .filter((edge) => edgeShownForRouting(edge as EdgeSingular)).length;
   const activeFilters =
     prefs.filterSchemas.length + prefs.filterNodeTypes.length + prefs.filterEdgeKinds.length;
-  const totalRows = [...rowsByCard.values()].reduce((sum, rows) => sum + rows.length, 0);
-  const liveRows = [...materialized].reduce(
-    (sum, id) => sum + (rowsByCard.get(id)?.length ?? 0),
-    0,
-  );
+  const rowCounts = materializationRowCounts(materializationState());
   const parts = [
     `${visibleUnits}/${units.length} objects`,
     `${visibleEdges} connections`,
     activeFilters > 0 ? `${activeFilters} filters` : "",
-    edgeMode() === "all" && liveRows < totalRows ? `detail budget ${liveRows}/${totalRows}` : "",
+    edgeMode() === "all" && rowCounts.materialized < rowCounts.total
+      ? `detail budget ${rowCounts.materialized}/${rowCounts.total}`
+      : "",
+    limitedCards.size > 0 ? `${limitedCards.size} compact at detail limit` : "",
+    routingLimited > 0 ? `${routingLimited} routes omitted` : "",
   ].filter(Boolean);
   const text = `${database ? `${database} · ` : ""}${parts.join(" · ")}`;
   // on-canvas overlay (bottom-right, like the legend)…
@@ -1476,7 +1429,19 @@ function applyPrefs(next: Prefs): void {
   const prev = prefs;
   prefs = next;
   if (!cy) return;
-  if (!sameList(next.filterNodeTypes, prev.filterNodeTypes)) {
+  const nodeTypesChanged = !sameList(next.filterNodeTypes, prev.filterNodeTypes);
+  const layoutChanged = next.layout !== prev.layout || next.engine !== prev.engine;
+  const edgeModeChanged = next.edgeMode !== prev.edgeMode;
+  const schemaGroupChanged = next.schemaGroup !== prev.schemaGroup;
+  const routeChanged = next.route !== prev.route;
+  const filtersChanged =
+    !sameList(next.filterSchemas, prev.filterSchemas) ||
+    nodeTypesChanged ||
+    !sameList(next.filterEdgeKinds, prev.filterEdgeKinds);
+  const visibilityChanged = next.hideIsolated !== prev.hideIsolated || filtersChanged;
+  if (nodeTypesChanged) {
+    const rematerialize = [...materialized];
+    dematerializeAll();
     for (const id of rowsByCard.keys()) {
       const definition = nodeDefById.get(id);
       if (!definition) continue;
@@ -1488,30 +1453,33 @@ function applyPrefs(next: Prefs): void {
         card.data("cardH", definition.data.cardH);
       }
     }
+    for (const id of rematerialize) materializeCard(id);
   }
-  // engine swaps the tree/call-graph layout — re-run if it changed, or if the
-  // layout shape changed. In a call-tree view, relayout in place so the chain
-  // re-ranks without exiting the view.
-  if (next.layout !== prev.layout || next.engine !== prev.engine) {
-    if (view?.mode === "calltree") applyCallTreePresentation();
-    else runLayout();
-  }
-  if (next.edgeMode !== prev.edgeMode) {
-    // leaving "all" with no active view: collapse the rows it force-materialized
-    if (prev.edgeMode === "all" && !view) dematerializeAll();
-    applyFilters();
-    routeEdgesAroundCards();
-  }
-  if (next.schemaGroup !== prev.schemaGroup) applySchemaGrouping(true);
-  if (next.route !== prev.route) routeEdgesAroundCards();
+
   if (
-    next.hideIsolated !== prev.hideIsolated ||
-    !sameList(next.filterSchemas, prev.filterSchemas) ||
-    !sameList(next.filterNodeTypes, prev.filterNodeTypes) ||
-    !sameList(next.filterEdgeKinds, prev.filterEdgeKinds)
+    !view &&
+    ((edgeModeChanged && prev.edgeMode === "all") || (filtersChanged && next.edgeMode === "all"))
   ) {
-    applyFilters();
-    routeEdgesAroundCards();
+    dematerializeAll();
+    limitedCards.clear();
+  }
+
+  if (schemaGroupChanged) applySchemaGrouping(false);
+  if (view?.mode === "calltree" && (layoutChanged || nodeTypesChanged)) {
+    applyCallTreePresentation();
+    return;
+  }
+
+  const needsFilter = edgeModeChanged || schemaGroupChanged || visibilityChanged;
+  const needsLayout = schemaGroupChanged || layoutChanged;
+  const needsRoute = edgeModeChanged || routeChanged || visibilityChanged;
+  if (needsFilter) applyFilters();
+  if (needsLayout) runLayout();
+  else if (needsRoute) routeEdgesAroundCards();
+
+  if ((edgeModeChanged || visibilityChanged) && !el("panel").classList.contains("hidden")) {
+    const selected = cy.nodes(":selected").first();
+    if (selected.nonempty()) renderPanel(selected as unknown as NodeSingular);
   }
 }
 
@@ -1549,60 +1517,16 @@ function callTreeById(id: string): void {
 }
 
 function exportPng(): void {
-  if (!cy) return;
   requestAnimationFrame(() => {
-    if (!cy) return;
-    postToHost({
-      type: "pngExport",
-      dataUri: cy.png({ full: true, scale: 2, bg: isDark() ? "#1e1e1e" : "#ffffff" }),
-    });
+    const dataUri = graphExporter.png();
+    if (dataUri) postToHost({ type: "pngExport", dataUri });
   });
 }
 
 function exportSvg(): void {
-  if (!cy) return;
   requestAnimationFrame(() => {
-    if (!cy) return;
-    const nodes = cy.nodes().filter((n) => isShown(n as NodeSingular));
-    const edges = cy.edges().filter((e) => edgeShownForRouting(e as EdgeSingular));
-    const bb = nodes.nonempty()
-      ? nodes.boundingBox({ includeLabels: true, includeOverlays: false })
-      : { x1: 0, y1: 0, w: 800, h: 600 };
-    const pad = 48;
-    const x0 = bb.x1 - pad;
-    const y0 = bb.y1 - pad;
-    const w = Math.max(1, bb.w + pad * 2);
-    const h = Math.max(1, bb.h + pad * 2);
-    const colorOf = (n: NodeSingular): string => NODE_COLORS[String(n.data("type"))] ?? "#8f9bb3";
-    const parts = [
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(w)}" height="${Math.ceil(h)}" viewBox="${x0} ${y0} ${w} ${h}">`,
-      `<rect x="${x0}" y="${y0}" width="${w}" height="${h}" fill="${isDark() ? "#1e1e1e" : "#ffffff"}"/>`,
-    ];
-    edges.forEach((e) => {
-      const s = e.source().position();
-      const t = e.target().position();
-      const color = EDGE_COLORS[String(e.data("kind"))] ?? "#6b778c";
-      parts.push(
-        `<line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke="${color}" stroke-width="1.5" stroke-opacity="0.75"/>`,
-      );
-    });
-    nodes.forEach((raw) => {
-      const n = raw as NodeSingular;
-      const p = n.position();
-      const label = esc(n.data("label"));
-      if (n.isParent()) {
-        const box = n.boundingBox({ includeLabels: false, includeOverlays: false });
-        parts.push(
-          `<rect x="${box.x1}" y="${box.y1}" width="${box.w}" height="${box.h}" rx="6" fill="${colorOf(n)}" fill-opacity="0.08" stroke="${colorOf(n)}" stroke-opacity="0.35"/>`,
-        );
-      } else {
-        parts.push(
-          `<circle cx="${p.x}" cy="${p.y}" r="8" fill="${colorOf(n)}"/><text x="${p.x + 12}" y="${p.y + 4}" font-family="sans-serif" font-size="11" fill="${isDark() ? "#d4d4d4" : "#172b4d"}">${label}</text>`,
-        );
-      }
-    });
-    parts.push("</svg>");
-    postToHost({ type: "svgExport", svg: parts.join("") });
+    const svg = graphExporter.svg();
+    if (svg) postToHost({ type: "svgExport", svg });
   });
 }
 
@@ -1655,6 +1579,20 @@ window.addEventListener("message", (ev: MessageEvent) => {
   }
 });
 
+new GraphKeyboardNavigator({
+  surface: el("cy") as unknown as GraphKeyboardNavigatorOptions["surface"],
+  graph: () => cy,
+  units: cardUnits,
+  onFocus: (next) => {
+    const graph = cy;
+    if (!graph) return;
+    graph.nodes().unselect();
+    next.select();
+    graph.animate({ center: { eles: next }, duration: 120 } as never);
+  },
+  onOpen: selectNode,
+});
+
 window.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") exitView(true);
 });
@@ -1668,6 +1606,15 @@ window.addEventListener("keydown", (ev) => {
   const panelEl = el("panel");
   const handle = el("panel-resize");
   let resizing = false;
+  const setPanelWidth = (width: number): void => {
+    const bounded = Math.min(680, Math.max(220, width), Math.max(220, window.innerWidth - 80));
+    panelEl.style.width = `${bounded}px`;
+    handle.setAttribute("aria-valuenow", String(Math.round(bounded)));
+    cy?.resize();
+  };
+  const stopResizing = (): void => {
+    resizing = false;
+  };
   handle.addEventListener("pointerdown", (ev) => {
     resizing = true;
     handle.setPointerCapture(ev.pointerId);
@@ -1675,13 +1622,19 @@ window.addEventListener("keydown", (ev) => {
   });
   handle.addEventListener("pointermove", (ev) => {
     if (!resizing) return;
-    const width = Math.min(680, Math.max(220, window.innerWidth - ev.clientX - 8));
-    panelEl.style.width = `${width}px`;
-    cy?.resize();
+    setPanelWidth(window.innerWidth - ev.clientX - 8);
   });
   handle.addEventListener("pointerup", (ev) => {
-    resizing = false;
-    handle.releasePointerCapture(ev.pointerId);
+    stopResizing();
+    if (handle.hasPointerCapture(ev.pointerId)) handle.releasePointerCapture(ev.pointerId);
+  });
+  handle.addEventListener("pointercancel", stopResizing);
+  handle.addEventListener("lostpointercapture", stopResizing);
+  handle.addEventListener("keydown", (ev) => {
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    const current = panelEl.getBoundingClientRect().width;
+    setPanelWidth(current + (ev.key === "ArrowLeft" ? 24 : -24));
+    ev.preventDefault();
   });
 }
 buildLegend();

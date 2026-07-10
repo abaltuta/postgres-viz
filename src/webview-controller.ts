@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import type { GraphPayload, NodeType } from "./types";
 import type { HostToWebviewMessage, Prefs } from "./protocol";
+import { pngDataUriLengthWithinLimit, validateSvgText } from "./export-data";
 
 type PendingCommand = Extract<
   HostToWebviewMessage,
@@ -110,7 +111,7 @@ export class WebviewController implements vscode.Disposable {
   }
 
   post(message: HostToWebviewMessage): void {
-    void this.panel?.webview.postMessage(message);
+    void this.deliver(message);
   }
 
   postPrefs(): void {
@@ -145,7 +146,7 @@ export class WebviewController implements vscode.Disposable {
       if (!isRecord(msg)) return;
       if (msg.type === "ready") {
         this.ready = true;
-        this.replayReadyState();
+        await this.replayReadyState();
       } else if (msg.type === "stats") {
         this.opts.onStats(String(msg.text ?? ""));
       } else if (msg.type === "refresh") {
@@ -176,34 +177,67 @@ export class WebviewController implements vscode.Disposable {
       } else if (msg.type === "nodeSelected") {
         await this.opts.onNodeSelected(optionalString(msg.id));
       } else if (msg.type === "pngExport") {
-        if (typeof msg.dataUri === "string") await this.opts.onPngExport(msg.dataUri);
+        if (typeof msg.dataUri !== "string") return;
+        if (!pngDataUriLengthWithinLimit(msg.dataUri.length)) {
+          throw new Error("PNG export exceeds the 32 MB limit");
+        }
+        await this.opts.onPngExport(msg.dataUri);
       } else if (msg.type === "svgExport") {
-        if (typeof msg.svg === "string") await this.opts.onSvgExport(msg.svg);
+        if (typeof msg.svg !== "string") return;
+        const validation = validateSvgText(msg.svg);
+        if (!validation.ok) {
+          throw new Error(
+            validation.reason === "too-large"
+              ? "SVG export exceeds the 16 MB limit"
+              : "SVG export contains unsupported active or external content",
+          );
+        }
+        await this.opts.onSvgExport(msg.svg);
       }
     } catch (err) {
       this.opts.onError(err);
     }
   }
 
-  private replayReadyState(): void {
+  private async replayReadyState(): Promise<void> {
     const graph = this.opts.currentGraph();
     if (graph) {
-      this.post({ type: "graph", graph, database: this.opts.currentDatabase() });
+      await this.deliver({ type: "graph", graph, database: this.opts.currentDatabase() });
     }
-    this.postPrefs();
+    await this.deliver({ type: "prefs", prefs: this.opts.prefs() });
     const pending = this.pendingCommands;
     this.pendingCommands = [];
-    for (const command of pending) this.post(command);
+    for (const command of pending) {
+      if (!(await this.deliver(command))) this.queuePending(command);
+    }
   }
 
   private postWhenReady(command: PendingCommand): void {
     this.ensureRevealed();
-    if (this.ready) this.post(command);
-    else {
-      this.pendingCommands = this.pendingCommands.filter(
-        (pending) => pending.type !== command.type,
-      );
-      this.pendingCommands.push(command);
+    if (this.ready) {
+      void this.deliver(command).then((delivered) => {
+        if (!delivered) this.queuePending(command);
+      });
+    } else this.queuePending(command);
+  }
+
+  private queuePending(command: PendingCommand): void {
+    this.pendingCommands = this.pendingCommands.filter((pending) => pending.type !== command.type);
+    this.pendingCommands.push(command);
+  }
+
+  private async deliver(message: HostToWebviewMessage): Promise<boolean> {
+    const panel = this.panel;
+    if (!panel) return false;
+    try {
+      const delivered = await panel.webview.postMessage(message);
+      if (!delivered && this.panel === panel) {
+        throw new Error(`webview rejected host message: ${message.type}`);
+      }
+      return delivered;
+    } catch (error) {
+      if (this.panel === panel) this.opts.onError(error);
+      return false;
     }
   }
 }
@@ -252,15 +286,17 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <body>
   <div id="content">
     <div id="canvas">
-      <div id="cy"></div>
+      <div id="cy" role="region" aria-label="Database graph. Use arrow keys to navigate objects and Enter to open details." tabindex="0"></div>
       <div id="crumb" class="hidden"></div>
       <button id="reset-filters" class="hidden" title="clear active graph filters">Clear filters</button>
-      <div id="legend"></div>
-      <div id="stats"></div>
-      <div id="empty">No connection - use the Postgres Viz status bar item or the sidebar to connect.</div>
+      <div id="empty" role="status">No connection - use the Postgres Viz status bar item or the sidebar to connect.</div>
+      <footer id="canvas-footer">
+        <div id="legend"></div>
+        <div id="stats" aria-live="polite"></div>
+      </footer>
     </div>
-    <aside id="panel" class="hidden">
-      <div id="panel-resize" title="drag to resize"></div>
+    <aside id="panel" class="hidden" aria-label="Object details">
+      <div id="panel-resize" role="separator" aria-label="Resize details panel" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="680" aria-valuenow="300" tabindex="0" title="drag or use arrow keys to resize"></div>
       <div id="panel-body"></div>
     </aside>
   </div>

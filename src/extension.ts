@@ -1,12 +1,14 @@
 import * as vscode from "vscode";
 import { createHash } from "node:crypto";
 import { disposeParser } from "./analyze";
+import { graphCacheAgeSeconds, graphCacheEntryIsFresh } from "./cache-policy";
 import {
   ConnectionProfileStore,
   defaultProfileName,
   type ConnectionProfile,
 } from "./connection-profiles";
 import { fetchDdl, type SqlObjectName } from "./ddl";
+import { decodePngExport, validateSvgText } from "./export-data";
 import { DdlDocumentSymbolProvider } from "./ddl-symbol-provider";
 import { buildGraphDiffReport, type GraphSnapshot } from "./graph-diff";
 import { GraphIndex } from "./graph-index";
@@ -28,6 +30,7 @@ import {
   type HostToWebviewMessage,
   type Prefs,
 } from "./protocol";
+import { SerializedMementoWriter } from "./preference-store";
 import { routineNameFromLabel } from "./routine-label";
 import {
   indexSqlMigrationEntries,
@@ -67,15 +70,17 @@ let connectionProfiles: ConnectionProfileStore | undefined;
 /** set once the user touches "hide isolated" — after that we never auto-force it */
 let prefs: Prefs = { ...DEFAULT_PREFS };
 let workspaceState: vscode.Memento | undefined;
+let workspaceWriter: SerializedMementoWriter | undefined;
 /** latest stats line from the webview — folded into the status bar tooltip */
 let lastStatsText = "";
+let cacheStatusText = "";
 
 let statusItem: vscode.StatusBarItem | undefined;
 /** lenses re-render when a graph loads (anchors resolve against it) */
 let hclLensProvider: HclLensProvider | undefined;
 
 function savePrefs(): void {
-  void workspaceState?.update(PREFS_KEY, prefs);
+  workspaceWriter?.update(PREFS_KEY, prefs);
 }
 
 function setPrefs(next: Prefs): void {
@@ -105,6 +110,7 @@ function updateStatusItem(): void {
       : `Postgres Viz - not connected${profile}`,
   ];
   if (lastStatsText) lines.push(lastStatsText);
+  if (currentGraph && cacheStatusText) lines.push(cacheStatusText);
   lines.push("Click for connection actions");
   statusItem.tooltip = lines.join("\n");
   statusItem.show();
@@ -495,6 +501,11 @@ export function activate(context: vscode.ExtensionContext): void {
   hclIndex = new HclIndex(context.subscriptions);
   sqlMigrationIndex = new SqlMigrationIndex(context.subscriptions);
   workspaceState = context.workspaceState;
+  workspaceWriter = new SerializedMementoWriter(context.workspaceState, (error) => {
+    logLine(
+      `workspace state update failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
   connectionProfiles = new ConnectionProfileStore(
     context.workspaceState,
     context.secrets,
@@ -579,7 +590,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("postgresViz.refreshGraph", reloadLastGraph),
     vscode.commands.registerCommand("postgresViz.chooseLayout", chooseLayout),
     vscode.commands.registerCommand("postgresViz.chooseEdgeMode", chooseEdgeMode),
-    vscode.commands.registerCommand("postgresViz.viewOptions", () => viewOptions(context)),
+    vscode.commands.registerCommand("postgresViz.viewOptions", viewOptions),
     vscode.commands.registerCommand("postgresViz.facetedFilters", facetedFilters),
     vscode.commands.registerCommand("postgresViz.searchGraph", searchGraph),
     vscode.commands.registerCommand("postgresViz.impactAnalysis", (n?: TreeNode) =>
@@ -601,8 +612,9 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-export function deactivate(): void {
+export async function deactivate(): Promise<void> {
   disposeParser();
+  await workspaceWriter?.flush();
 }
 
 async function visualize(): Promise<void> {
@@ -642,6 +654,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
   const schemas = cfg.get<string[]>("schemas") ?? [];
   const excludeSchemas = cfg.get<string[]>("excludeSchemas") ?? [];
   const includeFks = cfg.get<boolean>("includeForeignKeys") ?? true;
+  const cacheTtlSeconds = Math.max(0, cfg.get<number>("cacheTtlSeconds") ?? 60);
   const key = JSON.stringify([
     profileId,
     createHash("sha256").update(conn).digest("hex"),
@@ -651,9 +664,11 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
   ]);
   if (!opts.force) {
     const cached = graphCache.get(key);
-    if (cached) {
-      const age = Math.round((Date.now() - cached.builtAt) / 1000);
+    const now = Date.now();
+    if (cached && graphCacheEntryIsFresh(cached.builtAt, cacheTtlSeconds, now)) {
+      const age = graphCacheAgeSeconds(cached.builtAt, now);
       logLine(`cache hit — serving graph built ${age}s ago (refresh to rebuild)`);
+      cacheStatusText = `Graph source: memory cache (${age}s old)`;
       currentGraph = cached.graph;
       currentDatabase = cached.database;
       cachedGraphProfileId = profileId;
@@ -672,7 +687,12 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
       if (activeLoadCancellation === loadCancellation) activeLoadCancellation = undefined;
       return;
     }
+    if (cached) {
+      graphCache.delete(key);
+      logLine("cache expired — rebuilding graph");
+    }
   }
+  cacheStatusText = "";
   const switchingProfiles = Boolean(currentGraph && cachedGraphProfileId !== profileId);
   if (switchingProfiles) {
     currentGraph = null;
@@ -734,6 +754,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
           if (oldest !== undefined) graphCache.delete(oldest);
         }
         currentGraph = graph;
+        cacheStatusText = "";
         currentDatabase = database;
         cachedGraphProfileId = profileId;
         lastDiagnostics = diagnostics;
@@ -1055,7 +1076,7 @@ async function chooseEdgeMode(): Promise<void> {
   setPrefs({ ...prefs, edgeMode: pick.value });
 }
 
-async function viewOptions(context: vscode.ExtensionContext): Promise<void> {
+async function viewOptions(): Promise<void> {
   type Item = vscode.QuickPickItem & { id: "schemaGroup" | "route" | "hideIsolated" };
   const items: Item[] = [
     { id: "schemaGroup", label: "Group by schema", picked: prefs.schemaGroup },
@@ -1081,7 +1102,7 @@ async function viewOptions(context: vscode.ExtensionContext): Promise<void> {
   };
   // remember that the user has an opinion on hide-isolated — stop auto-forcing it
   if (next.hideIsolated !== prefs.hideIsolated) {
-    void context.workspaceState.update(HIDE_ISOLATED_TOUCHED_KEY, true);
+    workspaceWriter?.update(HIDE_ISOLATED_TOUCHED_KEY, true);
   }
   setPrefs(next);
 }
@@ -1256,20 +1277,6 @@ function isGraphSnapshot(value: unknown): value is GraphSnapshot {
   );
 }
 
-const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] as const;
-
-function decodePngExport(dataUri: unknown): Buffer | undefined {
-  if (typeof dataUri !== "string") return undefined;
-  const match = /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/.exec(dataUri.trim());
-  const encoded = match?.[1];
-  if (!encoded || encoded.length % 4 !== 0) return undefined;
-  const bytes = Buffer.from(encoded, "base64");
-  return bytes.length > PNG_SIGNATURE.length &&
-    PNG_SIGNATURE.every((byte, index) => bytes[index] === byte)
-    ? bytes
-    : undefined;
-}
-
 const EXPORT_FILENAME_FORBIDDEN = new Set(["<", ">", ":", '"', "/", "\\", "|", "?", "*"]);
 
 function exportDefaultUri(extension: "png" | "svg"): vscode.Uri {
@@ -1404,8 +1411,13 @@ async function savePngExport(dataUri: string): Promise<void> {
 }
 
 async function saveSvgExport(svg: string): Promise<void> {
-  if (!/^<svg(?:\s|>)/i.test(svg.trimStart())) {
-    vscode.window.showErrorMessage("Postgres Viz: invalid SVG export data.");
+  const validation = validateSvgText(svg);
+  if (!validation.ok) {
+    vscode.window.showErrorMessage(
+      validation.reason === "too-large"
+        ? "Postgres Viz: SVG export exceeds the 16 MB limit."
+        : "Postgres Viz: SVG export contains unsupported active or external content.",
+    );
     return;
   }
   const target = await vscode.window.showSaveDialog({

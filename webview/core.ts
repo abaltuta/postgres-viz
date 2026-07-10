@@ -112,20 +112,6 @@ export function fitTarget(cy: Core): CollectionReturnValue {
   return shown.length > 0 ? shown : cy.elements();
 }
 
-/**
- * Panel row dedupe: a table-level aggregate ("reads ×3 recurring_payrun") is
- * pure noise when the same kind/direction/counterpart already shows its
- * column-level rows — keep the columns, drop the rollup. Whole-table-only
- * relationships (no detail rows) keep their aggregate.
- */
-export function suppressRedundantAggs<
-  T extends { kind: string; counterUnit: string; out: boolean; agg?: boolean; detail?: boolean },
->(rows: T[]): T[] {
-  const keyOf = (row: T): string => `${row.kind}|${row.counterUnit}|${row.out}`;
-  const detailPairs = new Set(rows.filter((r) => r.detail).map(keyOf));
-  return rows.filter((r) => !(r.agg && detailPairs.has(keyOf(r))));
-}
-
 type AggregateMemberEdge = {
   data: { id?: string; source: string; target: string; kind: string };
 };
@@ -210,6 +196,35 @@ export function callTreeClosure(
   maxLevels = Number.POSITIVE_INFINITY,
 ): { fns: Set<string>; keep: Set<string>; roots: Set<string> } {
   const startUnit = unitOf(node);
+  const outgoing = new Map<string, string[]>();
+  const callers = new Map<string, string[]>();
+  const dataTargets = new Map<string, string[]>();
+  cy.edges().forEach((e) => {
+    const source = e.source().id();
+    const target = e.target().id();
+    const kind = String(e.data("kind"));
+    const aggregate = Boolean(e.data("agg"));
+    const detail = Boolean(e.data("detail"));
+    if (!aggregate && !detail && (kind === "calls" || kind === "executes")) {
+      const targets = outgoing.get(source) ?? [];
+      targets.push(target);
+      outgoing.set(source, targets);
+      const sources = callers.get(target) ?? [];
+      sources.push(source);
+      callers.set(target, sources);
+    }
+    const kinds = e.data("kinds") as Record<string, number> | undefined;
+    if (
+      (aggregate || !detail) &&
+      (kinds
+        ? Object.keys(kinds).some((edgeKind) => DATA_KINDS.has(edgeKind))
+        : DATA_KINDS.has(kind))
+    ) {
+      const targets = dataTargets.get(source) ?? [];
+      targets.push(target);
+      dataTargets.set(source, targets);
+    }
+  });
   const fns = new Set<string>();
   let frontier: string[] = [];
   if (node.data("type") === "trigger") {
@@ -225,28 +240,20 @@ export function callTreeClosure(
     for (const id of frontier) {
       if (fns.has(id)) continue;
       fns.add(id);
-      cy.edges('[!agg][!detail][kind="calls"], [!agg][!detail][kind="executes"]').forEach((e) => {
-        if (e.source().id() === id && !fns.has(e.target().id())) next.push(e.target().id());
-      });
+      for (const target of outgoing.get(id) ?? []) {
+        if (!fns.has(target)) next.push(target);
+      }
     }
     frontier = next;
   }
   const keep = new Set<string>(fns);
   keep.add(startUnit.id());
-  cy.edges("[?agg], [!agg][!detail]").forEach((e) => {
-    const kinds = e.data("kinds") as Record<string, number> | undefined;
-    if (
-      (kinds
-        ? Object.keys(kinds).some((kind) => DATA_KINDS.has(kind))
-        : DATA_KINDS.has(String(e.data("kind")))) &&
-      fns.has(e.source().id())
-    ) {
-      keep.add(e.target().id());
-    }
-  });
+  for (const id of fns) {
+    for (const target of dataTargets.get(id) ?? []) keep.add(target);
+  }
   // context: who calls / fires the root
-  cy.edges('[!agg][!detail][kind="calls"], [!agg][!detail][kind="executes"]').forEach((e) => {
-    if (roots.has(e.target().id())) keep.add(e.source().id());
-  });
+  for (const root of roots) {
+    for (const source of callers.get(root) ?? []) keep.add(source);
+  }
   return { fns, keep, roots };
 }

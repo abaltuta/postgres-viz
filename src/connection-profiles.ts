@@ -29,6 +29,8 @@ export interface ActiveConnection {
 }
 
 export class ConnectionProfileStore {
+  private mutations: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly workspaceState: WorkspaceStateLike,
     private readonly secrets: SecretStorageLike,
@@ -57,6 +59,59 @@ export class ConnectionProfileStore {
   }
 
   async save(name: string, conn: string, profileId?: string): Promise<ConnectionProfile> {
+    return this.enqueueMutation(() => this.saveNow(name, conn, profileId));
+  }
+
+  async setActive(profileId: string): Promise<void> {
+    return this.enqueueMutation(async () => {
+      const state = this.state();
+      if (!state.profiles.some((p) => p.id === profileId)) return;
+      await this.writeState({ ...state, activeId: profileId });
+    });
+  }
+
+  async delete(profileId: string): Promise<void> {
+    return this.enqueueMutation(async () => {
+      const state = this.state();
+      const profiles = state.profiles.filter((p) => p.id !== profileId);
+      const key = this.secretKey(profileId);
+      const previousConnection = await this.secrets.get(key);
+      await this.secrets.delete(key);
+      const activeId = profiles.some((p) => p.id === state.activeId)
+        ? state.activeId
+        : sortedProfiles(profiles)[0]?.id;
+      try {
+        await this.writeState({ profiles, activeId });
+      } catch (stateError) {
+        if (previousConnection !== undefined) {
+          try {
+            await this.secrets.store(key, previousConnection);
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [stateError, rollbackError],
+              "failed to delete connection profile and restore its secret",
+            );
+          }
+        }
+        throw stateError;
+      }
+    });
+  }
+
+  async migrateLegacy(defaultName = "Default"): Promise<void> {
+    return this.enqueueMutation(async () => {
+      if (this.state().profiles.length > 0) return;
+      const legacy = await this.secrets.get(this.legacySecretKey);
+      if (!legacy) return;
+      await this.saveNow(defaultName, legacy);
+    });
+  }
+
+  private async saveNow(
+    name: string,
+    conn: string,
+    profileId?: string,
+  ): Promise<ConnectionProfile> {
     const state = this.state();
     const now = Date.now();
     const existing = profileId ? state.profiles.find((p) => p.id === profileId) : undefined;
@@ -71,36 +126,33 @@ export class ConnectionProfileStore {
     const profiles = existing
       ? state.profiles.map((p) => (p.id === profile.id ? profile : p))
       : [...state.profiles, profile];
-    await this.secrets.store(this.secretKey(profile.id), conn);
-    await this.writeState({ profiles, activeId: profile.id });
+    const key = this.secretKey(profile.id);
+    const previousConnection = await this.secrets.get(key);
+    await this.secrets.store(key, conn);
+    try {
+      await this.writeState({ profiles, activeId: profile.id });
+    } catch (stateError) {
+      try {
+        if (previousConnection === undefined) await this.secrets.delete(key);
+        else await this.secrets.store(key, previousConnection);
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [stateError, rollbackError],
+          "failed to save connection profile and restore its secret",
+        );
+      }
+      throw stateError;
+    }
     return profile;
   }
 
-  async setActive(profileId: string): Promise<void> {
-    const state = this.state();
-    if (!state.profiles.some((p) => p.id === profileId)) return;
-    await this.writeState({ ...state, activeId: profileId });
-  }
-
-  async delete(profileId: string): Promise<void> {
-    const state = this.state();
-    const profiles = state.profiles.filter((p) => p.id !== profileId);
-    await this.secrets.delete(this.secretKey(profileId));
-    const activeId = profiles.some((p) => p.id === state.activeId)
-      ? state.activeId
-      : sortedProfiles(profiles)[0]?.id;
-    await this.writeState({
-      profiles,
-      activeId,
-    });
-  }
-
-  async migrateLegacy(defaultName = "Default"): Promise<void> {
-    if (this.state().profiles.length > 0) return;
-    const legacy = await this.secrets.get(this.legacySecretKey);
-    if (!legacy) return;
-    const profile = await this.save(defaultName, legacy);
-    await this.setActive(profile.id);
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutations.then(operation, () => operation());
+    this.mutations = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
   private state(): ProfileState {

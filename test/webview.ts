@@ -21,7 +21,6 @@ import {
   fitTarget,
   isShownByClasses,
   snapshotPositions,
-  suppressRedundantAggs,
   unitOf,
 } from "../webview/core";
 import {
@@ -34,7 +33,9 @@ import {
   markSingleCardEdgesOrthogonal,
   materializeCard,
   materializeNeighborhood,
+  materializationRowCounts,
   type MaterializationState,
+  type NodeDef,
   restackRows,
   resetViewState,
   restoreViewPositions,
@@ -46,6 +47,7 @@ function emptyMaterializationState(): MaterializationState {
     detailEdgesByCard: new Map(),
     cardOfNode: new Map(),
     materialized: new Set(),
+    limited: new Set(),
     materializeCap: 30,
   };
 }
@@ -168,31 +170,6 @@ function build(): Core {
   // a fully hidden graph falls back to everything rather than fitting nothing
   cy.nodes().addClass("focus-hidden");
   assert.equal(fitTarget(cy).length, cy.elements().length, "all-hidden falls back to all");
-}
-
-// ── 5. panel rows: table-level aggregates are noise when their columns show ──
-{
-  const rows = [
-    // reads with column detail present → aggregate suppressed
-    { kind: "reads", agg: true, counterUnit: "recurring_payrun", out: true, label: "rp table" },
-    { kind: "reads", detail: true, counterUnit: "recurring_payrun", out: true, label: "rp.type" },
-    { kind: "reads", detail: true, counterUnit: "recurring_payrun", out: true, label: "rp.id" },
-    // modifies with column detail present → aggregate suppressed
-    { kind: "modifies", agg: true, counterUnit: "instruction", out: true, label: "instr table" },
-    { kind: "modifies", detail: true, counterUnit: "instruction", out: true, label: "proration" },
-    // whole-table-only relationship (no detail) → aggregate STAYS
-    { kind: "deletes", agg: true, counterUnit: "employee_totals", out: true, label: "et table" },
-    // same pair, different kind → unrelated detail must not suppress it
-    { kind: "writes", agg: true, counterUnit: "recurring_payrun", out: true, label: "w table" },
-    // same kind+unit but opposite direction → not suppressed
-    { kind: "reads", agg: true, counterUnit: "recurring_payrun", out: false, label: "read by" },
-  ];
-  const kept = suppressRedundantAggs(rows).map((r) => r.label);
-  assert.deepEqual(
-    kept,
-    ["rp.type", "rp.id", "proration", "et table", "w table", "read by"],
-    "aggregates with column detail vanish; whole-table-only and cross-kind/direction stay",
-  );
 }
 
 // ── 6. panel aggregate members are found from either endpoint card ──
@@ -510,6 +487,8 @@ function build(): Core {
     },
   });
   applySelectionClasses(cy, cy.getElementById("orders_total") as unknown as NodeSingular, unitOf);
+  assert.ok(cy.getElementById("orders_total").selected(), "selected row is tracked semantically");
+  assert.ok(cy.getElementById("orders").selected(), "owner card is available for prioritization");
   assert.ok(
     cy.getElementById("agg_reads").hasClass("agg-suppressed"),
     "matching aggregate is suppressed when its detail row is revealed",
@@ -602,6 +581,7 @@ function build(): Core {
           ["customers_id", "customers"],
         ]),
         materialized: new Set(),
+        limited: new Set(),
         materializeCap: 30,
       },
     };
@@ -703,6 +683,7 @@ function build(): Core {
     detailEdgesByCard: new Map(),
     cardOfNode: new Map(),
     materialized: new Set(),
+    limited: new Set(),
     materializeCap: 30,
     materializeAllRowsCap: 2,
   };
@@ -710,14 +691,23 @@ function build(): Core {
   assert.ok(cy.getElementById("bundle").hasClass("edge-off"), "all mode hides overview bundles");
   assert.ok(!cy.getElementById("typed").hasClass("edge-off"), "all mode shows typed edges");
   assert.deepEqual([...state.materialized], ["a"], "all mode honors the eager row budget");
+  assert.deepEqual([...state.limited], ["b"], "cards beyond the detail budget remain compact");
 
-  applyFilterClasses(
-    cy,
-    state,
-    { ...DEFAULT_PREFS, filterEdgeKinds: ["calls"] },
-    "cards",
-    false,
+  applyFilterClasses(cy, state, { ...DEFAULT_PREFS, filterNodeTypes: ["column"] }, "cards", false);
+  assert.ok(!cy.getElementById("a").hasClass("facet-hidden"), "row filters retain owner cards");
+  assert.ok(!cy.getElementById("b").hasClass("facet-hidden"), "virtual owner cards remain visible");
+
+  dematerializeCard(cy, state, "a");
+  state.limited.clear();
+  state.materializeAllRowsCap = 1;
+  applyFilterClasses(cy, state, DEFAULT_PREFS, "all", false);
+  assert.deepEqual(
+    [...state.materialized],
+    ["b"],
+    "an oversized card is skipped instead of consuming the rest of the budget",
   );
+
+  applyFilterClasses(cy, state, { ...DEFAULT_PREFS, filterEdgeKinds: ["calls"] }, "cards", false);
   assert.ok(!cy.getElementById("bundle").hasClass("edge-off"), "cards mode shows overview bundles");
   assert.ok(
     !cy.getElementById("bundle").hasClass("facet-hidden"),
@@ -731,6 +721,63 @@ function build(): Core {
   assert.ok(cy.getElementById("typed").hasClass("edge-off"), "cards mode hides typed edges");
 }
 
+// ── 18. subtype filters budget and materialize only matching rows ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: { nodes: [{ data: { id: "large", label: "large", type: "table" } }], edges: [] },
+  });
+  const rows: NodeDef[] = Array.from({ length: 100 }, (_, index) => ({
+    data: {
+      id: `column${index}`,
+      label: `column${index}`,
+      type: "column" as const,
+      parent: "large",
+      oid: 1,
+    },
+  }));
+  rows.push({
+    data: { id: "only_index", label: "only_index", type: "index", parent: "large", oid: 2 },
+  });
+  const state: MaterializationState = {
+    rowsByCard: new Map([["large", rows]]),
+    detailEdgesByCard: new Map(),
+    cardOfNode: new Map(rows.map((row) => [row.data.id, "large"])),
+    materialized: new Set(),
+    limited: new Set(),
+    materializeCap: 30,
+    materializeAllRowsCap: 1,
+  };
+  applyFilterClasses(cy, state, { ...DEFAULT_PREFS, filterNodeTypes: ["index"] }, "all", false);
+  assert.ok(cy.getElementById("only_index").nonempty(), "matching index is materialized");
+  assert.ok(cy.getElementById("column0").empty(), "filtered columns never enter Cytoscape");
+  assert.deepEqual([...state.materialized], ["large"]);
+  assert.deepEqual([...state.limited], [], "hidden rows do not consume the detail budget");
+  assert.deepEqual(
+    materializationRowCounts(state),
+    { materialized: 1, total: 1 },
+    "detail statistics use the same filtered rows as the materialization budget",
+  );
+}
+
+// ── 19. call-tree traversal stays linear on large graphs ──
+{
+  const count = 2_000;
+  const nodes = Array.from({ length: count }, (_, i) => ({
+    data: { id: `fn${i}`, type: "function" },
+  }));
+  nodes.push({ data: { id: "sink", type: "function" } });
+  const edges = Array.from({ length: count - 1 }, (_, i) => ({
+    data: { id: `call${i}`, source: `fn${i}`, target: `fn${i + 1}`, kind: "calls" },
+  }));
+  const graph = cytoscape({ headless: true, elements: { nodes, edges } });
+  const started = performance.now();
+  const result = callTreeClosure(graph, graph.getElementById("fn0") as unknown as NodeSingular);
+  const elapsed = performance.now() - started;
+  assert.equal(result.fns.size, count, "large call chain is traversed completely");
+  assert.ok(elapsed < 2_000, `2,000-node closure completed in ${elapsed.toFixed(1)} ms`);
+}
+
 console.log(
-  "webview OK — closure, stale-row, fit, agg members, agg dedupe, class ownership, positions, demat, keep-mask, facets, routing, panel visibility, selection aggs, row neighborhoods, row order, edge budgets",
+  "webview OK — closure, stale-row, fit, agg members, class ownership, positions, demat, keep-mask, facets, routing, panel visibility, selection aggs, row neighborhoods, row order, edge budgets",
 );
