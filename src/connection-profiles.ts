@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 const STATE_KEY = "postgresViz.connectionProfiles";
 
 export interface WorkspaceStateLike {
@@ -118,7 +120,7 @@ export class ConnectionProfileStore {
     const profile: ConnectionProfile = existing
       ? { ...existing, name, updatedAt: now }
       : {
-          id: `${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          id: randomUUID(),
           name,
           createdAt: now,
           updatedAt: now,

@@ -18,7 +18,9 @@ import {
   listConnectableDatabases,
   localListeningTcpPorts,
   localConnectionString,
+  mapWithConcurrency,
   normalizeDiscoveryPorts,
+  parsePostgresConnectionString,
   type PostgresEndpoint,
 } from "./database-discovery";
 import { fetchDdl, type SqlObjectName } from "./ddl";
@@ -166,6 +168,15 @@ function redact(conn: string): string {
   }
 }
 
+function quickPickText(value: string): string {
+  const normalized = [...value]
+    .map((character) => (character < " " || character === "\u007f" ? " " : character))
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (normalized || "(unnamed)").slice(0, 160);
+}
+
 async function getActiveConnection(): Promise<string | undefined> {
   await connectionProfiles?.migrateLegacy();
   const active = await connectionProfiles?.activeConnection();
@@ -196,6 +207,10 @@ async function promptAndSaveProfile(
     placeHolder: "postgres://user:password@localhost:5432/dbname",
     ignoreFocusOut: true,
     value: existing ? await connectionProfiles?.connection(existing.id) : suggestedConnection,
+    validateInput: (value) =>
+      parsePostgresConnectionString(value.trim())
+        ? undefined
+        : "Enter a postgres:// or postgresql:// connection URL",
   });
   if (!conn?.trim()) return undefined;
   let trimmed = conn.trim();
@@ -204,7 +219,10 @@ async function promptAndSaveProfile(
       const databases = await listConnectableDatabases(trimmed);
       if (databases.length === 0) throw new Error("No connectable databases were reported.");
       const selected = await vscode.window.showQuickPick(
-        databases.map((database) => ({ label: `$(database) ${database}`, database })),
+        databases.map((database) => ({
+          label: `$(database) ${quickPickText(database)}`,
+          database,
+        })),
         { title: "Postgres Viz: select a database", matchOnDescription: true },
       );
       if (!selected) return undefined;
@@ -557,6 +575,7 @@ export function activate(context: vscode.ExtensionContext): void {
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusItem.command = "postgresViz.connectionMenu";
   updateStatusItem();
+  output = vscode.window.createOutputChannel("Postgres Viz");
 
   webviewController = new WebviewController({
     extensionUri: context.extensionUri,
@@ -601,6 +620,7 @@ export function activate(context: vscode.ExtensionContext): void {
   hclLensProvider = new HclLensProvider(() => currentGraph);
   context.subscriptions.push(
     statusItem,
+    output,
     webviewController,
     treeProvider,
     treeView,
@@ -654,6 +674,10 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export async function deactivate(): Promise<void> {
+  loadGeneration++;
+  activeLoadCancellation?.cancel();
+  activeLoadCancellation?.dispose();
+  activeLoadCancellation = undefined;
   disposeParser();
   await workspaceWriter?.flush();
 }
@@ -925,12 +949,10 @@ async function discoverDatabases(): Promise<void> {
 
   const profiles = connectionProfiles?.list() ?? [];
   const profileSources = (
-    await Promise.all(
-      profiles.map(async (profile): Promise<Source | undefined> => {
-        const conn = await connectionProfiles?.connection(profile.id);
-        return conn ? { name: profile.name, conn, profileId: profile.id } : undefined;
-      }),
-    )
+    await mapWithConcurrency(profiles, 8, async (profile): Promise<Source | undefined> => {
+      const conn = await connectionProfiles?.connection(profile.id);
+      return conn ? { name: profile.name, conn, profileId: profile.id } : undefined;
+    })
   ).filter((source): source is Source => Boolean(source));
   const sources = [...profileSources];
   const environmentConnection = process.env.DATABASE_URL?.trim();
@@ -964,7 +986,7 @@ async function discoverDatabases(): Promise<void> {
       const ports = normalizeDiscoveryPorts([...basePorts, ...listeningPorts], 256);
       const [endpoints, enumeratedSources] = await Promise.all([
         discoverLocalPostgres(ports),
-        Promise.all(sources.map(enumerate)),
+        mapWithConcurrency(sources, 4, enumerate),
       ]);
       const enumerated = enumeratedSources.filter((source): source is EnumeratedSource =>
         Boolean(source),
@@ -985,7 +1007,7 @@ async function discoverDatabases(): Promise<void> {
         );
       if (localSources.length > 0) {
         progress.report({ message: "trying local trusted connections" });
-        const localResults = await Promise.all(localSources.map(enumerate));
+        const localResults = await mapWithConcurrency(localSources, 4, enumerate);
         enumerated.push(
           ...localResults.filter((source): source is EnumeratedSource => Boolean(source)),
         );
@@ -1011,8 +1033,8 @@ async function discoverDatabases(): Promise<void> {
       if (!conn || items.has(conn)) continue;
       items.set(conn, {
         id: "database",
-        label: `$(database) ${database}`,
-        description: source.name,
+        label: `$(database) ${quickPickText(database)}`,
+        description: quickPickText(source.name),
         detail: endpoint ? `${endpoint.host}:${endpoint.port}` : undefined,
         conn,
       });
@@ -1036,7 +1058,11 @@ async function discoverDatabases(): Promise<void> {
   if (items.size > 0) {
     choices.push(
       { label: "Databases", kind: vscode.QuickPickItemKind.Separator },
-      ...items.values(),
+      ...[...items.values()].sort(
+        (a, b) =>
+          a.label.localeCompare(b.label) ||
+          String(a.description ?? "").localeCompare(String(b.description ?? "")),
+      ),
     );
   }
   if (endpointItems.length > 0) {
@@ -1084,16 +1110,15 @@ async function discoverDatabases(): Promise<void> {
 async function connectionMenu(): Promise<void> {
   await getActiveConnection();
   const connected = Boolean(lastConnection);
-  const graphDescription = currentGraph ? currentDatabase : "load first";
-  type Item = vscode.QuickPickItem & { id: string };
+  const graphDescription = quickPickText(currentGraph ? currentDatabase : "load first");
+  type Item = vscode.QuickPickItem & { id?: string };
   const profileItems: Item[] =
     connectionProfiles?.list().map((profile) => ({
       id: `profile:${profile.id}`,
-      label: `${profile.id === activeProfileId ? "$(check) " : ""}${profile.name}`,
+      label: `${profile.id === activeProfileId ? "$(check) " : ""}${quickPickText(profile.name)}`,
       description: "switch profile",
     })) ?? [];
-  const items: Item[] = [
-    ...profileItems,
+  const connectionItems: Item[] = [
     { id: "discover", label: "$(search) Discover databases..." },
     { id: "add", label: "$(plus) Add connection profile..." },
     {
@@ -1101,6 +1126,19 @@ async function connectionMenu(): Promise<void> {
       label: "$(sync) Reload from database",
       description: connected ? undefined : "connect first",
     },
+    { id: "open", label: "$(graph) Open graph panel" },
+    {
+      id: "edit",
+      label: "$(edit) Edit active profile...",
+      description: connected ? quickPickText(activeProfileName) : "connect first",
+    },
+    {
+      id: "forget",
+      label: "$(trash) Forget active profile",
+      description: connected ? quickPickText(activeProfileName) : "connect first",
+    },
+  ];
+  const graphItems: Item[] = [
     {
       id: "diagnostics",
       label: "$(pulse) Show load diagnostics",
@@ -1136,20 +1174,19 @@ async function connectionMenu(): Promise<void> {
       label: "$(filter) Faceted filters",
       description: currentGraph ? "schemas, object types, edge kinds" : "load first",
     },
-    { id: "open", label: "$(graph) Open graph panel" },
-    {
-      id: "edit",
-      label: "$(edit) Edit active profile...",
-      description: connected ? activeProfileName : "connect first",
-    },
-    {
-      id: "forget",
-      label: "$(trash) Forget active profile",
-      description: connected ? activeProfileName : "connect first",
-    },
   ];
+  const items: Item[] = [];
+  if (profileItems.length > 0) {
+    items.push({ label: "Databases", kind: vscode.QuickPickItemKind.Separator }, ...profileItems);
+  }
+  items.push(
+    { label: "Connection", kind: vscode.QuickPickItemKind.Separator },
+    ...connectionItems,
+    { label: "Graph", kind: vscode.QuickPickItemKind.Separator },
+    ...graphItems,
+  );
   const pick = await vscode.window.showQuickPick(items, { title: "Postgres Viz" });
-  if (!pick) return;
+  if (!pick?.id) return;
   if (pick.id.startsWith("profile:")) {
     const profileId = pick.id.slice("profile:".length);
     await connectionProfiles?.setActive(profileId);

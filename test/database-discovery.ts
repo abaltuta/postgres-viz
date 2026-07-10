@@ -9,8 +9,10 @@ import {
   listConnectableDatabases,
   localListeningTcpPorts,
   localConnectionString,
+  mapWithConcurrency,
   normalizeDiscoveryPorts,
   parseListeningTcpPorts,
+  parsePostgresConnectionString,
   type DiscoveryClient,
 } from "../src/database-discovery";
 
@@ -34,6 +36,8 @@ async function main(): Promise<void> {
     [7432],
   );
   assert.deepEqual(commands, ["ss", "netstat"], "listener lookup falls back when ss is absent");
+  assert.equal(parsePostgresConnectionString("https://localhost/app"), undefined);
+  assert.equal(parsePostgresConnectionString("postgresql:///app")?.pathname, "/app");
   assert.deepEqual(connectionEndpoint("postgresql://user@db.local/app"), {
     host: "db.local",
     port: 5432,
@@ -76,6 +80,33 @@ async function main(): Promise<void> {
     );
   }
   assert.deepEqual(await discoverLocalPostgres([address.port], ["127.0.0.1"], 100), []);
+
+  let activeProbes = 0;
+  let maxActiveProbes = 0;
+  await discoverLocalPostgres(
+    Array.from({ length: 80 }, (_, index) => 10_000 + index),
+    ["127.0.0.1"],
+    100,
+    7,
+    async () => {
+      activeProbes++;
+      maxActiveProbes = Math.max(maxActiveProbes, activeProbes);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      activeProbes--;
+      return false;
+    },
+  );
+  assert.equal(maxActiveProbes, 7, "port probing respects its concurrency bound");
+  assert.deepEqual(
+    await mapWithConcurrency([4, 3, 2, 1], 2, async (value) => value * 2),
+    [8, 6, 4, 2],
+    "bounded mapping preserves input order",
+  );
+  assert.deepEqual(
+    await mapWithConcurrency([undefined, 2], 2, async (value) => value ?? "missing"),
+    ["missing", 2],
+    "bounded mapping does not treat an undefined value as the end of input",
+  );
 
   const calls: string[] = [];
   const databases = await listConnectableDatabases(

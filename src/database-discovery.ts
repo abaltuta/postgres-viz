@@ -27,6 +27,31 @@ export type DiscoveryCommandRunner = (
   args: readonly string[],
 ) => Promise<string | undefined>;
 
+export type PostgresEndpointProbe = (
+  endpoint: PostgresEndpoint,
+  timeoutMs: number,
+) => Promise<boolean>;
+
+export async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let next = 0;
+  const workerCount = Math.min(values.length, Math.max(1, Math.floor(concurrency) || 1));
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      for (;;) {
+        const index = next++;
+        if (index >= values.length) return;
+        results[index] = await mapper(values[index]!, index);
+      }
+    }),
+  );
+  return results;
+}
+
 export function normalizeDiscoveryPorts(values: readonly unknown[], limit = 64): number[] {
   const ports = values
     .filter((value): value is number => Number.isInteger(value) && Number(value) > 0)
@@ -87,34 +112,35 @@ export async function discoverLocalPostgres(
   ports: readonly number[],
   hosts: readonly string[] = ["127.0.0.1", "::1"],
   timeoutMs = 350,
+  concurrency = 32,
+  probe: PostgresEndpointProbe = (endpoint, timeout) =>
+    new Promise<boolean>((resolve) => {
+      const socket = connectSocket({ host: endpoint.host, port: endpoint.port });
+      let settled = false;
+      const finish = (found: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(found);
+      };
+      const timer = setTimeout(() => finish(false), timeout);
+      socket.once("connect", () => {
+        const request = Buffer.alloc(8);
+        request.writeInt32BE(8, 0);
+        request.writeInt32BE(80_877_103, 4);
+        socket.write(request);
+      });
+      socket.once("data", (data) => finish(data[0] === 0x53 || data[0] === 0x4e));
+      socket.once("error", () => finish(false));
+      socket.once("end", () => finish(false));
+    }),
 ): Promise<PostgresEndpoint[]> {
   const candidates = hosts.flatMap((host) => ports.map((port) => ({ host, port })));
-  const results = await Promise.all(
-    candidates.map(
-      (endpoint) =>
-        new Promise<{ endpoint: PostgresEndpoint; found: boolean }>((resolve) => {
-          const socket = connectSocket({ host: endpoint.host, port: endpoint.port });
-          let settled = false;
-          const finish = (found: boolean): void => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            socket.destroy();
-            resolve({ endpoint, found });
-          };
-          const timer = setTimeout(() => finish(false), timeoutMs);
-          socket.once("connect", () => {
-            const request = Buffer.alloc(8);
-            request.writeInt32BE(8, 0);
-            request.writeInt32BE(80_877_103, 4);
-            socket.write(request);
-          });
-          socket.once("data", (data) => finish(data[0] === 0x53 || data[0] === 0x4e));
-          socket.once("error", () => finish(false));
-          socket.once("end", () => finish(false));
-        }),
-    ),
-  );
+  const results = await mapWithConcurrency(candidates, concurrency, async (endpoint) => ({
+    endpoint,
+    found: await probe(endpoint, timeoutMs),
+  }));
   const found = results.filter((result) => result.found).map((result) => result.endpoint);
   const seenPorts = new Set<number>();
   return found.filter((endpoint) => {
@@ -124,16 +150,21 @@ export async function discoverLocalPostgres(
   });
 }
 
-export function connectionEndpoint(connectionString: string): PostgresEndpoint | undefined {
+export function parsePostgresConnectionString(connectionString: string): URL | undefined {
   try {
     const url = new URL(connectionString);
-    if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return undefined;
-    const port = url.port ? Number(url.port) : 5432;
-    if (!url.hostname || !Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
-    return { host: url.hostname, port };
+    return url.protocol === "postgres:" || url.protocol === "postgresql:" ? url : undefined;
   } catch {
     return undefined;
   }
+}
+
+export function connectionEndpoint(connectionString: string): PostgresEndpoint | undefined {
+  const url = parsePostgresConnectionString(connectionString);
+  if (!url) return undefined;
+  const port = url.port ? Number(url.port) : 5432;
+  if (!url.hostname || !Number.isInteger(port) || port < 1 || port > 65_535) return undefined;
+  return { host: url.hostname, port };
 }
 
 export function isLocalPostgresHost(host: string): boolean {
@@ -144,20 +175,16 @@ export function connectionStringForDatabase(
   connectionString: string,
   database: string,
 ): string | undefined {
-  try {
-    const url = new URL(connectionString);
-    if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return undefined;
-    url.pathname = `/${encodeURIComponent(database)}`;
-    return url.toString();
-  } catch {
-    return undefined;
-  }
+  const url = parsePostgresConnectionString(connectionString);
+  if (!url) return undefined;
+  url.pathname = `/${encodeURIComponent(database)}`;
+  return url.toString();
 }
 
 export function databaseFromConnectionString(connectionString: string): string | undefined {
+  const url = parsePostgresConnectionString(connectionString);
+  if (!url) return undefined;
   try {
-    const url = new URL(connectionString);
-    if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") return undefined;
     const database = decodeURIComponent(url.pathname.slice(1));
     return database || "postgres";
   } catch {
