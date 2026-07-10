@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { Client } from "pg";
 import { disposeParser } from "../src/analyze";
+import { listConnectableDatabases } from "../src/database-discovery";
 import { loadGraphFromDatabase } from "../src/load-service";
 import type { EdgeKind, GraphPayload, NodeType } from "../src/types";
 
@@ -320,6 +321,10 @@ function assertEdge(
 async function main(): Promise<void> {
   const client = await connectWithRetry();
   try {
+    assert.ok(
+      (await listConnectableDatabases(url)).includes("postgres"),
+      "database discovery lists the connected PostgreSQL database",
+    );
     await client.query(
       "DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS payroll CASCADE; DROP SCHEMA IF EXISTS helpers CASCADE;",
     );

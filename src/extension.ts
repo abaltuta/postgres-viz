@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { createHash } from "node:crypto";
+import { userInfo } from "node:os";
 import { disposeParser } from "./analyze";
 import { graphCacheAgeSeconds, graphCacheEntryIsFresh } from "./cache-policy";
 import {
@@ -7,6 +8,19 @@ import {
   defaultProfileName,
   type ConnectionProfile,
 } from "./connection-profiles";
+import {
+  connectionEndpoint,
+  connectionStringForDatabase,
+  databaseFromConnectionString,
+  DEFAULT_DISCOVERY_PORTS,
+  discoverLocalPostgres,
+  isLocalPostgresHost,
+  listConnectableDatabases,
+  localListeningTcpPorts,
+  localConnectionString,
+  normalizeDiscoveryPorts,
+  type PostgresEndpoint,
+} from "./database-discovery";
 import { fetchDdl, type SqlObjectName } from "./ddl";
 import { decodePngExport, validateSvgText } from "./export-data";
 import { DdlDocumentSymbolProvider } from "./ddl-symbol-provider";
@@ -169,7 +183,11 @@ async function getActiveConnection(): Promise<string | undefined> {
   return active.conn;
 }
 
-async function promptAndSaveProfile(existing?: ConnectionProfile): Promise<string | undefined> {
+async function promptAndSaveProfile(
+  existing?: ConnectionProfile,
+  suggestedConnection?: string,
+  chooseDatabase = false,
+): Promise<string | undefined> {
   const conn = await vscode.window.showInputBox({
     title: existing
       ? `Postgres Viz: edit ${existing.name}`
@@ -177,10 +195,32 @@ async function promptAndSaveProfile(existing?: ConnectionProfile): Promise<strin
     prompt: "Postgres connection string",
     placeHolder: "postgres://user:password@localhost:5432/dbname",
     ignoreFocusOut: true,
-    value: existing ? await connectionProfiles?.connection(existing.id) : undefined,
+    value: existing ? await connectionProfiles?.connection(existing.id) : suggestedConnection,
   });
   if (!conn?.trim()) return undefined;
-  const trimmed = conn.trim();
+  let trimmed = conn.trim();
+  if (chooseDatabase) {
+    try {
+      const databases = await listConnectableDatabases(trimmed);
+      if (databases.length === 0) throw new Error("No connectable databases were reported.");
+      const selected = await vscode.window.showQuickPick(
+        databases.map((database) => ({ label: `$(database) ${database}`, database })),
+        { title: "Postgres Viz: select a database", matchOnDescription: true },
+      );
+      if (!selected) return undefined;
+      trimmed = connectionStringForDatabase(trimmed, selected.database) ?? trimmed;
+    } catch (error) {
+      const saveAnyway = await vscode.window.showWarningMessage(
+        "Postgres Viz could not list databases with this connection.",
+        {
+          modal: true,
+          detail: error instanceof Error ? error.message : String(error),
+        },
+        "Save anyway",
+      );
+      if (saveAnyway !== "Save anyway") return undefined;
+    }
+  }
   const name = await vscode.window.showInputBox({
     title: "Postgres Viz: profile name",
     prompt: "Connection profile name",
@@ -583,6 +623,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("postgresViz.visualize", visualize),
     vscode.commands.registerCommand("postgresViz.load", load),
     vscode.commands.registerCommand("postgresViz.connectionMenu", connectionMenu),
+    vscode.commands.registerCommand("postgresViz.discoverDatabases", discoverDatabases),
     vscode.commands.registerCommand("postgresViz.fit", () => postToWebview({ type: "fit" })),
     vscode.commands.registerCommand("postgresViz.relayout", () =>
       postToWebview({ type: "relayout" }),
@@ -622,16 +663,17 @@ async function visualize(): Promise<void> {
   const conn = await getActiveConnection();
   if (conn) {
     await loadGraph(conn);
+  } else {
+    await discoverDatabases();
   }
-  // no stored profile -> the status bar item / sidebar drive connecting now
 }
 
 /** Load the graph WITHOUT opening the panel (sidebar welcome button). */
 async function load(): Promise<void> {
-  let conn = await getActiveConnection();
+  const conn = await getActiveConnection();
   if (!conn) {
-    conn = await promptAndSaveProfile();
-    if (!conn) return;
+    await discoverDatabases();
+    return;
   }
   await loadGraph(conn);
 }
@@ -871,8 +913,176 @@ function applyInitialHideIsolated(graph: GraphPayload): void {
   }
 }
 
-async function connectionMenu(): Promise<void> {
+async function discoverDatabases(): Promise<void> {
   await connectionProfiles?.migrateLegacy();
+  type Source = { name: string; conn: string; profileId?: string };
+  type EnumeratedSource = Source & { databases: string[] };
+  type Item = vscode.QuickPickItem & {
+    id?: "database" | "endpoint" | "manual";
+    conn?: string;
+    endpoint?: PostgresEndpoint;
+  };
+
+  const profiles = connectionProfiles?.list() ?? [];
+  const profileSources = (
+    await Promise.all(
+      profiles.map(async (profile): Promise<Source | undefined> => {
+        const conn = await connectionProfiles?.connection(profile.id);
+        return conn ? { name: profile.name, conn, profileId: profile.id } : undefined;
+      }),
+    )
+  ).filter((source): source is Source => Boolean(source));
+  const sources = [...profileSources];
+  const environmentConnection = process.env.DATABASE_URL?.trim();
+  if (environmentConnection && connectionEndpoint(environmentConnection)) {
+    sources.push({ name: "DATABASE_URL", conn: environmentConnection });
+  }
+  const configuredPorts = normalizeDiscoveryPorts(
+    vscode.workspace.getConfiguration("postgresViz").get<unknown[]>("discoveryPorts") ?? [],
+  );
+  const basePorts = configuredPorts.length > 0 ? configuredPorts : [...DEFAULT_DISCOVERY_PORTS];
+  const enumerate = async (source: Source): Promise<EnumeratedSource | undefined> => {
+    try {
+      const databases = await listConnectableDatabases(source.conn);
+      return databases.length > 0 ? { ...source, databases } : undefined;
+    } catch (error) {
+      logLine(
+        `Discovery could not enumerate ${source.name}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
+  };
+
+  const discovered = await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: "Postgres Viz: finding databases",
+    },
+    async (progress) => {
+      progress.report({ message: "checking saved connections and local ports" });
+      const listeningPorts = await localListeningTcpPorts();
+      const ports = normalizeDiscoveryPorts([...basePorts, ...listeningPorts], 256);
+      const [endpoints, enumeratedSources] = await Promise.all([
+        discoverLocalPostgres(ports),
+        Promise.all(sources.map(enumerate)),
+      ]);
+      const enumerated = enumeratedSources.filter((source): source is EnumeratedSource =>
+        Boolean(source),
+      );
+      const listedLocalPorts = new Set(
+        enumerated.flatMap((source) => {
+          const endpoint = connectionEndpoint(source.conn);
+          return endpoint && isLocalPostgresHost(endpoint.host) ? [endpoint.port] : [];
+        }),
+      );
+      const localSources = endpoints
+        .filter((endpoint) => !listedLocalPorts.has(endpoint.port))
+        .flatMap((endpoint) =>
+          [...new Set([userInfo().username, "postgres"])].map((username) => ({
+            name: `${username}@localhost:${endpoint.port}`,
+            conn: localConnectionString(endpoint, username),
+          })),
+        );
+      if (localSources.length > 0) {
+        progress.report({ message: "trying local trusted connections" });
+        const localResults = await Promise.all(localSources.map(enumerate));
+        enumerated.push(
+          ...localResults.filter((source): source is EnumeratedSource => Boolean(source)),
+        );
+      }
+      return { endpoints, enumerated };
+    },
+  );
+
+  const knownConnections = new Map(
+    profileSources.flatMap((source) => {
+      const database = databaseFromConnectionString(source.conn);
+      const normalized = database ? connectionStringForDatabase(source.conn, database) : undefined;
+      return [source.conn, normalized]
+        .filter((conn): conn is string => Boolean(conn))
+        .map((conn) => [conn, source.profileId!] as const);
+    }),
+  );
+  const items = new Map<string, Item>();
+  for (const source of discovered.enumerated) {
+    const endpoint = connectionEndpoint(source.conn);
+    for (const database of source.databases) {
+      const conn = connectionStringForDatabase(source.conn, database);
+      if (!conn || items.has(conn)) continue;
+      items.set(conn, {
+        id: "database",
+        label: `$(database) ${database}`,
+        description: source.name,
+        detail: endpoint ? `${endpoint.host}:${endpoint.port}` : undefined,
+        conn,
+      });
+    }
+  }
+  const listedPorts = new Set(
+    discovered.enumerated.flatMap((source) => {
+      const endpoint = connectionEndpoint(source.conn);
+      return endpoint && isLocalPostgresHost(endpoint.host) ? [endpoint.port] : [];
+    }),
+  );
+  const endpointItems: Item[] = discovered.endpoints
+    .filter((endpoint) => !listedPorts.has(endpoint.port))
+    .map((endpoint) => ({
+      id: "endpoint" as const,
+      label: `$(server) PostgreSQL on localhost:${endpoint.port}`,
+      description: "server detected - enter credentials",
+      endpoint,
+    }));
+  const choices: Item[] = [];
+  if (items.size > 0) {
+    choices.push(
+      { label: "Databases", kind: vscode.QuickPickItemKind.Separator },
+      ...items.values(),
+    );
+  }
+  if (endpointItems.length > 0) {
+    choices.push(
+      { label: "Detected servers", kind: vscode.QuickPickItemKind.Separator },
+      ...endpointItems,
+    );
+  }
+  choices.push(
+    { label: "Other", kind: vscode.QuickPickItemKind.Separator },
+    {
+      id: "manual",
+      label: "$(edit) Enter a connection string...",
+      description:
+        items.size === 0 && discovered.endpoints.length === 0
+          ? "no local PostgreSQL servers detected"
+          : undefined,
+    },
+  );
+  const pick = await vscode.window.showQuickPick(choices, {
+    title: "Postgres Viz: select a database",
+    placeHolder: "Saved credentials and local PostgreSQL servers are checked automatically",
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (!pick) return;
+  if (pick.id === "database" && pick.conn) {
+    const knownProfileId = knownConnections.get(pick.conn);
+    if (knownProfileId) {
+      await connectionProfiles?.setActive(knownProfileId);
+    } else {
+      await connectionProfiles?.save(defaultProfileName(pick.conn), pick.conn);
+    }
+    const conn = await getActiveConnection();
+    if (conn) await loadGraph(conn, { force: true });
+    return;
+  }
+  const suggested = pick.endpoint
+    ? localConnectionString(pick.endpoint, userInfo().username)
+    : undefined;
+  const conn = await promptAndSaveProfile(undefined, suggested, true);
+  if (conn) await loadGraph(conn, { force: true });
+}
+
+async function connectionMenu(): Promise<void> {
+  await getActiveConnection();
   const connected = Boolean(lastConnection);
   const graphDescription = currentGraph ? currentDatabase : "load first";
   type Item = vscode.QuickPickItem & { id: string };
@@ -884,6 +1094,7 @@ async function connectionMenu(): Promise<void> {
     })) ?? [];
   const items: Item[] = [
     ...profileItems,
+    { id: "discover", label: "$(search) Discover databases..." },
     { id: "add", label: "$(plus) Add connection profile..." },
     {
       id: "reload",
@@ -947,6 +1158,9 @@ async function connectionMenu(): Promise<void> {
     return;
   }
   switch (pick.id) {
+    case "discover":
+      await discoverDatabases();
+      break;
     case "add": {
       const conn = await promptAndSaveProfile();
       if (!conn) return;

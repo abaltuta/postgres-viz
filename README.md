@@ -28,7 +28,7 @@ pnpm build
 
 Open the folder in VS Code and press **F5** (Run Extension). In the dev host:
 
-1. `Postgres Viz: Visualize Database` — opens the graph panel; connection profiles are workspace-scoped (metadata in workspace state, URLs in VS Code secret storage). `Postgres Viz: Show Logs` opens the output channel with per-step introspection/analysis logs.
+1. `Postgres Viz: Visualize Database` — opens the graph panel and, when needed, a database picker. **Discover Databases** checks saved credentials, `DATABASE_URL`, detected local TCP listeners, and configured fallback ports using the PostgreSQL wire handshake; authenticated servers expose their databases directly, while detected servers without credentials open a prefilled connection form. Connection profiles are workspace-scoped (metadata in workspace state, URLs in VS Code secret storage). `Postgres Viz: Show Logs` opens the output channel with per-step introspection/analysis logs.
 2. Click a node → neighborhood highlight + side panel with all connections; **Go to Definition** opens the source schema when found (`.hcl`, then the latest matching `folder/up.sql` migration); **Open DDL** shows generated database DDL.
 3. Editor-title commands: search, grid/tree layout selection, edge display mode, view options, faceted filters, fit, relayout, and refresh.
 4. Command palette / connection menu: impact analysis, dependency path reports, snapshot save/diff, JSON/PNG/SVG export, and load diagnostics.
@@ -42,6 +42,7 @@ The graph footer reports visible objects and connections rather than raw databas
 - `postgresViz.schemas` — schemas to introspect (empty = all non-system).
 - `postgresViz.excludeSchemas` — schemas skipped when no whitelist is set (default `hdb_catalog`).
 - `postgresViz.includeForeignKeys` — include FK edges (default true).
+- `postgresViz.discoveryPorts` — fallback local ports checked by **Discover Databases** in addition to detected TCP listeners (defaults cover common PostgreSQL, PgBouncer, Supabase, and project test ports; maximum 64).
 - `postgresViz.hclExcludeGlobs` — workspace globs excluded when scanning Atlas `.hcl` schema files for source definitions.
 - `postgresViz.sqlMigrationExcludeGlobs` — workspace globs excluded when scanning `folder/up.sql` migrations for source definitions.
 

@@ -48,6 +48,7 @@ const smokeTest = {
   entryPoints: [
     "test/smoke.ts",
     "test/db.ts",
+    "test/database-discovery.ts",
     "test/ddl.ts",
     "test/export-data.ts",
     "test/connection-profiles.ts",
