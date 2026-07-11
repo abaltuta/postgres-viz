@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { Client } from "pg";
 import { disposeParser } from "../src/analyze";
+import { columnUsageResult } from "../src/column-usage";
 import { listConnectableDatabases } from "../src/database-discovery";
 import { loadGraphFromDatabase } from "../src/load-service";
 import type { EdgeKind, GraphPayload, NodeType } from "../src/types";
@@ -380,6 +381,16 @@ async function main(): Promise<void> {
     assertEdge(g, "selects", customerOrders, ordersTotal, "view selects orders.total");
     assertEdge(g, "selects", orderStats, ordersCustomerId, "matview selects orders.customer_id");
     assertEdge(g, "selects", orderStats, ordersTotal, "matview selects orders.total");
+    const customerIdUsage = columnUsageResult(loaded.usageStore, ordersCustomerId);
+    assert.ok(
+      customerIdUsage.groups.some(
+        (group) =>
+          group.owner.name === "customer_orders" &&
+          group.kind === "selects" &&
+          group.occurrences.some((occurrence) => occurrence.exact),
+      ),
+      "view definitions expose exact orders.customer_id occurrences",
+    );
     assert.ok(
       !g.edges.some(
         (e) =>
@@ -420,6 +431,15 @@ async function main(): Promise<void> {
     assertEdge(g, "inserts", logOrder, auditPayload, "log_order inserts audit_log.payload");
     assertEdge(g, "updates", logOrder, customersName, "log_order updates customers.name");
     assertEdge(g, "calls", logOrder, notifyStats, "log_order calls notify_stats");
+    assert.ok(
+      customerIdUsage.groups.some(
+        (group) =>
+          group.owner.name === "log_order" &&
+          group.kind === "reads" &&
+          group.occurrences.some((occurrence) => occurrence.exact),
+      ),
+      "PL/pgSQL definitions expose exact orders.customer_id occurrences",
+    );
 
     // BEGIN ATOMIC SQL function → exact deps from pg_depend
     assertEdge(g, "reads", totalFor, ordersTotal, "total_for uses orders.total");

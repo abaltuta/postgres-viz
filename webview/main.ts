@@ -1,23 +1,30 @@
 import cytoscape, { Core, EdgeSingular, NodeSingular } from "cytoscape";
-import * as dagre from "dagre";
 import {
   DEFAULT_PREFS,
+  type ColumnUsageGroup,
+  type ColumnUsageResult,
   type HostToWebviewMessage,
   normalizePrefs,
   type Prefs,
+  type UsageOccurrenceItem,
+  type UsageOccurrencePage,
   type WebviewToHostMessage,
 } from "../src/protocol";
 import type { EdgeKind, GraphNodeData, GraphPayload } from "../src/types";
 import {
   allCardUnits as coreCardUnits,
   callTreeClosure,
+  connectionEmphasis,
   fitTarget,
   isShownByClasses,
   type PositionSnapshot,
   snapshotPositions,
+  unitTopology,
   unitOf,
 } from "./core";
 import {
+  addRadialSummary,
+  applyConnectionEmphasis,
   applyCallTreeColumnFilter as adapterApplyCallTreeColumnFilter,
   applyEdgeSegments,
   applyFilterClasses,
@@ -45,8 +52,11 @@ import {
   markSingleCardEdgesOrthogonal,
   moveUnitTo,
   type NodeDef,
+  primarySelectedNode,
   resetViewState,
   restackRows as adapterRestackRows,
+  revealOwnedRadialElements,
+  removeOwnedElements,
   restoreViewPositions,
   revealCallTreeEdges,
   ROW_TYPES,
@@ -56,6 +66,16 @@ import { EdgeRoutingPlanner } from "./router";
 import { GraphExporter } from "./graph-exporter";
 import { ConnectionList, type ConnectionListOptions } from "./connection-list";
 import { GraphKeyboardNavigator, type GraphKeyboardNavigatorOptions } from "./keyboard-navigator";
+import { layoutTreeV2Positions } from "./layout";
+import { BASE_ACTIVE_MODE, transitionActiveMode, type ActiveViewMode } from "./view-mode";
+import {
+  aggregateUsageRows,
+  buildRadialPlan,
+  radialPositions,
+  usageCategory,
+  type UsageCategory,
+  type UsageMatrixRow,
+} from "./usage-views";
 
 const vscode = acquireVsCodeApi();
 
@@ -95,6 +115,30 @@ const EDGE_COLORS: Record<string, string> = {
 
 let cy: Core | null = null;
 let database = "";
+let graphRevision = 0;
+let usageRequestId = 0;
+let activeColumnUsageRequest = 0;
+let panelRenderGeneration = 0;
+const usageGroups = new Map<string, ColumnUsageGroup>();
+const occurrenceRequestGroups = new Map<number, string>();
+const occurrencePages = new Map<string, UsageOccurrenceItem[]>();
+let selectedColumnUsage: ColumnUsageResult | null = null;
+
+interface UsageMatrixState {
+  result: ColumnUsageResult;
+  rows: UsageMatrixRow[];
+  category: UsageCategory | "all";
+  search: string;
+  limit: number;
+  expanded?: { ownerId: string; category: UsageCategory };
+}
+
+type ActiveMode = ActiveViewMode<UsageMatrixState, ViewSpec>;
+
+let activeMode: ActiveMode = BASE_ACTIVE_MODE;
+const activeMatrix = (): UsageMatrixState | null =>
+  activeMode.kind === "matrix" ? activeMode.matrix : null;
+const activeView = (): ViewSpec | null => (activeMode.kind === "isolated" ? activeMode.view : null);
 
 /**
  * Virtual rows: the full row set lives in these maps; column/trigger/constraint
@@ -113,8 +157,12 @@ const MATERIALIZE_ALL_ROWS_CAP = 4_000;
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
 function hidePanel(): void {
+  const panelCy = cy;
+  const generation = ++panelRenderGeneration;
   el("panel").classList.add("hidden");
-  requestAnimationFrame(() => cy?.resize());
+  requestAnimationFrame(() => {
+    if (panelCy && cy === panelCy && generation === panelRenderGeneration) panelCy.resize();
+  });
 }
 
 function materializationState() {
@@ -143,6 +191,236 @@ const isDark = (): boolean =>
 
 function esc(s: unknown): string {
   return String(s ?? "").replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+}
+
+function occurrenceRows(items: readonly UsageOccurrenceItem[]): string {
+  return items
+    .map(
+      (
+        item,
+      ) => `<li><button class="usage-occurrence" data-occurrence-id="${esc(item.id)}" title="Open ${item.exact ? "exact occurrence" : "definition"}">
+        <span class="usage-marker">${item.exact ? "@" : "-"}</span>
+        <span>${esc(item.snippet)}</span>
+      </button></li>`,
+    )
+    .join("");
+}
+
+function usageGroupHtml(group: ColumnUsageGroup): string {
+  const more = group.count > group.occurrences.length && group.occurrences.length > 0;
+  return `<li class="usage-group" data-group-id="${esc(group.id)}">
+    <div class="usage-owner-row">
+      <button class="usage-owner" data-owner-id="${esc(group.id)}">
+        <span class="kind" style="color:${EDGE_COLORS[group.kind] ?? "#888"}">${esc(group.kind)}</span>
+        <span class="name">${esc([group.owner.schema, group.owner.owner, group.owner.label ?? group.owner.name].filter(Boolean).join("."))}</span>
+        <small>${group.count}</small>
+      </button>
+    </div>
+    ${group.occurrences.length ? `<ul class="usage-occurrences">${occurrenceRows(group.occurrences)}</ul>` : ""}
+    ${more ? `<button class="usage-more" data-usage-group="${esc(group.id)}" data-offset="0">Show occurrences</button>` : ""}
+  </li>`;
+}
+
+function renderColumnUsages(result: ColumnUsageResult): void {
+  selectedColumnUsage = result;
+  usageGroups.clear();
+  occurrencePages.clear();
+  for (const group of result.groups) usageGroups.set(group.id, group);
+  document
+    .querySelectorAll<HTMLButtonElement>("#neighborhood-btn, #matrix-btn")
+    .forEach((button) => {
+      button.disabled = false;
+    });
+  const root = document.getElementById("column-usages");
+  if (!root || root.dataset.columnId !== result.columnId) return;
+  const sql = result.groups.filter((group) => group.section === "sql");
+  const structural = result.groups.filter((group) => group.section === "structural");
+  root.innerHTML = result.groups.length
+    ? `${sql.length ? `<details open><summary>Used in definitions (${sql.length})</summary><ul class="usage-list">${sql.map(usageGroupHtml).join("")}</ul></details>` : ""}
+       ${structural.length ? `<details><summary>Structural relationships (${structural.length})</summary><ul class="usage-list">${structural.map(usageGroupHtml).join("")}</ul></details>` : ""}`
+    : '<p class="usage-empty">No loaded definitions use this column.</p>';
+  root.addEventListener("click", handleUsageClick);
+}
+
+function openUsageOwner(group: ColumnUsageGroup): void {
+  const { owner } = group;
+  postToHost({
+    type: "openDefinition",
+    nodeType: owner.type,
+    oid: owner.oid,
+    schema: owner.schema,
+    name: owner.label ?? owner.name,
+    owner: owner.owner,
+    label: owner.schema ? `${owner.schema}.${owner.name}` : owner.name,
+  });
+}
+
+function requestUsageGroup(groupId: string, offset: number): void {
+  const requestId = ++usageRequestId;
+  occurrenceRequestGroups.set(requestId, groupId);
+  postToHost({
+    type: "requestUsageOccurrences",
+    revision: graphRevision,
+    requestId,
+    groupId,
+    offset,
+  });
+}
+
+function handleUsageClick(event: MouseEvent): void {
+  const target = event.target as HTMLElement;
+  const occurrence = target.closest<HTMLButtonElement>("button[data-occurrence-id]");
+  if (occurrence?.dataset.occurrenceId) {
+    postToHost({
+      type: "openUsage",
+      revision: graphRevision,
+      occurrenceId: occurrence.dataset.occurrenceId,
+    });
+    return;
+  }
+  const ownerButton = target.closest<HTMLButtonElement>("button[data-owner-id]");
+  const ownerGroup = ownerButton?.dataset.ownerId
+    ? usageGroups.get(ownerButton.dataset.ownerId)
+    : undefined;
+  if (ownerGroup) {
+    openUsageOwner(ownerGroup);
+    return;
+  }
+  const more = target.closest<HTMLButtonElement>("button[data-usage-group]");
+  if (!more?.dataset.usageGroup) return;
+  more.disabled = true;
+  requestUsageGroup(more.dataset.usageGroup, Number(more.dataset.offset ?? 0));
+}
+
+function renderUsageOccurrencePage(page: UsageOccurrencePage, requestId: number): void {
+  if (occurrenceRequestGroups.get(requestId) !== page.groupId) return;
+  occurrenceRequestGroups.delete(requestId);
+  const previous = page.offset === 0 ? [] : (occurrencePages.get(page.groupId) ?? []);
+  occurrencePages.set(page.groupId, [...previous, ...page.occurrences]);
+  document
+    .querySelectorAll<HTMLElement>(`.usage-group[data-group-id="${CSS.escape(page.groupId)}"]`)
+    .forEach((item) => {
+      let list = item.querySelector<HTMLUListElement>(".usage-occurrences");
+      if (!list) {
+        list = document.createElement("ul");
+        list.className = "usage-occurrences";
+        item.append(list);
+      }
+      list.innerHTML = occurrenceRows(occurrencePages.get(page.groupId) ?? []);
+      const more = item.querySelector<HTMLButtonElement>("button[data-usage-group]");
+      const next = page.offset + page.occurrences.length;
+      if (more && next < page.total) {
+        more.disabled = false;
+        more.dataset.offset = String(next);
+        more.textContent = `Show ${Math.min(50, page.total - next)} more`;
+      } else more?.remove();
+    });
+  if (activeMode.kind === "matrix") renderUsageMatrix();
+}
+
+function matrixGroupHtml(group: ColumnUsageGroup): string {
+  const occurrences = occurrencePages.get(group.id) ?? group.occurrences;
+  const more = group.count > occurrences.length && occurrences.length > 0;
+  return `<div class="usage-group matrix-group" data-group-id="${esc(group.id)}">
+    <div><span class="kind" style="color:${EDGE_COLORS[group.kind] ?? "#888"}">${esc(group.kind)}</span><small>${group.count}</small></div>
+    ${occurrences.length ? `<ul class="usage-occurrences">${occurrenceRows(occurrences)}</ul>` : ""}
+    ${more ? `<button class="usage-more" data-usage-group="${esc(group.id)}" data-offset="${occurrences.length > 3 ? occurrences.length : 0}">Show occurrences</button>` : ""}
+  </div>`;
+}
+
+function renderUsageMatrix(): void {
+  const matrix = activeMatrix();
+  if (!matrix) return;
+  const categories: (UsageCategory | "all")[] = ["all", "reads", "writes", "structural"];
+  const selectedCategory = matrix.category;
+  el("matrix-categories").innerHTML = categories
+    .map(
+      (category) =>
+        `<button data-matrix-category="${category}" class="${selectedCategory === category ? "active" : ""}">${category === "all" ? "All" : category[0]!.toUpperCase() + category.slice(1)}</button>`,
+    )
+    .join("");
+  const query = matrix.search.trim().toLowerCase();
+  const filtered = matrix.rows.filter(
+    (row) =>
+      (!query || row.qualifiedName.toLowerCase().includes(query)) &&
+      (selectedCategory === "all" || row.counts[selectedCategory] > 0),
+  );
+  const visible = filtered.slice(0, matrix.limit);
+  const rows = visible
+    .map((row) => {
+      const cells = (["reads", "writes", "structural"] as const)
+        .map(
+          (category) =>
+            `<td><button data-matrix-owner="${esc(row.owner.id)}" data-matrix-cell="${category}" ${row.counts[category] === 0 ? "disabled" : ""}>${row.counts[category]}</button></td>`,
+        )
+        .join("");
+      const expanded = matrix.expanded;
+      const details =
+        expanded?.ownerId === row.owner.id
+          ? row.groups
+              .filter((group) => usageCategory(group.kind) === expanded.category)
+              .map(matrixGroupHtml)
+              .join("")
+          : "";
+      return `<tr>
+        <th scope="row"><button class="matrix-owner" data-matrix-owner-definition="${esc(row.owner.id)}">${esc(row.qualifiedName)}</button></th>
+        ${cells}<td class="matrix-total">${row.total}</td>
+      </tr>${details ? `<tr class="matrix-detail"><td colspan="5">${details}</td></tr>` : ""}`;
+    })
+    .join("");
+  el("matrix-scroll").innerHTML = `<table>
+      <thead><tr><th>Object</th><th>Reads</th><th>Writes</th><th>Structural</th><th>Total</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="matrix-empty">No matching usages.</td></tr>'}</tbody>
+    </table>
+    ${visible.length < filtered.length ? `<button id="matrix-more">Show ${Math.min(100, filtered.length - visible.length)} more</button>` : ""}`;
+}
+
+function showUsageMatrix(result: ColumnUsageResult, category: UsageCategory | "all" = "all"): void {
+  const matrix = {
+    result,
+    rows: aggregateUsageRows(result.groups),
+    category,
+    search: "",
+    limit: 100,
+  };
+  const transition = transitionActiveMode(activeMode, { type: "enter-matrix", matrix });
+  if (transition.leave === "isolated") leaveToBase();
+  activeMode = transition.state;
+  el("content").classList.add("view-matrix");
+  el("cy").classList.add("hidden");
+  el("canvas-footer").classList.add("hidden");
+  el("reset-filters").classList.add("hidden");
+  el("usage-matrix").classList.remove("hidden");
+  document.querySelector("#matrix-btn")?.classList.add("active-matrix");
+  const column = nodeDefById.get(result.columnId)?.data;
+  const table = column?.parent ? nodeDefById.get(column.parent)?.data.label : undefined;
+  const title = column
+    ? [column.schema, table, column.label].filter(Boolean).join(".")
+    : result.columnId;
+  const crumb = el("crumb");
+  crumb.classList.remove("hidden");
+  crumb.innerHTML = `<span>Usage matrix: ${esc(title)}</span><button id="crumb-back">back</button>`;
+  crumb.querySelector("#crumb-back")?.addEventListener("click", closeUsageMatrix);
+  const search = el<HTMLInputElement>("matrix-search");
+  search.value = "";
+  renderUsageMatrix();
+  search.focus();
+}
+
+function closeUsageMatrix(): void {
+  if (activeMode.kind !== "matrix") return;
+  const matrixCy = cy;
+  activeMode = transitionActiveMode(activeMode, { type: "exit" }).state;
+  el("content").classList.remove("view-matrix");
+  el("usage-matrix").classList.add("hidden");
+  document.querySelector("#matrix-btn")?.classList.remove("active-matrix");
+  el("cy").classList.remove("hidden");
+  el("canvas-footer").classList.remove("hidden");
+  hideCrumb();
+  buildLegend();
+  requestAnimationFrame(() => {
+    if (matrixCy && cy === matrixCy) matrixCy.resize();
+  });
 }
 
 // ── card art: the column list of an idle card, rendered as one SVG image ──
@@ -341,6 +619,36 @@ function buildStyle(): cytoscape.StylesheetJson {
       style: { "font-size": 8.5, height: 14, "background-opacity": 0.8 },
     },
     {
+      selector: "node.radial-summary",
+      style: {
+        label: "data(label)",
+        shape: "round-rectangle",
+        width: 92,
+        height: 26,
+        "font-size": 9,
+        "min-zoomed-font-size": 0,
+        "font-weight": "bold",
+        color: text,
+        "text-opacity": 1,
+        "z-index": 999,
+        "background-opacity": 0.9,
+        "border-width": 1.5,
+        "border-style": "dashed",
+      },
+    },
+    {
+      selector: 'node.radial-summary[category="reads"]',
+      style: { "background-color": EDGE_COLORS.reads, "border-color": EDGE_COLORS.reads },
+    },
+    {
+      selector: 'node.radial-summary[category="writes"]',
+      style: { "background-color": EDGE_COLORS.updates, "border-color": EDGE_COLORS.updates },
+    },
+    {
+      selector: 'node.radial-summary[category="structural"]',
+      style: { "background-color": EDGE_COLORS.fk, "border-color": EDGE_COLORS.fk },
+    },
+    {
       selector: "edge",
       style: {
         width: 1,
@@ -359,6 +667,10 @@ function buildStyle(): cytoscape.StylesheetJson {
     { selector: 'edge[kind="fk"]', style: { "line-style": "dashed" } },
     { selector: 'edge[kind="calls"]', style: { "line-style": "dashed" } },
     { selector: 'edge[kind="default"]', style: { "line-style": "dotted" } },
+    {
+      selector: "edge.radial-summary-edge",
+      style: { "line-style": "dashed", opacity: 0.65, "target-arrow-shape": "none" },
+    },
     {
       selector: "edge[?agg]",
       style: {
@@ -388,6 +700,22 @@ function buildStyle(): cytoscape.StylesheetJson {
       },
     },
     { selector: ".dimmed", style: { opacity: 0.15, "text-opacity": 0 } },
+    {
+      selector: "node.connection-medium",
+      style: {
+        "underlay-color": "#FFAB00",
+        "underlay-opacity": 0.12,
+        "underlay-padding": 4,
+      },
+    },
+    {
+      selector: "node.connection-high",
+      style: {
+        "underlay-color": "#FFAB00",
+        "underlay-opacity": 0.24,
+        "underlay-padding": 7,
+      },
+    },
     { selector: "edge.hot", style: { opacity: 0.95, width: 1.8, "z-index": 9 } },
     { selector: "edge.edge-off", style: { display: "none" } },
     { selector: "edge.revealed", style: { display: "element" } },
@@ -410,6 +738,15 @@ function buildStyle(): cytoscape.StylesheetJson {
 // ── render ──
 
 function render(graph: GraphPayload): void {
+  activeMode = BASE_ACTIVE_MODE;
+  selectedColumnUsage = null;
+  usageGroups.clear();
+  occurrencePages.clear();
+  occurrenceRequestGroups.clear();
+  el("content").classList.remove("view-matrix");
+  el("usage-matrix").classList.add("hidden");
+  el("cy").classList.remove("hidden");
+  el("canvas-footer").classList.remove("hidden");
   el("empty").style.display = "none";
   hideCrumb();
   rowsByCard.clear();
@@ -450,6 +787,7 @@ function render(graph: GraphPayload): void {
   }
   const liveEdges = graph.edges.filter((e) => !e.data.detail);
 
+  if (cy) removeOwnedElements(cy, radialSyntheticIds);
   cy?.destroy();
   cy = cytoscape({
     container: el("cy"),
@@ -470,7 +808,6 @@ function render(graph: GraphPayload): void {
   initializeVirtualCards(cy, rowsByCard);
   // a graph push while a view was active must clear EVERYTHING the view
   // owned: the spec, the canvas tint, the pending zoom nudge, the panel
-  view = null;
   window.clearTimeout(zoomNudge);
   clearViewUiState();
   hidePanel();
@@ -479,8 +816,16 @@ function render(graph: GraphPayload): void {
   runLayout();
   cy.on("tap", "node", (ev) => {
     const n = ev.target as NodeSingular;
+    if (n.hasClass("radial-summary")) {
+      const category = n.data("category") as UsageCategory;
+      const view = activeView();
+      if (view?.mode === "radial" && view.radialResult) {
+        showUsageMatrix(view.radialResult, category);
+      }
+      return;
+    }
     const unit = unitOf(n);
-    if (rowsByCard.has(unit.id()) && !materialized.has(unit.id()) && !view) {
+    if (rowsByCard.has(unit.id()) && !materialized.has(unit.id()) && activeMode.kind === "base") {
       materializeNeighborhood(unit.id());
       applyFilters();
     }
@@ -489,13 +834,20 @@ function render(graph: GraphPayload): void {
   cy.on("tap", (ev) => {
     if (ev.target === cy) clearSelection();
   });
-  cy.on("dbltap", "node", (ev) => focusNode(ev.target as NodeSingular));
+  cy.on("dbltap", "node", (ev) => {
+    const node = ev.target as NodeSingular;
+    if (!node.hasClass("radial-summary")) focusNode(node);
+  });
   wireHoverPreview();
 }
 
 function applyFilters(): void {
   if (!cy) return;
-  applyFilterClasses(cy, materializationState(), prefs, edgeMode(), Boolean(view));
+  applyFilterClasses(cy, materializationState(), prefs, edgeMode(), activeMode.kind === "isolated");
+  applyConnectionEmphasis(
+    cy,
+    prefs.emphasizeConnections ? connectionEmphasis(unitAdjacency(cardUnits()).degree) : new Map(),
+  );
   restackRows();
   buildLegend();
 }
@@ -659,25 +1011,15 @@ function unitAdjacency(units: NodeSingular[]): {
   out: Map<string, Set<string>>;
   degree: Map<string, number>;
 } {
-  const ids = new Set(units.map((u) => u.id()));
-  const out = new Map<string, Set<string>>();
-  const degree = new Map<string, number>();
-  for (const u of units) {
-    out.set(u.id(), new Set());
-    degree.set(u.id(), 0);
-  }
+  const edges: { source: string; target: string }[] = [];
   cy!.edges("[?agg]").forEach((e) => {
     if (edgeHidden(e as EdgeSingular)) return;
-    const s = e.source().id();
-    const t = e.target().id();
-    if (s === t || !ids.has(s) || !ids.has(t)) return;
-    if (!out.get(s)!.has(t)) {
-      out.get(s)!.add(t);
-      degree.set(s, (degree.get(s) ?? 0) + 1);
-      degree.set(t, (degree.get(t) ?? 0) + 1);
-    }
+    edges.push({ source: e.source().id(), target: e.target().id() });
   });
-  return { out, degree };
+  return unitTopology(
+    units.map((unit) => unit.id()),
+    edges,
+  );
 }
 
 function layoutTreeCards(units: NodeSingular[]): void {
@@ -726,11 +1068,6 @@ function layoutTreeCards(units: NodeSingular[]): void {
   }
 }
 
-/** Grid step for the v2 layout: dagre's coordinates are snapped to multiples
- *  of this so cards line up cleanly. Small relative to nodesep/ranksep below,
- *  so snapping tidies fractional offsets without ever colliding cards. */
-const V2_GRID = 24;
-
 /**
  * v2 tree/call-graph layout — dagre's layered DAG engine over the unit graph.
  *
@@ -746,28 +1083,21 @@ const V2_GRID = 24;
 function layoutTreeCardsV2(units: NodeSingular[]): void {
   if (units.length === 0) return;
   const { out } = unitAdjacency(units);
-  const g = new dagre.graphlib.Graph({ multigraph: false, compound: false });
-  g.setGraph({
-    rankdir: "TB", // callers above callees — reads top-down like a call graph
-    nodesep: GAP, // horizontal gap within a rank
-    ranksep: GAP * 2, // vertical gap between ranks
-    marginx: 0,
-    marginy: 0,
-    ranker: "network-simplex", // tight, balanced ranks
-  });
-  g.setDefaultEdgeLabel(() => ({}));
-  for (const u of units) {
-    const b = unitBox(u);
-    g.setNode(u.id(), { width: b.w, height: b.h });
-  }
+  const edges: { source: string; target: string }[] = [];
   for (const [s, targets] of out) {
-    for (const t of targets) g.setEdge(s, t);
+    for (const t of targets) edges.push({ source: s, target: t });
   }
-  dagre.layout(g);
-  const snap = (v: number): number => Math.round(v / V2_GRID) * V2_GRID;
+  const positions = layoutTreeV2Positions(
+    units.map((unit) => {
+      const box = unitBox(unit);
+      return { id: unit.id(), width: box.w, height: box.h };
+    }),
+    edges,
+    GAP,
+  );
   for (const u of units) {
-    const n = g.node(u.id()) as { x: number; y: number } | undefined;
-    if (n) moveUnitTo(u, snap(n.x), snap(n.y));
+    const position = positions.get(u.id());
+    if (position) moveUnitTo(u, position.x, position.y);
   }
 }
 
@@ -903,6 +1233,7 @@ function runLayout(): void {
 
 function selectNode(node: NodeSingular): void {
   if (!cy) return;
+  const view = activeView();
   // the call tree OWNS its revealed/agg-suppressed coating — selection only
   // drives the hot layer and the panel there (one stray tap used to wipe
   // every visible edge of the chain)
@@ -920,6 +1251,7 @@ function selectNode(node: NodeSingular): void {
 
 function clearSelection(): void {
   if (!cy) return;
+  const view = activeView();
   if (view?.mode === "calltree") {
     clearHotEdges(cy);
     hidePanel();
@@ -935,7 +1267,7 @@ function clearSelection(): void {
   }
   clearSelectionClasses(cy);
   hidePanel();
-  if (!view && edgeMode() !== "all") {
+  if (activeMode.kind === "base" && edgeMode() !== "all") {
     dematerializeAll();
     restackRows();
   }
@@ -951,27 +1283,35 @@ function clearSelection(): void {
 
 /** Declarative description of the active isolated view. */
 interface ViewSpec {
-  mode: "focus" | "calltree";
+  mode: "focus" | "calltree" | "radial";
   /** the node the view was opened from — its panel button renders pressed */
   rootId: string;
   keep: Set<string>;
   crumb: string;
   /** base-state positions, snapshotted BEFORE the view mutated anything */
   saved: PositionSnapshot;
+  viewport: { zoom: number; pan: { x: number; y: number } };
   /** call tree only */
   fns?: Set<string>;
   levels?: number;
   touchedRows?: Set<string>;
   onlyTouched?: boolean;
+  /** radial neighborhood only */
+  radialResult?: ColumnUsageResult;
 }
-let view: ViewSpec | null = null;
+const radialSyntheticIds = new Set<string>();
 /** the one pending readable-zoom nudge — re-entering a view cancels it */
 let zoomNudge: number | undefined;
 let hoverUnit: string | null = null;
 
 function clearViewUiState(): void {
   hoverUnit = null;
-  el("content").classList.remove("view-focus", "view-calltree");
+  el("content").classList.remove("view-focus", "view-calltree", "view-radial");
+  document
+    .querySelectorAll("#focus-btn, #calltree-btn, #neighborhood-btn")
+    .forEach((button) =>
+      button.classList.remove("active-focus", "active-calltree", "active-neighborhood"),
+    );
 }
 
 function qualifiedNodeLabel(node: NodeSingular): string {
@@ -982,6 +1322,7 @@ function qualifiedNodeLabel(node: NodeSingular): string {
  *  through captured elements (stale after dematerialize/materialize). */
 function renderCrumb(): void {
   const crumb = el("crumb");
+  const view = activeView();
   if (!view) {
     crumb.classList.add("hidden");
     return;
@@ -999,15 +1340,17 @@ function renderCrumb(): void {
          } />touched columns only</label>`
       : "";
   crumb.innerHTML = `<span>${esc(view.crumb)}</span>${stepper}<button id="crumb-back">back</button>`;
-  crumb.querySelector("#crumb-back")?.addEventListener("click", () => exitView(true));
+  crumb
+    .querySelector("#crumb-back")
+    ?.addEventListener("click", () => exitView(view.mode !== "radial"));
   crumb.querySelector("#crumb-lvl-dn")?.addEventListener("click", () => {
-    if (view && (view.levels ?? 2) > 1) showCallTreeById(view.rootId, (view.levels ?? 2) - 1);
+    if ((view.levels ?? 2) > 1) showCallTreeById(view.rootId, (view.levels ?? 2) - 1);
   });
   crumb.querySelector("#crumb-lvl-up")?.addEventListener("click", () => {
-    if (view) showCallTreeById(view.rootId, (view.levels ?? 2) + 1);
+    showCallTreeById(view.rootId, (view.levels ?? 2) + 1);
   });
   crumb.querySelector("#crumb-cols")?.addEventListener("change", (ev) => {
-    if (view?.mode !== "calltree") return;
+    if (view.mode !== "calltree") return;
     view.onlyTouched = (ev.target as HTMLInputElement).checked;
     applyCallTreePresentation();
   });
@@ -1019,6 +1362,7 @@ function hideCrumb(): void {
 
 /** Call-tree neatness: hide rows the chain doesn't touch (crumb toggle). */
 function applyCallTreeColumnFilter(): void {
+  const view = activeView();
   if (!cy || view?.mode !== "calltree") return;
   const onlyTouched = view.onlyTouched !== false;
   const touched = view.touchedRows ?? new Set<string>();
@@ -1027,9 +1371,11 @@ function applyCallTreeColumnFilter(): void {
 
 /** Return to the canonical base state (no refit) — safe from any state. */
 function leaveToBase(): void {
+  const view = activeView();
   if (!cy || !view) return;
-  const { saved } = view;
-  view = null;
+  const { saved, viewport } = view;
+  removeOwnedElements(cy, radialSyntheticIds);
+  activeMode = transitionActiveMode(activeMode, { type: "exit" }).state;
   window.clearTimeout(zoomNudge);
   clearViewUiState();
   dematerializeAll();
@@ -1040,20 +1386,24 @@ function leaveToBase(): void {
   // the isolated mask recomputes, stale view-anchored routing is replaced
   applyFilters();
   routeEdgesAroundCards();
+  cy.viewport(viewport);
 }
 
 function exitView(refit: boolean): void {
-  if (!view) return;
+  if (activeMode.kind !== "isolated") return;
   leaveToBase();
   if (refit) fitView();
 }
 
 /** Enter (or switch to) an isolated view: always base → spec. */
-function enterView(spec: Omit<ViewSpec, "saved">): void {
+function enterView(spec: Omit<ViewSpec, "saved" | "viewport">): void {
   if (!cy) return;
-  leaveToBase(); // no-op when already in base
+  if (activeMode.kind === "matrix") closeUsageMatrix();
+  else if (activeMode.kind === "isolated") leaveToBase();
   const saved = snapshotPositions(cy); // TRUE base positions, pre-mutation
-  view = { ...spec, saved };
+  const viewport = { zoom: cy.zoom(), pan: { ...cy.pan() } };
+  const view = { ...spec, saved, viewport };
+  activeMode = transitionActiveMode(activeMode, { type: "enter-isolated", view }).state;
   resetViewState(cy); // strip selection highlights left in base
   clearViewUiState();
   applyKeepMask(cy, view.keep);
@@ -1090,11 +1440,95 @@ function focusNode(node: NodeSingular): void {
   selectNode((live.nonempty() ? live : unit) as unknown as NodeSingular);
 }
 
+function showRadialNeighborhood(node: NodeSingular, result: ColumnUsageResult): void {
+  if (!cy || node.data("type") !== "column") return;
+  const rootId = node.id();
+  const rootUnitId = unitOf(node).id();
+  const rows = aggregateUsageRows(result.groups);
+  const canvas = el("cy");
+  const plan = buildRadialPlan(rows, canvas.clientWidth, canvas.clientHeight);
+  const keep = new Set<string>([rootUnitId]);
+  const visibleRows = new Map<string, UsageMatrixRow>();
+  for (const category of ["reads", "writes", "structural"] as const) {
+    for (const row of plan.visible[category]) {
+      const unitId = cardOfNode.get(row.owner.id) ?? row.owner.id;
+      if (unitId === rootUnitId || visibleRows.has(unitId)) continue;
+      keep.add(unitId);
+      visibleRows.set(unitId, row);
+    }
+  }
+  enterView({
+    mode: "radial",
+    rootId,
+    keep,
+    radialResult: result,
+    crumb: `Neighborhood: ${qualifiedNodeLabel(node)}`,
+  });
+  for (const id of keep) if (rowsByCard.has(id)) materializeCard(id);
+  applyFilters();
+  const liveRoot = cy.getElementById(rootId);
+  const rootUnit = cy.getElementById(rootUnitId);
+  if (liveRoot.nonempty() && rootUnit.nonempty()) {
+    applyFocusedRowFilter(
+      cy,
+      liveRoot as unknown as NodeSingular,
+      rootUnit as unknown as NodeSingular,
+      keep,
+      unitOf,
+    );
+  }
+  restackRows();
+
+  const radialItems: {
+    id: string;
+    category: UsageCategory;
+    width: number;
+    height: number;
+  }[] = [];
+  for (const [id, row] of visibleRows) {
+    const unit = cy.getElementById(id);
+    if (unit.empty() || !isShown(unit)) continue;
+    const box = unit.boundingBox({ includeLabels: true, includeNodes: true });
+    radialItems.push({ id, category: row.primary, width: box.w, height: box.h });
+  }
+  for (const category of ["reads", "writes", "structural"] as const) {
+    const hidden = plan.hidden[category];
+    if (hidden === 0) continue;
+    const id = `__radial_${rootId}_${category}`;
+    addRadialSummary(cy, radialSyntheticIds, {
+      id,
+      target: rootUnitId,
+      label: `${category[0]!.toUpperCase() + category.slice(1)} +${hidden}`,
+      category,
+      kind: category === "reads" ? "reads" : category === "writes" ? "updates" : "fk",
+    });
+    radialItems.push({ id, category, width: 92, height: 26 });
+  }
+
+  const rootBox = rootUnit.boundingBox({ includeLabels: true, includeNodes: true });
+  const positions = radialPositions(radialItems, rootBox.w, rootBox.h);
+  moveUnitTo(rootUnit as unknown as NodeSingular, 0, 0);
+  for (const item of radialItems) {
+    const target = cy.getElementById(item.id);
+    const position = positions.get(item.id);
+    if (!position || target.empty()) continue;
+    if (target.isNode() && target.isParent()) {
+      moveUnitTo(target as unknown as NodeSingular, position.x, position.y);
+    } else target.position(position);
+  }
+  restackRows();
+  routeEdgesAroundCards();
+  fitView(undefined, 64);
+  const selected = cy.getElementById(rootId);
+  selectNode((selected.nonempty() ? selected : rootUnit) as unknown as NodeSingular);
+  revealOwnedRadialElements(cy, radialSyntheticIds);
+}
+
 /** Rebuild the call-tree presentation from the current spec — the crumb's
  *  column toggle re-runs this; the depth stepper re-enters the whole view. */
 function applyCallTreePresentation(): void {
-  if (!cy || view?.mode !== "calltree") return;
-  const spec = view;
+  const spec = activeView();
+  if (!cy || spec?.mode !== "calltree") return;
   const keep = spec.keep;
   const fns = spec.fns ?? new Set<string>();
   const onlyTouched = spec.onlyTouched !== false;
@@ -1152,6 +1586,7 @@ function showCallTree(node: NodeSingular, levels = 2): void {
   const { fns, keep } = callTreeClosure(cy, node, levels);
   const label = qualifiedNodeLabel(node);
   // re-entering the same root (depth stepper) keeps the column-filter choice
+  const view = activeView();
   const onlyTouched =
     view?.mode === "calltree" && view.rootId === node.id() ? view.onlyTouched !== false : true;
   enterView({
@@ -1174,7 +1609,7 @@ function showCallTree(node: NodeSingular, levels = 2): void {
   window.clearTimeout(zoomNudge);
   const rootId = node.id();
   zoomNudge = window.setTimeout(() => {
-    if (!cy || view?.rootId !== rootId || cy.zoom() >= 0.3) return;
+    if (!cy || activeView()?.rootId !== rootId || cy.zoom() >= 0.3) return;
     const root = cy.getElementById(rootId);
     if (root.nonempty()) {
       cy.animate({ zoom: 0.5, center: { eles: root }, duration: 200 } as never);
@@ -1210,10 +1645,31 @@ function wireHoverPreview(): void {
 
 function renderPanel(node: NodeSingular): void {
   const d = node.data() as GraphNodeData;
+  const view = activeView();
+  const panelCy = cy;
+  const panelMode = activeMode;
+  const generation = ++panelRenderGeneration;
   el("panel").classList.remove("hidden");
   requestAnimationFrame(() => {
-    cy?.resize();
-    if (cy) cy.animate({ center: { eles: node }, duration: 150 } as never);
+    if (
+      !panelCy ||
+      cy !== panelCy ||
+      activeMode !== panelMode ||
+      generation !== panelRenderGeneration ||
+      node.removed()
+    ) {
+      return;
+    }
+    panelCy.resize();
+    if (view?.mode === "radial") {
+      // Opening the details panel narrows the canvas. Preserve the complete
+      // neighborhood instead of re-centering the root and clipping a sector.
+      fitView(undefined, 64);
+    } else if (d.type === "column" && activeMode.kind === "base") {
+      panelCy.stop();
+      panelCy.zoom(Math.max(panelCy.zoom(), 0.95));
+      panelCy.center(node);
+    } else panelCy.animate({ center: { eles: node }, duration: 180 } as never);
   });
   const panel = el("panel-body");
   postToHost({ type: "nodeSelected", id: node.id() });
@@ -1221,6 +1677,7 @@ function renderPanel(node: NodeSingular): void {
   const ownerTable = ROW_TYPES.has(d.type) ? String(node.parent().first().data("label") ?? "") : "";
   const where = ownerTable ? `${d.schema ?? ""}.${ownerTable}` : (d.schema ?? "");
   const canCallTree = d.type === "function" || d.type === "trigger";
+  const hasColumnUsage = d.type === "column" && selectedColumnUsage?.columnId === node.id();
   panel.innerHTML = `
     <button class="close" id="panel-close" title="Close details" aria-label="Close details">x</button>
     <h2>${esc(d.label)}</h2>
@@ -1233,10 +1690,12 @@ function renderPanel(node: NodeSingular): void {
       ${d.type === "schema" ? "" : '<button id="def-btn" title="jump to source definition (.hcl, up.sql, then DDL)">Go to definition</button><button id="ddl-btn">Open DDL</button>'}
       <button id="focus-btn" class="${view?.mode === "focus" && view.rootId === node.id() ? "active-focus" : ""}">Focus</button>
       ${canCallTree ? `<button id="calltree-btn" class="${view?.mode === "calltree" && view.rootId === node.id() ? "active-calltree" : ""}">Call tree</button>` : ""}
+      ${d.type === "column" ? `<button id="neighborhood-btn" ${hasColumnUsage ? "" : "disabled"} class="${view?.mode === "radial" && view.rootId === node.id() ? "active-neighborhood" : ""}">Neighborhood</button><button id="matrix-btn" ${hasColumnUsage ? "" : "disabled"} class="${activeMatrix()?.result.columnId === node.id() ? "active-matrix" : ""}">Usage matrix</button>` : ""}
     </div>
+    ${d.type === "column" ? `<section id="column-usages" data-column-id="${esc(node.id())}" aria-live="polite"><p class="usage-empty">Loading usages...</p></section>` : ""}
     ${connections}`;
   panel.querySelector("#panel-close")?.addEventListener("click", () => {
-    if (view) {
+    if (activeMode.kind === "isolated") {
       // keep the view, just dismiss the panel — clearSelection in focus mode
       // re-selects the origin, which would immediately reopen it
       if (cy) clearHotEdges(cy);
@@ -1273,6 +1732,18 @@ function renderPanel(node: NodeSingular): void {
       label: `${d.schema ?? ""}.${d.label}`,
     });
   });
+  if (d.type === "column") {
+    if (hasColumnUsage && selectedColumnUsage) renderColumnUsages(selectedColumnUsage);
+    else {
+      activeColumnUsageRequest = ++usageRequestId;
+      postToHost({
+        type: "requestColumnUsages",
+        revision: graphRevision,
+        requestId: activeColumnUsageRequest,
+        columnId: node.id(),
+      });
+    }
+  }
   // exiting/entering a view removes and re-adds row nodes — every handler
   // must re-resolve by id, never act on the node captured at render time
   const liveNode = (id: string): NodeSingular | null => {
@@ -1285,6 +1756,7 @@ function renderPanel(node: NodeSingular): void {
   // toggles: pressing the active view's button on its origin node exits it
   panel.querySelector("#focus-btn")?.addEventListener("click", () => {
     const id = node.id();
+    const view = activeView();
     if (view?.mode === "focus" && view.rootId === id) {
       exitView(true);
       const live = liveNode(id);
@@ -1296,6 +1768,7 @@ function renderPanel(node: NodeSingular): void {
   });
   panel.querySelector("#calltree-btn")?.addEventListener("click", () => {
     const id = node.id();
+    const view = activeView();
     if (view?.mode === "calltree" && view.rootId === id) {
       exitView(true);
       const live = liveNode(id);
@@ -1304,6 +1777,26 @@ function renderPanel(node: NodeSingular): void {
       const live = liveNode(id);
       if (live) showCallTree(live);
     }
+  });
+  panel.querySelector("#neighborhood-btn")?.addEventListener("click", () => {
+    const id = node.id();
+    const view = activeView();
+    if (view?.mode === "radial" && view.rootId === id) {
+      exitView(false);
+      const live = liveNode(id);
+      if (live) selectNode(live);
+      return;
+    }
+    const result = selectedColumnUsage?.columnId === id ? selectedColumnUsage : null;
+    const live = liveNode(id);
+    if (result && live) showRadialNeighborhood(live, result);
+  });
+  panel.querySelector("#matrix-btn")?.addEventListener("click", () => {
+    const id = node.id();
+    const result = selectedColumnUsage?.columnId === id ? selectedColumnUsage : null;
+    if (!result) return;
+    if (activeMatrix()?.result.columnId === id) closeUsageMatrix();
+    else showUsageMatrix(result);
   });
 }
 
@@ -1323,6 +1816,7 @@ function focusSchema(s: NodeSingular): void {
 /** Tree click → focus view on that node (schemas isolate the whole schema). */
 function jumpToNode(id: string): void {
   if (!cy) return;
+  if (activeMode.kind === "matrix") closeUsageMatrix();
   const target = cy.getElementById(id);
   if (target.nonempty() && target.data("type") === "schema") {
     focusSchema(target as unknown as NodeSingular);
@@ -1434,6 +1928,7 @@ function applyPrefs(next: Prefs): void {
   const edgeModeChanged = next.edgeMode !== prev.edgeMode;
   const schemaGroupChanged = next.schemaGroup !== prev.schemaGroup;
   const routeChanged = next.route !== prev.route;
+  const emphasisChanged = next.emphasizeConnections !== prev.emphasizeConnections;
   const filtersChanged =
     !sameList(next.filterSchemas, prev.filterSchemas) ||
     nodeTypesChanged ||
@@ -1457,7 +1952,7 @@ function applyPrefs(next: Prefs): void {
   }
 
   if (
-    !view &&
+    activeMode.kind === "base" &&
     ((edgeModeChanged && prev.edgeMode === "all") || (filtersChanged && next.edgeMode === "all"))
   ) {
     dematerializeAll();
@@ -1465,12 +1960,12 @@ function applyPrefs(next: Prefs): void {
   }
 
   if (schemaGroupChanged) applySchemaGrouping(false);
-  if (view?.mode === "calltree" && (layoutChanged || nodeTypesChanged)) {
+  if (activeView()?.mode === "calltree" && (layoutChanged || nodeTypesChanged)) {
     applyCallTreePresentation();
     return;
   }
 
-  const needsFilter = edgeModeChanged || schemaGroupChanged || visibilityChanged;
+  const needsFilter = edgeModeChanged || schemaGroupChanged || visibilityChanged || emphasisChanged;
   const needsLayout = schemaGroupChanged || layoutChanged;
   const needsRoute = edgeModeChanged || routeChanged || visibilityChanged;
   if (needsFilter) applyFilters();
@@ -1478,8 +1973,8 @@ function applyPrefs(next: Prefs): void {
   else if (needsRoute) routeEdgesAroundCards();
 
   if ((edgeModeChanged || visibilityChanged) && !el("panel").classList.contains("hidden")) {
-    const selected = cy.nodes(":selected").first();
-    if (selected.nonempty()) renderPanel(selected as unknown as NodeSingular);
+    const selected = primarySelectedNode(cy);
+    if (selected) renderPanel(selected);
   }
 }
 
@@ -1490,8 +1985,9 @@ function sameList(a: string[], b: string[]): boolean {
 /** searchGraph picker → light a card and centre on it (selection only, no view). */
 function searchSelect(id: string): void {
   if (!cy) return;
+  if (activeMode.kind === "matrix") closeUsageMatrix();
   const card = cardOfNode.get(id);
-  if (view) exitView(false);
+  if (activeMode.kind === "isolated") exitView(false);
   if (card) {
     materializeNeighborhood(card);
     applyFilters();
@@ -1499,12 +1995,12 @@ function searchSelect(id: string): void {
   const ele = cy.getElementById(id);
   if (ele.empty()) return;
   selectNode(ele as unknown as NodeSingular);
-  cy.animate({ center: { eles: ele }, duration: 200 } as never);
 }
 
 /** tree "Call Tree" → show the call tree for a function/trigger, else focus it. */
 function callTreeById(id: string): void {
   if (!cy) return;
+  if (activeMode.kind === "matrix") closeUsageMatrix();
   exitView(false);
   const card = cardOfNode.get(id);
   if (card && !materialized.has(card)) materializeCard(card);
@@ -1534,15 +2030,36 @@ window.addEventListener("message", (ev: MessageEvent) => {
   const msg = ev.data as HostToWebviewMessage;
   if (msg.type === "graph") {
     database = msg.database ?? "";
+    graphRevision = msg.revision;
+    usageGroups.clear();
+    occurrenceRequestGroups.clear();
     render(msg.graph);
     if (pendingRevealId) {
       const id = pendingRevealId;
       pendingRevealId = null;
       jumpToNode(id);
     }
+  } else if (msg.type === "columnUsages") {
+    if (msg.revision === graphRevision && msg.requestId === activeColumnUsageRequest) {
+      renderColumnUsages(msg.result);
+    }
+  } else if (msg.type === "usageOccurrences") {
+    if (msg.revision === graphRevision) renderUsageOccurrencePage(msg.page, msg.requestId);
   } else if (msg.type === "clear") {
     cy?.destroy();
     cy = null;
+    activeMode = BASE_ACTIVE_MODE;
+    radialSyntheticIds.clear();
+    window.clearTimeout(zoomNudge);
+    clearViewUiState();
+    selectedColumnUsage = null;
+    usageGroups.clear();
+    occurrencePages.clear();
+    occurrenceRequestGroups.clear();
+    el("content").classList.remove("view-matrix");
+    el("usage-matrix").classList.add("hidden");
+    el("cy").classList.remove("hidden");
+    el("canvas-footer").classList.remove("hidden");
     hidePanel();
     hideCrumb();
     el("empty").style.display = "flex";
@@ -1561,7 +2078,8 @@ window.addEventListener("message", (ev: MessageEvent) => {
   } else if (msg.type === "relayout") {
     runLayout();
   } else if (msg.type === "exitView") {
-    exitView(true);
+    if (activeMode.kind === "matrix") closeUsageMatrix();
+    else if (activeMode.kind === "isolated") exitView(true);
   } else if (msg.type === "exportPng") {
     exportPng();
   } else if (msg.type === "exportSvg") {
@@ -1594,7 +2112,9 @@ new GraphKeyboardNavigator({
 });
 
 window.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") exitView(true);
+  if (ev.key !== "Escape") return;
+  if (activeMode.kind === "matrix") closeUsageMatrix();
+  else exitView(true);
 });
 
 // search / layout / edge-mode / filters / fit / relayout / refresh are all
@@ -1637,6 +2157,61 @@ window.addEventListener("keydown", (ev) => {
     ev.preventDefault();
   });
 }
+el<HTMLInputElement>("matrix-search").addEventListener("input", (event) => {
+  const matrix = activeMatrix();
+  if (!matrix) return;
+  matrix.search = (event.target as HTMLInputElement).value;
+  matrix.limit = 100;
+  matrix.expanded = undefined;
+  renderUsageMatrix();
+});
+el("matrix-categories").addEventListener("click", (event) => {
+  const matrix = activeMatrix();
+  if (!matrix) return;
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+    "button[data-matrix-category]",
+  );
+  const category = button?.dataset.matrixCategory as UsageCategory | "all" | undefined;
+  if (!category) return;
+  matrix.category = category;
+  matrix.limit = 100;
+  matrix.expanded = undefined;
+  renderUsageMatrix();
+});
+el("matrix-scroll").addEventListener("click", (event) => {
+  const matrix = activeMatrix();
+  if (!matrix) return;
+  const target = event.target as HTMLElement;
+  if (target.closest("button[data-occurrence-id], button[data-usage-group]")) {
+    handleUsageClick(event);
+    return;
+  }
+  const ownerButton = target.closest<HTMLButtonElement>("button[data-matrix-owner-definition]");
+  if (ownerButton?.dataset.matrixOwnerDefinition) {
+    const row = matrix.rows.find(
+      (candidate) => candidate.owner.id === ownerButton.dataset.matrixOwnerDefinition,
+    );
+    if (row?.groups[0]) openUsageOwner(row.groups[0]);
+    return;
+  }
+  const cell = target.closest<HTMLButtonElement>("button[data-matrix-cell]");
+  if (cell?.dataset.matrixOwner && cell.dataset.matrixCell) {
+    const next = {
+      ownerId: cell.dataset.matrixOwner,
+      category: cell.dataset.matrixCell as UsageCategory,
+    };
+    matrix.expanded =
+      matrix.expanded?.ownerId === next.ownerId && matrix.expanded.category === next.category
+        ? undefined
+        : next;
+    renderUsageMatrix();
+    return;
+  }
+  if (target.closest("#matrix-more")) {
+    matrix.limit += 100;
+    renderUsageMatrix();
+  }
+});
 buildLegend();
 el("reset-filters").addEventListener("click", () => postToHost({ type: "resetFilters" }));
 postToHost({ type: "ready" });

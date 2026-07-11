@@ -29,8 +29,8 @@ pnpm build
 Open the folder in VS Code and press **F5** (Run Extension). In the dev host:
 
 1. `Postgres Viz: Visualize Database` — opens the graph panel and, when needed, a database picker. **Discover Databases** checks saved credentials, `DATABASE_URL`, detected local TCP listeners, and configured fallback ports using the PostgreSQL wire handshake; authenticated servers expose their databases directly, while detected servers without credentials open a prefilled connection form. Connection profiles are workspace-scoped (metadata in workspace state, URLs in VS Code secret storage). `Postgres Viz: Show Logs` opens the output channel with per-step introspection/analysis logs.
-2. Click a node → neighborhood highlight + side panel with all connections; **Go to Definition** opens the source schema when found (`.hcl`, then the latest matching `folder/up.sql` migration); **Open DDL** shows generated database DDL.
-3. Editor-title commands: search, grid/tree layout selection, edge display mode, view options, faceted filters, fit, relayout, and refresh.
+2. Click a node → neighborhood highlight + side panel with all connections; column clicks zoom to a readable row and offer **Neighborhood** (a grouped radial dependency view) and **Usage matrix** (searchable read/write/structural counts with exact source occurrences). **Go to Definition** opens the source schema when found (`.hcl`, then the latest matching `folder/up.sql` migration); **Open DDL** shows generated database DDL.
+3. Editor-title commands: search, grid/tree layout selection, edge display mode, view options (including optional connection-based hub emphasis), faceted filters, fit, relayout, and refresh.
 4. Command palette / connection menu: impact analysis, dependency path reports, snapshot save/diff, JSON/PNG/SVG export, and load diagnostics.
 
 Columns and triggers are drawn *inside* their table (compound nodes). Only columns that participate in at least one dependency are drawn. Card mode shows one directional bundle per object pair; selecting an object reveals its typed relationships. All mode hides those bundles and expands row-level detail up to a fixed rendering budget, so large schemas remain responsive.
@@ -79,10 +79,13 @@ pnpm test:db         # uses DATABASE_URL, or postgres://postgres:pg@localhost:54
 - `src/tree-provider.ts` — native VS Code explorer tree for database objects.
 - `src/webview-controller.ts` — webview panel lifecycle, HTML, message dispatch, and ready replay.
 - `src/extension.ts` — VS Code command chrome, connection menu, graph cache, reports/exports, DDL viewer.
-- `webview/core.ts` — read-only webview graph helpers for class-derived visibility, unit ownership, call-tree closure, and position snapshots.
+- `webview/core.ts` — read-only webview graph helpers for class-derived visibility, unit ownership, call-tree closure, shared unit topology/connection emphasis, and position snapshots.
+- `webview/layout.ts` — pure, deterministic layered layout adapter around maintained `@dagrejs/dagre`.
+- `webview/view-mode.ts` — pure navigation transition planner for base, matrix, focus, call-tree, and radial modes.
+- `webview/usage-views.ts` — pure column-usage aggregation, adaptive radial capacity, and deterministic radial positioning.
 - `webview/cytoscape-adapter.ts` — the only webview layer that writes Cytoscape elements, classes, positions, parent moves, styles, and edge routes.
 - `webview/router.ts` — spatial obstacle index used by optional edge routing; bounded and benchmarked for dense graphs.
-- `webview/main.ts` — webview orchestration, Cytoscape rendering decisions, grid/tree layouts (including dagre-backed tree v2), filters, search, and detail panel.
+- `webview/main.ts` — webview orchestration, Cytoscape rendering decisions, mode effects, filters, search, and detail panel.
 
 ## Known limitations
 

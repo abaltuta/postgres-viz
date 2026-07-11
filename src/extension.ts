@@ -4,6 +4,12 @@ import { userInfo } from "node:os";
 import { disposeParser } from "./analyze";
 import { graphCacheAgeSeconds, graphCacheEntryIsFresh } from "./cache-policy";
 import {
+  columnUsageResult,
+  usageOccurrencePage,
+  type ColumnUsageStore,
+  type UsageNavigation,
+} from "./column-usage";
+import {
   ConnectionProfileStore,
   defaultProfileName,
   type ConnectionProfile,
@@ -140,6 +146,7 @@ function updateStatusItem(): void {
  */
 interface GraphCacheEntry {
   graph: GraphPayload;
+  usageStore: ColumnUsageStore;
   database: string;
   profileId: string;
   diagnostics?: LoadDiagnostics;
@@ -431,6 +438,8 @@ let sqlMigrationIndex: SqlMigrationIndex | undefined;
 /** the most recently loaded graph — backs the symbol provider */
 let currentGraph: GraphPayload | null = null;
 let currentDatabase = "";
+let currentUsageStore: ColumnUsageStore | null = null;
+let graphRevision = 0;
 let cachedGraphProfileId = "";
 
 const SYMBOL_KINDS: Partial<Record<NodeType, vscode.SymbolKind>> = {
@@ -582,6 +591,7 @@ export function activate(context: vscode.ExtensionContext): void {
     logLine,
     currentGraph: () => currentGraph,
     currentDatabase: () => currentDatabase,
+    currentRevision: () => graphRevision,
     prefs: () => prefs,
     onStats: (text) => {
       lastStatsText = text;
@@ -606,6 +616,14 @@ export function activate(context: vscode.ExtensionContext): void {
       if (item && treeView?.visible) {
         await treeView.reveal(item, { select: true, focus: false, expand: true });
       }
+    },
+    onRequestColumnUsages: (columnId) =>
+      currentUsageStore ? columnUsageResult(currentUsageStore, columnId) : undefined,
+    onRequestUsageOccurrences: (groupId, offset) =>
+      currentUsageStore ? usageOccurrencePage(currentUsageStore, groupId, offset) : undefined,
+    onOpenUsage: async (occurrenceId) => {
+      const navigation = currentUsageStore?.navigationById.get(occurrenceId);
+      if (navigation) await openUsage(navigation);
     },
     onPngExport: savePngExport,
     onSvgExport: saveSvgExport,
@@ -736,6 +754,8 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
       logLine(`cache hit — serving graph built ${age}s ago (refresh to rebuild)`);
       cacheStatusText = `Graph source: memory cache (${age}s old)`;
       currentGraph = cached.graph;
+      currentUsageStore = cached.usageStore;
+      graphRevision++;
       currentDatabase = cached.database;
       cachedGraphProfileId = profileId;
       lastDiagnostics = cached.diagnostics;
@@ -746,6 +766,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
         type: "graph",
         graph: cached.graph,
         database: cached.database,
+        revision: graphRevision,
       });
       postPrefs();
       updateStatusItem();
@@ -762,6 +783,8 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
   const switchingProfiles = Boolean(currentGraph && cachedGraphProfileId !== profileId);
   if (switchingProfiles) {
     currentGraph = null;
+    currentUsageStore = null;
+    graphRevision++;
     currentDatabase = "";
     cachedGraphProfileId = "";
     lastDiagnostics = undefined;
@@ -803,7 +826,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
         } finally {
           progressCancellation.dispose();
         }
-        const { graph, database, diagnostics } = result;
+        const { graph, usageStore, database, diagnostics } = result;
         if (generation !== loadGeneration || profileId !== activeProfileId) {
           throw new LoadCancelledError();
         }
@@ -814,12 +837,21 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
         );
         for (const warning of diagnostics.warnings) logLine(`note: ${warning}`);
         graphCache.delete(key); // re-insert so Map order stays LRU
-        graphCache.set(key, { graph, database, profileId, diagnostics, builtAt: Date.now() });
+        graphCache.set(key, {
+          graph,
+          usageStore,
+          database,
+          profileId,
+          diagnostics,
+          builtAt: Date.now(),
+        });
         if (graphCache.size > GRAPH_CACHE_MAX) {
           const oldest = graphCache.keys().next().value;
           if (oldest !== undefined) graphCache.delete(oldest);
         }
         currentGraph = graph;
+        currentUsageStore = usageStore;
+        graphRevision++;
         cacheStatusText = "";
         currentDatabase = database;
         cachedGraphProfileId = profileId;
@@ -827,7 +859,7 @@ async function loadGraph(conn: string, opts: { force?: boolean } = {}): Promise<
         treeProvider?.setGraph(graph);
         hclLensProvider?.refresh();
         applyInitialHideIsolated(graph);
-        postToWebview({ type: "graph", graph, database });
+        postToWebview({ type: "graph", graph, database, revision: graphRevision });
         postPrefs();
         updateStatusItem();
       },
@@ -885,6 +917,65 @@ async function openDefinition(
         ? { schema, name, display: fallbackLabel }
         : undefined;
   await openDdl(nodeType, oid, fallbackLabel, fallbackName);
+}
+
+function usageRange(
+  document: vscode.TextDocument,
+  navigation: UsageNavigation,
+): vscode.Range | undefined {
+  const text = document.getText();
+  if (navigation.definition && navigation.start !== undefined && navigation.end !== undefined) {
+    const definitionOffset = text.indexOf(navigation.definition);
+    if (definitionOffset >= 0 && text.lastIndexOf(navigation.definition) === definitionOffset) {
+      return new vscode.Range(
+        document.positionAt(definitionOffset + navigation.start),
+        document.positionAt(definitionOffset + navigation.end),
+      );
+    }
+  }
+  const snippetOffset = text.indexOf(navigation.snippet);
+  if (snippetOffset >= 0 && text.lastIndexOf(navigation.snippet) === snippetOffset) {
+    return new vscode.Range(
+      document.positionAt(snippetOffset),
+      document.positionAt(snippetOffset + navigation.snippet.length),
+    );
+  }
+  return undefined;
+}
+
+async function openUsage(navigation: UsageNavigation): Promise<void> {
+  const { owner } = navigation;
+  const sourceName = owner.label ?? owner.name;
+  const hcl = await hclIndex?.find(owner.type, owner.schema, sourceName, undefined);
+  const migration = hcl
+    ? undefined
+    : await sqlMigrationIndex?.find(owner.type, owner.schema, sourceName, undefined);
+  const source = hcl ?? migration;
+  if (source) {
+    const document = await vscode.workspace.openTextDocument(source.uri);
+    const fallback = new vscode.Position(source.line, source.col);
+    const selection = usageRange(document, navigation) ?? new vscode.Range(fallback, fallback);
+    await vscode.window.showTextDocument(document, {
+      viewColumn: vscode.ViewColumn.Beside,
+      preview: true,
+      selection,
+    });
+    return;
+  }
+  if (!lastConnection) return;
+  const label = graphDisplayName(owner.schema, sourceName);
+  const content = await fetchDdl(lastConnection, owner.type, owner.oid, label, {
+    schema: owner.schema,
+    name: owner.name,
+    display: label,
+  });
+  const document = await vscode.workspace.openTextDocument({ language: "sql", content });
+  const selection = usageRange(document, navigation);
+  await vscode.window.showTextDocument(document, {
+    viewColumn: vscode.ViewColumn.Beside,
+    preview: true,
+    ...(selection ? { selection } : {}),
+  });
 }
 
 async function openDdl(
@@ -1258,6 +1349,8 @@ async function connectionMenu(): Promise<void> {
       activeProfileId = connectionProfiles?.activeProfile()?.id ?? "";
       activeProfileName = connectionProfiles?.activeProfile()?.name ?? "";
       currentGraph = null;
+      currentUsageStore = null;
+      graphRevision++;
       currentDatabase = "";
       cachedGraphProfileId = "";
       lastDiagnostics = undefined;
@@ -1328,7 +1421,9 @@ async function chooseEdgeMode(): Promise<void> {
 }
 
 async function viewOptions(): Promise<void> {
-  type Item = vscode.QuickPickItem & { id: "schemaGroup" | "route" | "hideIsolated" };
+  type Item = vscode.QuickPickItem & {
+    id: "schemaGroup" | "route" | "hideIsolated" | "emphasizeConnections";
+  };
   const items: Item[] = [
     { id: "schemaGroup", label: "Group by schema", picked: prefs.schemaGroup },
     {
@@ -1338,6 +1433,12 @@ async function viewOptions(): Promise<void> {
       picked: prefs.route,
     },
     { id: "hideIsolated", label: "Hide isolated nodes", picked: prefs.hideIsolated },
+    {
+      id: "emphasizeConnections",
+      label: "Emphasize highly connected objects",
+      description: "subtle halo based on visible relationships",
+      picked: prefs.emphasizeConnections,
+    },
   ];
   const picks = await vscode.window.showQuickPick(items, {
     title: "Postgres Viz: view options",
@@ -1350,6 +1451,7 @@ async function viewOptions(): Promise<void> {
     schemaGroup: chosen.has("schemaGroup"),
     route: chosen.has("route"),
     hideIsolated: chosen.has("hideIsolated"),
+    emphasizeConnections: chosen.has("emphasizeConnections"),
   };
   // remember that the user has an opinion on hide-isolated — stop auto-forcing it
   if (next.hideIsolated !== prefs.hideIsolated) {
@@ -1573,8 +1675,10 @@ async function showLoadDiagnostics(): Promise<void> {
 ## Analysis
 
 - Analyzed functions: ${d.analysis.analyzedFunctions}
+- Analyzed views: ${d.analysis.analyzedViews}
 - Skipped functions: ${d.analysis.skippedFunctions}
 - Parser fallbacks: ${d.analysis.parserFallbacks}
+- Unresolved column references: ${d.analysis.unresolvedReferences}
 
 ## Graph
 

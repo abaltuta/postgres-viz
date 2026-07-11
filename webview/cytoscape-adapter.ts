@@ -3,9 +3,11 @@ import type { GraphEdgeData, GraphNodeData } from "../src/types";
 import type { Prefs } from "../src/protocol";
 import {
   allCardUnits,
+  CONNECTION_EMPHASIS_CLASSES,
   DATA_KINDS,
   isShownByClasses,
   VIEW_OWNED_CLASSES,
+  type ConnectionEmphasis,
   type PositionSnapshot,
 } from "./core";
 
@@ -42,6 +44,75 @@ export function initializeVirtualCards(cy: Core, rowsByCard: Map<string, NodeDef
   cy.nodes().forEach((n) => {
     if (rowsByCard.has(n.id())) n.addClass("virtual-card");
   });
+}
+
+export function applyConnectionEmphasis(
+  cy: Core,
+  classes: ReadonlyMap<string, ConnectionEmphasis>,
+): void {
+  cy.batch(() => {
+    cy.nodes().removeClass(CONNECTION_EMPHASIS_CLASSES.join(" "));
+    for (const [id, className] of classes) {
+      cy.getElementById(id).addClass(className);
+    }
+  });
+}
+
+export interface RadialSummaryDefinition {
+  id: string;
+  target: string;
+  label: string;
+  category: string;
+  kind: string;
+}
+
+export function addRadialSummary(
+  cy: Core,
+  ownedIds: Set<string>,
+  summary: RadialSummaryDefinition,
+): void {
+  if (cy.getElementById(summary.target).empty()) return;
+  const edgeId = `${summary.id}_edge`;
+  cy.batch(() => {
+    cy.add({
+      group: "nodes",
+      data: {
+        id: summary.id,
+        label: summary.label,
+        category: summary.category,
+      },
+      classes: "radial-summary",
+    });
+    cy.add({
+      group: "edges",
+      data: {
+        id: edgeId,
+        source: summary.id,
+        target: summary.target,
+        kind: summary.kind,
+      },
+      classes: "radial-summary-edge",
+    });
+  });
+  ownedIds.add(summary.id);
+  ownedIds.add(edgeId);
+}
+
+export function revealOwnedRadialElements(cy: Core, ownedIds: ReadonlySet<string>): void {
+  cy.batch(() => {
+    for (const id of ownedIds) {
+      const element = cy.getElementById(id);
+      element.removeClass("dimmed");
+      element.addClass(element.isEdge() ? "hot" : "revealed");
+    }
+  });
+}
+
+export function removeOwnedElements(cy: Core, ownedIds: Set<string>): void {
+  cy.batch(() => {
+    for (const id of ownedIds) cy.getElementById(id).remove();
+  });
+  ownedIds.clear();
 }
 
 function materializableRows(state: MaterializationState, cardId: string): NodeDef[] {
@@ -440,6 +511,19 @@ export function clearSelectionClasses(cy: Core): void {
   cy.nodes().unselect();
   cy.elements().removeClass("dimmed");
   cy.edges().removeClass("hot revealed agg-suppressed");
+}
+
+export function primarySelectedNode(cy: Core): NodeSingular | undefined {
+  let primary: NodeSingular | undefined;
+  let primaryDepth = -1;
+  cy.nodes(":selected").forEach((candidate) => {
+    const depth = candidate.ancestors().length;
+    if (depth > primaryDepth) {
+      primary = candidate as NodeSingular;
+      primaryDepth = depth;
+    }
+  });
+  return primary;
 }
 
 export function clearHotEdges(cy: Core): void {

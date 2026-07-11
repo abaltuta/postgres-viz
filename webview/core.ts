@@ -35,6 +35,9 @@ export const HIGHLIGHT_CLASSES = [
 /** rendering form — owned by materialization (virtual-card) and edge config */
 export const STRUCTURE_CLASSES = ["virtual-card", "edge-off", "ortho"] as const;
 
+/** persistent visual emphasis — owned by the connection-emphasis preference */
+export const CONNECTION_EMPHASIS_CLASSES = ["connection-medium", "connection-high"] as const;
+
 /** everything a view may have touched — stripped when (re)entering base state */
 export const VIEW_OWNED_CLASSES = ["focus-hidden", "untouched-hidden", ...HIGHLIGHT_CLASSES];
 
@@ -110,6 +113,51 @@ export function unitOf(n: NodeSingular): NodeSingular {
 export function fitTarget(cy: Core): CollectionReturnValue {
   const shown = cy.nodes().filter((n) => !n.isParent() && isShownByClasses(n as NodeSingular));
   return shown.length > 0 ? shown : cy.elements();
+}
+
+export interface UnitTopologyEdge {
+  source: string;
+  target: string;
+}
+
+export interface UnitTopology {
+  out: Map<string, Set<string>>;
+  degree: Map<string, number>;
+}
+
+export type ConnectionEmphasis = "connection-medium" | "connection-high";
+
+export function unitTopology(
+  unitIds: readonly string[],
+  edges: Iterable<UnitTopologyEdge>,
+): UnitTopology {
+  const ids = new Set(unitIds);
+  const out = new Map(unitIds.map((id) => [id, new Set<string>()]));
+  const degree = new Map(unitIds.map((id) => [id, 0]));
+  for (const { source, target } of edges) {
+    if (source === target || !ids.has(source) || !ids.has(target)) continue;
+    const targets = out.get(source)!;
+    if (targets.has(target)) continue;
+    targets.add(target);
+    degree.set(source, degree.get(source)! + 1);
+    degree.set(target, degree.get(target)! + 1);
+  }
+  return { out, degree };
+}
+
+export function connectionEmphasis(
+  degree: ReadonlyMap<string, number>,
+): Map<string, ConnectionEmphasis> {
+  let max = 0;
+  for (const count of degree.values()) max = Math.max(max, count);
+  if (max < 2) return new Map();
+  const medium = Math.max(2, Math.ceil(max / 2));
+  const classes = new Map<string, ConnectionEmphasis>();
+  for (const [id, count] of degree) {
+    if (count === max && max >= 3) classes.set(id, "connection-high");
+    else if (count >= medium) classes.set(id, "connection-medium");
+  }
+  return classes;
 }
 
 type AggregateMemberEdge = {

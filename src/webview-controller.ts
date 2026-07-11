@@ -1,6 +1,11 @@
 import * as vscode from "vscode";
 import type { GraphPayload, NodeType } from "./types";
-import type { HostToWebviewMessage, Prefs } from "./protocol";
+import type {
+  ColumnUsageResult,
+  HostToWebviewMessage,
+  Prefs,
+  UsageOccurrencePage,
+} from "./protocol";
 import { pngDataUriLengthWithinLimit, validateSvgText } from "./export-data";
 
 type PendingCommand = Extract<
@@ -32,6 +37,7 @@ export interface WebviewControllerOptions {
   logLine: (msg: string) => void;
   currentGraph: () => GraphPayload | null;
   currentDatabase: () => string;
+  currentRevision: () => number;
   prefs: () => Prefs;
   onStats: (text: string) => void;
   onRefresh: () => Promise<void>;
@@ -52,6 +58,9 @@ export interface WebviewControllerOptions {
     label: string,
   ) => Promise<void>;
   onNodeSelected: (id: string | undefined) => Promise<void> | void;
+  onRequestColumnUsages: (columnId: string) => ColumnUsageResult | undefined;
+  onRequestUsageOccurrences: (groupId: string, offset: number) => UsageOccurrencePage | undefined;
+  onOpenUsage: (occurrenceId: string) => Promise<void>;
   onPngExport: (dataUri: string) => Promise<void> | void;
   onSvgExport: (svg: string) => Promise<void> | void;
   onError: (err: unknown) => void;
@@ -176,6 +185,37 @@ export class WebviewController implements vscode.Disposable {
         );
       } else if (msg.type === "nodeSelected") {
         await this.opts.onNodeSelected(optionalString(msg.id));
+      } else if (msg.type === "requestColumnUsages") {
+        const request = parseUsageRequest(msg, this.opts.currentRevision());
+        if (!request || !/^c\d+_\d+$/.test(request.id)) return;
+        const result = this.opts.onRequestColumnUsages(request.id);
+        if (result) {
+          this.post({
+            type: "columnUsages",
+            revision: request.revision,
+            requestId: request.requestId,
+            result,
+          });
+        }
+      } else if (msg.type === "requestUsageOccurrences") {
+        const request = parseUsageRequest(msg, this.opts.currentRevision());
+        if (!request) return;
+        const offset = safeInteger(msg.offset);
+        if (offset === undefined || offset < 0) return;
+        const page = this.opts.onRequestUsageOccurrences(request.id, offset);
+        if (page) {
+          this.post({
+            type: "usageOccurrences",
+            revision: request.revision,
+            requestId: request.requestId,
+            page,
+          });
+        }
+      } else if (msg.type === "openUsage") {
+        const revision = safeInteger(msg.revision);
+        const occurrenceId = boundedString(msg.occurrenceId);
+        if (revision !== this.opts.currentRevision() || !occurrenceId) return;
+        await this.opts.onOpenUsage(occurrenceId);
       } else if (msg.type === "pngExport") {
         if (typeof msg.dataUri !== "string") return;
         if (!pngDataUriLengthWithinLimit(msg.dataUri.length)) {
@@ -202,7 +242,12 @@ export class WebviewController implements vscode.Disposable {
   private async replayReadyState(): Promise<void> {
     const graph = this.opts.currentGraph();
     if (graph) {
-      await this.deliver({ type: "graph", graph, database: this.opts.currentDatabase() });
+      await this.deliver({
+        type: "graph",
+        graph,
+        database: this.opts.currentDatabase(),
+        revision: this.opts.currentRevision(),
+      });
     }
     await this.deliver({ type: "prefs", prefs: this.opts.prefs() });
     const pending = this.pendingCommands;
@@ -268,6 +313,26 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
 }
 
+function safeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
+
+function boundedString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 ? value : undefined;
+}
+
+function parseUsageRequest(
+  msg: Record<string, unknown>,
+  currentRevision: number,
+): { revision: number; requestId: number; id: string } | undefined {
+  const revision = safeInteger(msg.revision);
+  const requestId = safeInteger(msg.requestId);
+  const id = boundedString(msg.columnId ?? msg.groupId);
+  return revision === currentRevision && requestId !== undefined && requestId >= 0 && id
+    ? { revision, requestId, id }
+    : undefined;
+}
+
 function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "webview.js"));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "style.css"));
@@ -287,6 +352,13 @@ function panelHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   <div id="content">
     <div id="canvas">
       <div id="cy" role="region" aria-label="Database graph. Use arrow keys to navigate objects and Enter to open details." tabindex="0"></div>
+      <section id="usage-matrix" class="hidden" aria-label="Column usage matrix">
+        <div class="matrix-toolbar">
+          <input id="matrix-search" type="search" aria-label="Filter usage owners" placeholder="Filter definitions" />
+          <div id="matrix-categories" class="matrix-categories" role="group" aria-label="Relationship category"></div>
+        </div>
+        <div id="matrix-scroll" class="matrix-scroll"></div>
+      </section>
       <div id="crumb" class="hidden"></div>
       <button id="reset-filters" class="hidden" title="clear active graph filters">Clear filters</button>
       <div id="empty" role="status">No connection - use the Postgres Viz status bar item or the sidebar to connect.</div>

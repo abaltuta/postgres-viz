@@ -121,6 +121,11 @@ export function buildGraph(
     emitRefs(funcOid, refs.deletes, "deletes");
     emitRefs(funcOid, refs.writes, "writes");
     emitRefs(funcOid, refs.modifies, "modifies");
+    for (const [kind, relations] of refs.unresolved) {
+      for (const relOid of relations) {
+        if (relByOid.has(relOid)) addEdge(kind, fnId(funcOid), relId(relOid));
+      }
+    }
     for (const callee of refs.calls) {
       if (fnByOid.has(callee)) addEdge("calls", fnId(funcOid), fnId(callee));
     }

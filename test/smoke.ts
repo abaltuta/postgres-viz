@@ -4,7 +4,14 @@
  * against a small fake catalog — no database needed.
  */
 import assert from "node:assert/strict";
-import { analyzeFunc, disposeParser, getParser, Resolver } from "../src/analyze";
+import {
+  analyzeFunc,
+  byteOffsetToIndex,
+  columnRefEnd,
+  disposeParser,
+  getParser,
+  Resolver,
+} from "../src/analyze";
 import type { FuncRefs, PgParser } from "../src/analyze";
 import { buildGraph } from "../src/graph";
 import { routineNameFromLabel } from "../src/routine-label";
@@ -122,6 +129,9 @@ const catalog: Pick<Catalog, "rels" | "cols" | "funcs"> = {
   funcs: [logOrderFn, notifyFn, prorationFn, quotedAssignFn],
 };
 
+assert.equal(byteOffsetToIndex("é.x", 3), 2, "UTF-8 byte offsets map to UTF-16 indices");
+assert.equal(columnRefEnd('o."Display Name" + 1', 0), 16, "quoted column spans include qualifiers");
+
 const ordersRel = rels[0]!;
 
 const GRAPH_PARENT = 3001;
@@ -155,6 +165,9 @@ function refs(overrides: Partial<FuncRefs>): FuncRefs {
     writes: new Map(),
     modifies: new Map(),
     calls: new Set(),
+    occurrences: [],
+    diagnostics: [],
+    unresolved: new Map(),
     parsed: true,
     ...overrides,
   };
@@ -240,6 +253,105 @@ WHERE EXISTS (
   assert.ok(
     hasRef(nestedCteShadow.reads, ORDERS, 0),
     "a nested CTE name must not hide an outer real relation read",
+  );
+
+  const joinAlias = await analyzeFunc(
+    sqlFunc(
+      2104,
+      "join_alias",
+      `SELECT j.total, j.customer_name
+       FROM (orders o JOIN customers c ON c.id = o.customer_id)
+         AS j(order_id, total, customer_id, display_name, customer_pk, customer_name)`,
+    ),
+    resolver,
+    [],
+    parser,
+  );
+  assert.ok(hasRef(joinAlias.reads, ORDERS, 2), "join alias column list resolves orders.total");
+  assert.ok(
+    hasRef(joinAlias.reads, CUSTOMERS, 2),
+    "join alias column list resolves customers.name",
+  );
+
+  const naturalJoin = await analyzeFunc(
+    sqlFunc(2105, "natural_join", "SELECT id FROM orders NATURAL JOIN customers"),
+    resolver,
+    [],
+    parser,
+  );
+  assert.ok(hasRef(naturalJoin.reads, ORDERS, 1), "NATURAL JOIN reads the left merged key");
+  assert.ok(hasRef(naturalJoin.reads, CUSTOMERS, 1), "NATURAL JOIN reads the right merged key");
+
+  const outputAlias = await analyzeFunc(
+    sqlFunc(2106, "output_alias", "SELECT o.total AS id FROM orders o ORDER BY id"),
+    resolver,
+    [],
+    parser,
+  );
+  assert.ok(hasRef(outputAlias.reads, ORDERS, 2), "ORDER BY output alias keeps source provenance");
+  assert.equal(
+    hasRef(outputAlias.reads, ORDERS, 1),
+    false,
+    "ORDER BY output alias must not resolve to the input column with the same name",
+  );
+
+  const conflict = await analyzeFunc(
+    sqlFunc(
+      2107,
+      "on_conflict",
+      "INSERT INTO orders(id, total) VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET total = excluded.total",
+    ),
+    resolver,
+    [],
+    parser,
+  );
+  assert.ok(hasRef(conflict.updates, ORDERS, 2), "ON CONFLICT assignment records an update");
+
+  const merge = await analyzeFunc(
+    sqlFunc(
+      2108,
+      "merge_actions",
+      `MERGE INTO orders o USING customers c ON c.id = o.customer_id
+       WHEN MATCHED AND c.name IS NULL THEN DELETE
+       WHEN MATCHED THEN UPDATE SET total = 1
+       WHEN NOT MATCHED THEN INSERT (id, total) VALUES (c.id, 0)`,
+    ),
+    resolver,
+    [],
+    parser,
+  );
+  assert.ok(hasRef(merge.deletes, ORDERS, 0), "MERGE DELETE records a delete operation");
+  assert.ok(hasRef(merge.updates, ORDERS, 2), "MERGE UPDATE records its target column");
+  assert.ok(hasRef(merge.inserts, ORDERS, 1), "MERGE INSERT records id");
+  assert.ok(hasRef(merge.inserts, ORDERS, 2), "MERGE INSERT records total");
+  assert.equal(merge.writes.size, 0, "classified MERGE actions do not emit generic writes");
+
+  const ambiguous = await analyzeFunc(
+    sqlFunc(2109, "ambiguous_join", "SELECT id FROM orders o JOIN customers c ON true"),
+    resolver,
+    [],
+    parser,
+  );
+  assert.ok(
+    ambiguous.diagnostics.some((diagnostic) => diagnostic.reason === "ambiguous"),
+    "ambiguous unqualified columns produce diagnostics",
+  );
+  assert.equal(
+    ambiguous.occurrences.some((occurrence) => occurrence.attnum === 1),
+    false,
+    "ambiguous columns never produce speculative occurrences",
+  );
+  assert.deepEqual(
+    ambiguous.unresolved.get("reads"),
+    new Set([ORDERS, CUSTOMERS]),
+    "ambiguous candidates retain conservative table dependencies",
+  );
+  assert.ok(
+    outputAlias.occurrences.some(
+      (occurrence) =>
+        occurrence.relOid === ORDERS && occurrence.attnum === 2 && occurrence.start != null,
+    ),
+    "parsed SQL definitions retain exact occurrence offsets",
   );
 }
 

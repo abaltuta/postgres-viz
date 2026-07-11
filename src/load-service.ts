@@ -1,4 +1,5 @@
-import { analyzeAll } from "./analyze";
+import { analyzeAll, analyzeViews } from "./analyze";
+import { buildColumnUsageStore, type ColumnUsageStore } from "./column-usage";
 import { ClientCancelledError, withClientPool, type CancellationLike } from "./db";
 import { buildGraph } from "./graph";
 import { introspect, type Log } from "./introspect";
@@ -33,6 +34,8 @@ export interface LoadDiagnostics {
     analyzedFunctions: number;
     parserFallbacks: number;
     skippedFunctions: number;
+    analyzedViews: number;
+    unresolvedReferences: number;
   };
   graph: {
     nodes: number;
@@ -49,6 +52,7 @@ export interface NormalizedSchemaFilter {
 
 export interface LoadServiceResult {
   graph: GraphPayload;
+  usageStore: ColumnUsageStore;
   database: string;
   diagnostics: LoadDiagnostics;
 }
@@ -104,27 +108,55 @@ export async function loadGraphFromDatabase(opts: LoadServiceOptions): Promise<L
         });
 
         throwIfCancelled(opts.cancellation);
-        const analysis = await analyzeAll(catalog, (msg) => {
-          throwIfCancelled(opts.cancellation);
-          analysisLog(msg);
-        });
+        const [analysis, viewAnalysis] = await Promise.all([
+          analyzeAll(catalog, (msg) => {
+            throwIfCancelled(opts.cancellation);
+            analysisLog(msg);
+          }),
+          analyzeViews(catalog, (msg) => {
+            throwIfCancelled(opts.cancellation);
+            analysisLog(msg);
+          }),
+        ]);
 
         throwIfCancelled(opts.cancellation);
         log("building graph...");
         const graph = buildGraph(catalog, analysis, { includeFks: opts.includeFks });
+        const usageStore = buildColumnUsageStore(catalog, graph, analysis, viewAnalysis);
         throwIfCancelled(opts.cancellation);
         const database = String(
           (await client.query("SELECT current_database() AS db")).rows[0]?.db ?? "",
         );
         if (!database) throw new Error("current_database() returned no database name");
         const parserFallbacks = [...analysis.values()].filter((refs) => !refs.parsed).length;
-        const warnings =
-          graph.nodes.length > 3000
-            ? ['large graph - set "postgresViz.schemas" to a subset (e.g. ["public"]) to trim it']
-            : [];
+        const unresolvedReferences = [...analysis.values(), ...viewAnalysis.values()].reduce(
+          (total, refs) => total + refs.diagnostics.length,
+          0,
+        );
+        const warnings: string[] = [];
+        if (graph.nodes.length > 3000) {
+          warnings.push(
+            'large graph - set "postgresViz.schemas" to a subset (e.g. ["public"]) to trim it',
+          );
+        }
+        const owners = new Map([
+          ...catalog.funcs.map((fn) => [fn.oid, `${fn.schema}.${fn.name}()`] as const),
+          ...catalog.rels.map((rel) => [rel.oid, `${rel.schema}.${rel.name}`] as const),
+        ]);
+        const diagnostics = [...analysis, ...viewAnalysis].flatMap(([oid, refs]) =>
+          refs.diagnostics.map(
+            (diagnostic) =>
+              `${owners.get(oid) ?? oid}: ${diagnostic.reason} ${diagnostic.identifier} - ${diagnostic.snippet}`,
+          ),
+        );
+        warnings.push(...diagnostics.slice(0, 20));
+        if (diagnostics.length > 20) {
+          warnings.push(`${diagnostics.length - 20} additional unresolved references omitted`);
+        }
 
         return {
           graph,
+          usageStore,
           database,
           diagnostics: {
             elapsedMs: Date.now() - startedAt,
@@ -142,6 +174,8 @@ export async function loadGraphFromDatabase(opts: LoadServiceOptions): Promise<L
               analyzedFunctions: analysis.size,
               parserFallbacks,
               skippedFunctions: catalog.funcs.length - analysis.size,
+              analyzedViews: viewAnalysis.size,
+              unresolvedReferences,
             },
             graph: {
               nodes: graph.nodes.length,

@@ -137,16 +137,35 @@ try {
       await send("Page.enable");
       await send("Page.navigate", { url });
       let result;
+      let radialCaptured = false;
       for (let attempt = 0; attempt < 150 && !result; attempt += 1) {
         const evaluation = await send("Runtime.evaluate", {
           expression: `(() => {
             const marker = document.querySelector("#ui-test-result");
-            if (!marker) return null;
-            return { details: marker.dataset.details, result: marker.dataset.result };
+            return {
+              marker: marker
+                ? { details: marker.dataset.details, result: marker.dataset.result }
+                : null,
+              radialReady: Boolean(globalThis.__radialReady),
+            };
           })()`,
           returnByValue: true,
         });
-        result = evaluation.result.value;
+        const state = evaluation.result.value;
+        if (state?.radialReady && !radialCaptured) {
+          const radial = await send("Page.captureScreenshot", { format: "png", fromSurface: true });
+          const radialPng = Buffer.from(radial.data, "base64");
+          writeFileSync(`/tmp/postgres-viz-radial-${width}x${height}.png`, radialPng);
+          if (
+            radialPng.length < 5_000 ||
+            radialPng.readUInt32BE(16) !== width ||
+            radialPng.readUInt32BE(20) !== height
+          ) {
+            throw new Error(`radial screenshot ${width}x${height} is blank or incorrectly sized`);
+          }
+          radialCaptured = true;
+        }
+        result = state?.marker;
         if (!result) await new Promise((resolveWait) => setTimeout(resolveWait, 100));
       }
       if (!result) throw new Error(`webview ${width}x${height} timed out`);

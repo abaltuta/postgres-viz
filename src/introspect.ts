@@ -118,7 +118,8 @@ export async function introspect(
 
   const rels: CatalogRel[] = (
     await client.query(
-      `SELECT c.oid AS oid, n.nspname AS schema, c.relname AS name, c.relkind::text AS relkind
+      `SELECT c.oid AS oid, n.nspname AS schema, c.relname AS name, c.relkind::text AS relkind,
+              CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid, true) END AS definition
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
        WHERE c.relkind IN ('r','p','v','m','f') AND ${schemaPred("n.nspname")}
@@ -131,6 +132,7 @@ export async function introspect(
     schema: String(r.schema),
     name: String(r.name),
     kind: REL_KINDS[r.relkind] ?? "table",
+    definition: r.definition == null ? null : String(r.definition),
   }));
   log(`pg_class: ${rels.length} relations (${countBy(rels, (r) => r.kind)}) — ${took()}`);
 

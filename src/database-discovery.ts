@@ -37,7 +37,8 @@ export async function mapWithConcurrency<T, R>(
   concurrency: number,
   mapper: (value: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-  const results = new Array<R>(values.length);
+  const results: R[] = [];
+  results.length = values.length;
   let next = 0;
   const workerCount = Math.min(values.length, Math.max(1, Math.floor(concurrency) || 1));
   await Promise.all(
@@ -63,7 +64,7 @@ export function normalizeDiscoveryPorts(values: readonly unknown[], limit = 64):
 export function parseListeningTcpPorts(output: string): number[] {
   const ports = output.split(/\r?\n/).flatMap((line) => {
     const trimmed = line.trim();
-    if (!trimmed || (!/^n/.test(trimmed) && !/\bLISTEN(?:ING)?\b/i.test(trimmed))) return [];
+    if (!trimmed || (!trimmed.startsWith("n") && !/\bLISTEN(?:ING)?\b/i.test(trimmed))) return [];
     for (const token of trimmed.split(/\s+/)) {
       const match = /(?:[:.])(\d+)$/.exec(token);
       if (!match) continue;

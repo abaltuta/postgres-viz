@@ -1,11 +1,51 @@
 import type { EdgeKind, GraphPayload, NodeType } from "./types";
 
+export interface UsageOwner {
+  id: string;
+  type: NodeType;
+  oid: number;
+  schema?: string;
+  name: string;
+  owner?: string;
+  label?: string;
+  detail?: string;
+}
+
+export interface UsageOccurrenceItem {
+  id: string;
+  snippet: string;
+  exact: boolean;
+}
+
+export interface ColumnUsageGroup {
+  id: string;
+  kind: EdgeKind;
+  section: "sql" | "structural";
+  owner: UsageOwner;
+  count: number;
+  occurrences: UsageOccurrenceItem[];
+}
+
+export interface ColumnUsageResult {
+  columnId: string;
+  groups: ColumnUsageGroup[];
+}
+
+export interface UsageOccurrencePage {
+  groupId: string;
+  offset: number;
+  total: number;
+  occurrences: UsageOccurrenceItem[];
+}
+
 export interface Prefs {
   layout: "grid" | "tree";
   edgeMode: "off" | "cards" | "all";
   schemaGroup: boolean;
   route: boolean;
   hideIsolated: boolean;
+  /** Add a subtle halo to the most connected visible objects. */
+  emphasizeConnections: boolean;
   /** Tree/call-graph layout engine. */
   engine: "v1" | "v2";
   /** Empty = all schemas/types/kinds. */
@@ -20,6 +60,7 @@ export const DEFAULT_PREFS: Prefs = {
   schemaGroup: true,
   route: false,
   hideIsolated: false,
+  emphasizeConnections: false,
   engine: "v1",
   filterSchemas: [],
   filterNodeTypes: [],
@@ -97,6 +138,7 @@ export function normalizePrefs(value: unknown): Prefs {
     schemaGroup: boolOr(raw.schemaGroup, DEFAULT_PREFS.schemaGroup),
     route: boolOr(raw.route, DEFAULT_PREFS.route),
     hideIsolated: boolOr(raw.hideIsolated, DEFAULT_PREFS.hideIsolated),
+    emphasizeConnections: boolOr(raw.emphasizeConnections, DEFAULT_PREFS.emphasizeConnections),
     engine: oneOf(raw.engine, ENGINES, DEFAULT_PREFS.engine),
     filterSchemas: stringList(raw.filterSchemas, { trim: false }),
     filterNodeTypes: enumList(raw.filterNodeTypes, FILTER_NODE_TYPES),
@@ -108,7 +150,19 @@ export const PREFS_KEY = "postgresViz.prefs";
 export const HIDE_ISOLATED_TOUCHED_KEY = "postgresViz.userTouchedHideIsolated";
 
 export type HostToWebviewMessage =
-  | { type: "graph"; graph: GraphPayload; database: string }
+  | { type: "graph"; graph: GraphPayload; database: string; revision: number }
+  | {
+      type: "columnUsages";
+      revision: number;
+      requestId: number;
+      result: ColumnUsageResult;
+    }
+  | {
+      type: "usageOccurrences";
+      revision: number;
+      requestId: number;
+      page: UsageOccurrencePage;
+    }
   | { type: "clear"; message: string }
   | { type: "prefs"; prefs: Prefs }
   | { type: "reveal"; id: string }
@@ -130,6 +184,15 @@ export type WebviewToHostMessage =
   | { type: "svgExport"; svg: string }
   | { type: "stats"; text?: string }
   | { type: "nodeSelected"; id?: string }
+  | { type: "requestColumnUsages"; revision: number; requestId: number; columnId: string }
+  | {
+      type: "requestUsageOccurrences";
+      revision: number;
+      requestId: number;
+      groupId: string;
+      offset: number;
+    }
+  | { type: "openUsage"; revision: number; occurrenceId: string }
   | {
       type: "openDdl";
       nodeType: NodeType;

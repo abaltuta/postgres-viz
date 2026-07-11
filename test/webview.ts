@@ -18,12 +18,16 @@ import {
   aggregateMemberLabels,
   allCardUnits,
   callTreeClosure,
+  connectionEmphasis,
   fitTarget,
   isShownByClasses,
   snapshotPositions,
+  unitTopology,
   unitOf,
 } from "../webview/core";
 import {
+  addRadialSummary,
+  applyConnectionEmphasis,
   applyFilterClasses,
   applySelectionClasses,
   applyKeepMask,
@@ -34,12 +38,17 @@ import {
   materializeCard,
   materializeNeighborhood,
   materializationRowCounts,
+  primarySelectedNode,
   type MaterializationState,
   type NodeDef,
   restackRows,
   resetViewState,
+  revealOwnedRadialElements,
+  removeOwnedElements,
   restoreViewPositions,
 } from "../webview/cytoscape-adapter";
+import { layoutTreeV2Positions } from "../webview/layout";
+import { BASE_ACTIVE_MODE, transitionActiveMode } from "../webview/view-mode";
 
 function emptyMaterializationState(): MaterializationState {
   return {
@@ -489,6 +498,11 @@ function build(): Core {
   applySelectionClasses(cy, cy.getElementById("orders_total") as unknown as NodeSingular, unitOf);
   assert.ok(cy.getElementById("orders_total").selected(), "selected row is tracked semantically");
   assert.ok(cy.getElementById("orders").selected(), "owner card is available for prioritization");
+  assert.equal(
+    primarySelectedNode(cy)?.id(),
+    "orders_total",
+    "the deepest selected row remains the primary panel selection",
+  );
   assert.ok(
     cy.getElementById("agg_reads").hasClass("agg-suppressed"),
     "matching aggregate is suppressed when its detail row is revealed",
@@ -778,6 +792,162 @@ function build(): Core {
   assert.ok(elapsed < 2_000, `2,000-node closure completed in ${elapsed.toFixed(1)} ms`);
 }
 
+// ── 20. shared unit topology powers layouts and connection emphasis ──
+{
+  const topology = unitTopology(
+    ["hub", "reader", "writer", "isolated"],
+    [
+      { source: "hub", target: "reader" },
+      { source: "hub", target: "reader" }, // duplicate aggregate is counted once
+      { source: "hub", target: "writer" },
+      { source: "writer", target: "hub" }, // reverse relationship is distinct
+      { source: "hub", target: "hub" }, // self loops do not affect layout degree
+      { source: "missing", target: "hub" },
+    ],
+  );
+  assert.deepEqual([...topology.out.get("hub")!].sort(), ["reader", "writer"]);
+  assert.deepEqual([...topology.out.get("writer")!], ["hub"]);
+  assert.deepEqual(
+    Object.fromEntries(topology.degree),
+    { hub: 3, reader: 1, writer: 2, isolated: 0 },
+    "degree counts unique directed unit relationships and ignores invalid endpoints",
+  );
+
+  const classes = connectionEmphasis(topology.degree);
+  assert.equal(classes.get("hub"), "connection-high", "the busiest object is emphasized most");
+  assert.equal(classes.get("writer"), "connection-medium", "secondary hubs get a softer emphasis");
+  assert.equal(classes.has("reader"), false, "ordinary connected objects are not visually noisy");
+
+  const cy = cytoscape({
+    headless: true,
+    elements: {
+      nodes: [
+        { data: { id: "hub", type: "table" } },
+        { data: { id: "reader", type: "view" } },
+        { data: { id: "writer", type: "function" } },
+      ],
+      edges: [],
+    },
+  });
+  applyConnectionEmphasis(cy, classes);
+  assert.ok(cy.getElementById("hub").hasClass("connection-high"));
+  assert.ok(cy.getElementById("writer").hasClass("connection-medium"));
+  applyConnectionEmphasis(cy, new Map());
+  assert.ok(
+    cy.nodes(".connection-high, .connection-medium").empty(),
+    "disabling the option removes stale emphasis classes",
+  );
+
+  const largeDegree = new Map<string, number>();
+  for (let i = 0; i < 200_000; i++) largeDegree.set(`unit-${i}`, i === 199_999 ? 3 : 1);
+  assert.equal(
+    connectionEmphasis(largeDegree).get("unit-199999"),
+    "connection-high",
+    "large schemas do not exceed JavaScript's function-argument limit",
+  );
+}
+
+// ── 21. layered layout stays deterministic across dagre upgrades ──
+{
+  const positions = layoutTreeV2Positions(
+    [
+      { id: "entry", width: 240, height: 120 },
+      { id: "read_orders", width: 312, height: 168 },
+      { id: "write_audit", width: 264, height: 144 },
+      { id: "finish", width: 216, height: 120 },
+    ],
+    [
+      { source: "entry", target: "read_orders" },
+      { source: "entry", target: "write_audit" },
+      { source: "read_orders", target: "finish" },
+      { source: "write_audit", target: "finish" },
+    ],
+  );
+  assert.deepEqual(
+    Object.fromEntries(positions),
+    {
+      entry: { x: 288, y: 72 },
+      read_orders: { x: 456, y: 288 },
+      write_audit: { x: 144, y: 288 },
+      finish: { x: 288, y: 504 },
+    },
+    "tree v2 keeps rank direction, sibling order, spacing, and 24px grid snapping",
+  );
+}
+
+// ── 22. radial synthetic elements are owned by the Cytoscape adapter ──
+{
+  const cy = cytoscape({
+    headless: true,
+    elements: [{ data: { id: "root", type: "table" } }],
+  });
+  const owned = new Set<string>();
+  addRadialSummary(cy, owned, {
+    id: "summary",
+    target: "root",
+    label: "Reads +12",
+    category: "reads",
+    kind: "reads",
+  });
+  assert.ok(cy.getElementById("summary").hasClass("radial-summary"));
+  assert.ok(cy.getElementById("summary_edge").hasClass("radial-summary-edge"));
+  assert.deepEqual([...owned].sort(), ["summary", "summary_edge"]);
+
+  cy.getElementById("summary").addClass("dimmed");
+  cy.getElementById("summary_edge").addClass("dimmed");
+  revealOwnedRadialElements(cy, owned);
+  assert.ok(cy.getElementById("summary").hasClass("revealed"));
+  assert.ok(cy.getElementById("summary_edge").hasClass("hot"));
+  assert.ok(cy.elements(".dimmed").empty());
+
+  removeOwnedElements(cy, owned);
+  assert.ok(cy.getElementById("summary").empty());
+  assert.ok(cy.getElementById("summary_edge").empty());
+  assert.equal(owned.size, 0);
+}
+
+// ── 23. webview modes have one deterministic transition owner ──
+{
+  const matrixPayload = { columnId: "orders_total" };
+  const matrix = transitionActiveMode(BASE_ACTIVE_MODE, {
+    type: "enter-matrix",
+    matrix: matrixPayload,
+  });
+  assert.deepEqual(matrix, {
+    state: { kind: "matrix", matrix: matrixPayload },
+    leave: "none",
+  });
+
+  const focusPayload = { mode: "focus" as const, rootId: "orders" };
+  const focus = transitionActiveMode(matrix.state, {
+    type: "enter-isolated",
+    view: focusPayload,
+  });
+  assert.deepEqual(focus, {
+    state: { kind: "isolated", view: focusPayload },
+    leave: "matrix",
+  });
+
+  const calltreePayload = { mode: "calltree" as const, rootId: "refresh_totals" };
+  const calltree = transitionActiveMode(focus.state, {
+    type: "enter-isolated",
+    view: calltreePayload,
+  });
+  assert.deepEqual(calltree, {
+    state: { kind: "isolated", view: calltreePayload },
+    leave: "isolated",
+  });
+
+  assert.deepEqual(transitionActiveMode(calltree.state, { type: "exit" }), {
+    state: BASE_ACTIVE_MODE,
+    leave: "isolated",
+  });
+  assert.deepEqual(transitionActiveMode(BASE_ACTIVE_MODE, { type: "exit" }), {
+    state: BASE_ACTIVE_MODE,
+    leave: "none",
+  });
+}
+
 console.log(
-  "webview OK — closure, stale-row, fit, agg members, class ownership, positions, demat, keep-mask, facets, routing, panel visibility, selection aggs, row neighborhoods, row order, edge budgets",
+  "webview OK — closure, stale-row, fit, agg members, class ownership, positions, demat, keep-mask, facets, routing, panel visibility, selection aggs, row neighborhoods, row order, edge budgets, topology, connection emphasis, dagre layout, mode transitions",
 );

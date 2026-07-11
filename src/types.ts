@@ -5,6 +5,8 @@ export interface CatalogRel {
   schema: string;
   name: string;
   kind: RelKind;
+  /** SQL text for views/materialized views; null for other relation kinds. */
+  definition?: string | null;
 }
 
 export interface CatalogCol {

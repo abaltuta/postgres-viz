@@ -94,6 +94,9 @@ async function main(): Promise<void> {
   const prefs: Prefs = { ...DEFAULT_PREFS, edgeMode: "all" };
   const openDdlCalls: unknown[][] = [];
   const openDefinitionCalls: unknown[][] = [];
+  const usageCalls: string[] = [];
+  const usageOccurrenceCalls: unknown[][] = [];
+  const openUsageCalls: string[] = [];
   const errors: unknown[] = [];
   let resetFiltersCalls = 0;
   const controller = new WebviewController({
@@ -101,6 +104,7 @@ async function main(): Promise<void> {
     logLine: () => undefined,
     currentGraph: () => graph,
     currentDatabase: () => "db",
+    currentRevision: () => 7,
     prefs: () => prefs,
     onStats: () => undefined,
     onRefresh: async () => undefined,
@@ -114,6 +118,17 @@ async function main(): Promise<void> {
       openDefinitionCalls.push(args);
     },
     onNodeSelected: () => undefined,
+    onRequestColumnUsages: (columnId) => {
+      usageCalls.push(columnId);
+      return { columnId, groups: [] };
+    },
+    onRequestUsageOccurrences: (groupId, offset) => {
+      usageOccurrenceCalls.push([groupId, offset]);
+      return { groupId, offset, total: 0, occurrences: [] };
+    },
+    onOpenUsage: async (occurrenceId) => {
+      openUsageCalls.push(occurrenceId);
+    },
     onPngExport: () => undefined,
     onSvgExport: () => undefined,
     onError: (error) => errors.push(error),
@@ -178,7 +193,7 @@ async function main(): Promise<void> {
   assert.deepEqual(
     panel.webview.messages,
     [
-      { type: "graph", graph, database: "db" },
+      { type: "graph", graph, database: "db", revision: 7 },
       { type: "prefs", prefs },
       { type: "reveal", id: "second" },
       { type: "exportPng" },
@@ -194,7 +209,11 @@ async function main(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(
     panel.webview.messages.slice(-3),
-    [{ type: "graph", graph, database: "db" }, { type: "prefs", prefs }, { type: "exportSvg" }],
+    [
+      { type: "graph", graph, database: "db", revision: 7 },
+      { type: "prefs", prefs },
+      { type: "exportSvg" },
+    ],
     "failed commands remain queued until a successful ready replay",
   );
   panel.webview.receive({ type: "svgExport", svg: "<svg><script/></svg>" });
@@ -251,6 +270,45 @@ async function main(): Promise<void> {
     [["function", 84, "public", "refresh_orders", undefined, "public.refresh_orders"]],
     "valid openDefinition messages reach the host callback",
   );
+  panel.webview.messages.length = 0;
+  panel.webview.receive({
+    type: "requestColumnUsages",
+    revision: 7,
+    requestId: 11,
+    columnId: "c1_2",
+  });
+  panel.webview.receive({
+    type: "requestUsageOccurrences",
+    revision: 7,
+    requestId: 12,
+    groupId: "c1_2|f3|reads",
+    offset: 50,
+  });
+  panel.webview.receive({ type: "openUsage", revision: 7, occurrenceId: "f3:4" });
+  panel.webview.receive({
+    type: "requestColumnUsages",
+    revision: 6,
+    requestId: 13,
+    columnId: "c1_2",
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(usageCalls, ["c1_2"], "current-revision column usage requests are accepted");
+  assert.deepEqual(usageOccurrenceCalls, [["c1_2|f3|reads", 50]]);
+  assert.deepEqual(openUsageCalls, ["f3:4"]);
+  assert.deepEqual(panel.webview.messages, [
+    {
+      type: "columnUsages",
+      revision: 7,
+      requestId: 11,
+      result: { columnId: "c1_2", groups: [] },
+    },
+    {
+      type: "usageOccurrences",
+      revision: 7,
+      requestId: 12,
+      page: { groupId: "c1_2|f3|reads", offset: 50, total: 0, occurrences: [] },
+    },
+  ]);
   console.log("webview-controller OK - HTML escaping, ready replay, message validation");
 }
 
