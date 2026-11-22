@@ -77,20 +77,9 @@ Use `--json` for machine-readable output. For mixed-case or spaced names, pass o
 
 ## How the parser works
 
-In the routine lab, searching for references to `ledger.entries.account_id` leads to a line inside `ledger.account_deltas`.
+In the routine lab, `ledger.account_deltas` reads `ledger.entries.account_id`, even though its SQL calls the column `owner`.
 
 ```sql
-WHERE e.owner = a.id
-```
-
-How did the viewer find a column whose name appears nowhere on that line?
-
-The scan starts with a read-only, repeatable-read transaction. It collects objects, column names and their order, plus dependencies PostgreSQL already records in `pg_depend`. These catalog entries can explain, for example, why a view depends on a function. To find reads inside a quoted SQL function body, postgres-viz also parses the definition. The embedded PostgreSQL parser runs in a child process and returns a syntax tree without executing the routine.
-
-The surrounding query gives `owner` its meaning.
-
-```sql
-SELECT a.id, calc.amount
 FROM ledger.accounts AS a
 CROSS JOIN LATERAL (
   SELECT sum(e.amount) AS amount
@@ -99,17 +88,15 @@ CROSS JOIN LATERAL (
 ) AS calc
 ```
 
-The analyzer walks the tree and keeps track of the names visible in each query. Inside the subquery, `e` refers to `ledger.entries`. The column alias list `(owner)` renames its first column, which the catalog identifies as `account_id`. The remaining columns keep their names, so `e.amount` still means `ledger.entries.amount`. Because the subquery is `LATERAL`, it can also see `a.id` from the outer query.
+**From SQL to column IDs.** The scan reads the catalog in a read-only, repeatable-read transaction. That gives the analyzer each table's columns in order, alongside dependencies PostgreSQL already tracks in `pg_depend`. A child process parses the function body into a syntax tree. The `RangeVar` node for `ledger.entries` carries the table alias `e` and the column alias list `(owner)`. The analyzer builds an ordered list of visible names paired with their source column IDs. Applying `(owner)` to the first entry preserves the ID of `account_id` and leaves `amount` untouched.
 
-The snapshot now records that `ledger.account_deltas` **reads** `ledger.entries.account_id`, with `WHERE e.owner = a.id` as evidence. Parsing the SQL embedded in the PL/pgSQL procedure `ledger.post_deltas` finds a **call** to that function. Those two relationships are enough to answer a two-hop reference query offline. [Read both routines](examples/routines/schema.sql)
+**Resolving the predicate.** The tree represents `e.owner` and `a.id` as separate `ColumnRef` nodes. The first resolves inside the subquery. Because the subquery is `LATERAL`, its scope also includes the preceding `FROM` item, so `a.id` resolves to `ledger.accounts.id`. Each resolved read becomes a relationship with a SQL snippet. When the parser can locate the fragment uniquely in the captured definition, it also saves the character range the viewer can highlight.
 
-Try it against the saved snapshot from the repository root:
+**Following the caller.** For PL/pgSQL, the analyzer walks the procedural tree and parses the SQL inside it. In `ledger.post_deltas`, the query inside a `FOR` loop calls `ledger.account_deltas`. Following that call and the column read backwards gives the two-hop path from `account_id` to the procedure. Literal `EXECUTE` strings can be parsed the same way. When the procedure constructs a table name from an argument, the snapshot records an unresolved reference. [Routine definitions](examples/routines/schema.sql) · [Scope resolution](internal/analysis/scope.go)
 
 ```sh
 postgres-viz refs --file examples/routines/routines.pgviz.json --column ledger.entries.account_id --depth 2
 ```
-
-Dynamic SQL shows the limit of this approach. The same procedure uses a literal `EXECUTE 'INSERT INTO ledger.journal ...'`, so the analyzer can parse that string and identify the destination. Another `EXECUTE` builds a table name from a procedure argument. The snapshot flags that destination as unresolved. If a routine body fails to parse, a simpler scan can still recover some references. The viewer labels that evidence **fallback**. [Snapshot format and evidence](docs/snapshot-v1.md)
 
 ## PostgreSQL parser coverage
 
