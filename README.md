@@ -69,11 +69,29 @@ postgres-viz refs --file examples/commerce/commerce.pgviz.json --column billing.
 
 Use `--json` for machine-readable output. For mixed-case or spaced names, pass one shell argument with each SQL identifier quoted, such as `'billing."Invoice Lines"."Total"'`.
 
-## Coverage and examples
+## PostgreSQL parser coverage
 
-postgres-viz supports PostgreSQL 16 through 19. It combines catalog dependencies with SQL and PL/pgSQL analysis. Its parser uses PostgreSQL 17 grammar and tracks `JSON_TABLE` inputs. Targeted support for later syntax includes PostgreSQL 18 `RETURNING` references to old and new rows and PostgreSQL 19 `ON CONFLICT DO SELECT` reads. Snapshots preserve virtual generated-column dependencies and foreign-key details such as `PERIOD` and `NOT ENFORCED`. PostgreSQL 18 and 19 also expose additional `NOT NULL` constraints in the catalog.
+postgres-viz scans PostgreSQL 16 through 19. The table shows which dependencies it can trace in SQL and PL/pgSQL routines on each server version. It uses PostgreSQL 17 grammar with targeted extensions for 18 and 19. A dash means the server version has no such syntax.
+
+| What the analyzer can trace | PG 16 | PG 17 | PG 18 | PG 19 |
+| --- | :---: | :---: | :---: | :---: |
+| Source columns through table aliases, joins, CTEs, correlated subqueries and `LATERAL` | Yes | Yes | Yes | Yes |
+| Read and write targets in `INSERT`, `UPDATE`, `DELETE` and `MERGE` | Yes | Yes | Yes | Yes |
+| Routine calls with positional or named arguments, defaults and variadic arguments, when the target is unambiguous | Yes | Yes | Yes | Yes |
+| PL/pgSQL embedded queries, `%ROWTYPE` field references and trigger `OLD` / `NEW` fields | Yes | Yes | Yes | Yes |
+| SQL in a literal PL/pgSQL `EXECUTE` string | Yes | Yes | Yes | Yes |
+| Source columns read by `JSON_TABLE`, such as the JSON payload column | - | Yes | Yes | Yes |
+| Column reads in a `MERGE ... RETURNING` list | - | Yes | Yes | Yes |
+| Old and new target-row columns in DML `RETURNING`, including `WITH (OLD AS ..., NEW AS ...)` aliases | - | - | Yes | Yes |
+| Conflict-target, predicate and returned-column reads in `INSERT ... ON CONFLICT (...) DO SELECT ... RETURNING` | - | - | - | Yes |
+
+For example, a literal `EXECUTE 'SELECT total FROM billing.invoices'` can yield a column reference. If the table name comes from a runtime variable, the analyzer reports the unresolved SQL. The fixtures exercise scope resolution, routine calls and version-specific statements. [Parser tests](internal/analysis) · [Live PostgreSQL version fixtures](internal/integration/version_features_test.go)
+
+**Catalog coverage.** The scan also reads dependencies directly from PostgreSQL, including those for views, materialized views, indexes and constraints. On 18 and 19 it captures virtual generated-column dependencies, additional `NOT NULL` constraint objects and foreign-key details such as `PERIOD` and `NOT ENFORCED`.
 
 A view calling a function can establish a dependency for the view as a whole. Check the recorded endpoint before attributing it to a particular output column. The viewer labels catalog, parsed and fallback evidence. Snapshot diagnostics identify unresolved references, including dynamic SQL whose destination is only known at runtime. [Snapshot format and evidence](docs/snapshot-v1.md)
+
+## Examples
 
 | Saved example | What to follow |
 | --- | --- |
