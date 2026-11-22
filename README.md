@@ -8,8 +8,6 @@ Which views, functions and indexes depend on the column you're about to change? 
 
 ## Install
 
-For a private checkout, sign in with a GitHub account that has read access and follow the [authenticated install commands](docs/private-install.md).
-
 **mise** (macOS, Linux, Windows)
 
 ```sh
