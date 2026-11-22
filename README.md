@@ -77,7 +77,7 @@ Use `--json` for machine-readable output. For mixed-case or spaced names, pass o
 
 ## How the parser works
 
-In the routine lab, `ledger.account_deltas` reads `ledger.entries.account_id`, even though its SQL calls the column `owner`.
+In the bundled ledger example, the function `ledger.account_deltas` reads `ledger.entries.account_id`, even though its SQL calls the column `owner`.
 
 ```sql
 FROM ledger.accounts AS a
@@ -124,7 +124,7 @@ On PostgreSQL 18 and 19, snapshots also include virtual generated-column depende
 | --- | --- |
 | [Commerce](examples/commerce/commerce.pgviz.json) | The invoice total, its generated balance, the partial expression index and the reporting view across a 50-table database. |
 | [Simple ledger](examples/simple/simple.pgviz.json) | One table, one function and one view isolate a two-hop dependency. |
-| [Routine lab](examples/routines/routines.pgviz.json) | Follow `ledger.entries.account_id` to `ledger.post_deltas`. Compare its literal and runtime-built `EXECUTE` commands in the [routine definitions](examples/routines/schema.sql). |
+| [Ledger functions and procedures](examples/routines/routines.pgviz.json) | Follow `ledger.entries.account_id` to `ledger.post_deltas`. Compare its literal and runtime-built `EXECUTE` commands in the [routine definitions](examples/routines/schema.sql). |
 
 ## Editors
 
