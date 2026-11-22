@@ -12,6 +12,7 @@
     "build": "node esbuild.mjs && node scripts/build-go.mjs",
     "build:binary": "pnpm build",
     "release": "node esbuild.mjs && node scripts/build-go.mjs --release && node scripts/package-release.mjs",
+    "release:cut": "node scripts/cut-release.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "oxlint viewer editors/vscode scripts test esbuild.mjs",
     "smoke": "node esbuild.mjs --smoke && node scripts/build-go.mjs && go test ./... && node scripts/test.mjs",

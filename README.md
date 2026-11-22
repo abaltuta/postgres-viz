@@ -153,14 +153,7 @@ Run the local checks with the pinned toolchain active.
 | Browser interactions | After building, set `CHROME_BIN` to your Chrome or Chromium executable and run `pnpm test:ui`. |
 | Live database fixtures | `pnpm test:db` starts PostgreSQL 16 in Docker. Set `PGVIZ_POSTGRES_MAJOR` for 17, 18 or 19, or point `DATABASE_URL` at a disposable server where the test role can create databases. |
 
-To regenerate the commerce example, set `DATABASE_URL` to an empty PostgreSQL 16 database, load the schema, then scan it.
-
-```sh
-psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -1 -f examples/commerce/schema.sql
-./dist/postgres-viz scan --out examples/commerce/commerce.pgviz.json
-```
-
-On macOS or Linux with `zip` installed, `pnpm release` writes the release packages to `release/assets/`. It builds CLI ZIPs and matching VSIX packages for macOS, Linux and Windows on amd64 and arm64, plus Zed and Vim ZIPs and `SHA256SUMS`. [Release instructions](docs/releasing.md)
+See the [maintainer guide](maintainers.md) for releases and fixture updates.
 
 ## License
 
