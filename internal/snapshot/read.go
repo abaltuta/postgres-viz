@@ -89,7 +89,7 @@ func decodeValue(src any, dst reflect.Value) error {
 		if !ok {
 			return errors.New("expected an integer")
 		}
-		// Use the same numeric representation and safe-integer bounds as Prism.
+		// Use the same numeric representation and safe-integer bounds as the viewer.
 		value, err := number.Float64()
 		if err != nil || math.Abs(value) > maxSafeInteger || math.Trunc(value) != value || dst.OverflowInt(int64(value)) {
 			return errors.New("expected a safe integer")

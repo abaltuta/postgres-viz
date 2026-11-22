@@ -143,7 +143,7 @@ const manifest = JSON.parse(
 assert.deepEqual(manifest.contributes.customEditors, [
   {
     viewType: PRISM_EDITOR,
-    displayName: "Prism",
+    displayName: "postgres-viz",
     selector: [{ filenamePattern: "*.pgviz.json" }],
     priority: "default",
   },
@@ -248,7 +248,7 @@ assert.equal(listeners.has("change"), false);
 await setTimeout(150);
 assert.equal(sent.length, 3);
 
-console.log("VS Code provider loaded Prism, refreshed snapshots, and opened verified evidence");
+console.log("VS Code provider loaded the viewer, refreshed snapshots, and opened verified evidence");
 
 const launches = [];
 let behavior;

@@ -70,7 +70,7 @@ export class PrismEditor implements vscode.CustomReadonlyEditorProvider {
           try {
             await openEvidence(snapshot, message.evidenceId);
           } catch (error) {
-            void vscode.window.showErrorMessage(`Postgres Viz: ${String(error)}`);
+            void vscode.window.showErrorMessage(`postgres-viz: ${String(error)}`);
           }
         }
       }),
@@ -95,7 +95,7 @@ export class PrismEditor implements vscode.CustomReadonlyEditorProvider {
         .replace('"./style.css"', `"${asset("style.css")}"`);
     } catch (error) {
       if (!disposed)
-        void vscode.window.showErrorMessage(`Postgres Viz could not load Prism: ${String(error)}`);
+        void vscode.window.showErrorMessage(`postgres-viz could not load the snapshot viewer: ${String(error)}`);
     }
   }
 }

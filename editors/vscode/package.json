@@ -1,9 +1,9 @@
 {
   "name": "postgres-viz",
-  "displayName": "Postgres Viz",
+  "displayName": "postgres-viz",
   "version": "0.10.0",
   "license": "MIT",
-  "description": "Capture PostgreSQL dependencies and explore snapshots in Prism.",
+  "description": "Capture PostgreSQL dependencies and explore snapshots offline.",
   "categories": [
     "Visualization"
   ],
@@ -20,7 +20,7 @@
     "customEditors": [
       {
         "viewType": "postgresViz.prism",
-        "displayName": "Prism",
+        "displayName": "postgres-viz",
         "selector": [
           {
             "filenamePattern": "*.pgviz.json"
@@ -32,23 +32,23 @@
     "commands": [
       {
         "command": "postgresViz.load",
-        "title": "Postgres Viz: Capture Database Snapshot"
+        "title": "postgres-viz: Capture Database Snapshot"
       },
       {
         "command": "postgresViz.refreshGraph",
-        "title": "Postgres Viz: Refresh Database Snapshot"
+        "title": "postgres-viz: Refresh Database Snapshot"
       },
       {
         "command": "postgresViz.exportGraphJson",
-        "title": "Postgres Viz: Export Snapshot JSON"
+        "title": "postgres-viz: Export Snapshot JSON"
       },
       {
         "command": "postgresViz.connectionMenu",
-        "title": "Postgres Viz: Manage Connections"
+        "title": "postgres-viz: Manage Connections"
       }
     ],
     "configuration": {
-      "title": "Postgres Viz",
+      "title": "postgres-viz",
       "properties": {
         "postgresViz.schemas": {
           "type": "array",

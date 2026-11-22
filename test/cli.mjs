@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 
 const name = process.platform === "win32" ? "postgres-viz.exe" : "postgres-viz";
 const bin = fileURLToPath(new URL("../dist/" + name, import.meta.url));
-const cwd = await mkdtemp(join(tmpdir(), "Prism CLI test "));
+const cwd = await mkdtemp(join(tmpdir(), "postgres-viz CLI test "));
 const executable = join(cwd, name);
 await copyFile(process.argv[2] ?? bin, executable);
 const env = { ...process.env, DATABASE_URL: "", PATH: "" };

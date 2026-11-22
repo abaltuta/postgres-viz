@@ -1,12 +1,14 @@
-# Postgres Viz
+# postgres-viz
 
-Which views, functions and indexes depend on the column you're about to change? Postgres Viz captures PostgreSQL dependencies in a portable `.pgviz.json` file. Open it in Prism to follow a reference and inspect the SQL behind it, even after disconnecting from the database.
+Which views, functions and indexes depend on the column you're about to change? postgres-viz captures PostgreSQL dependencies in a portable `.pgviz.json` file. Open it in the viewer to follow a reference and inspect the SQL behind it, even after disconnecting from the database.
 
-![Prism's orbital map of the commerce database, with the invoice-total function selected and its SQL definition showing the read of billing.invoices.total.](docs/images/commerce-dependencies.png)
+**[Download the latest release](https://github.com/abaltuta/postgres-viz/releases/latest)** for macOS, Linux, or Windows. The release includes the standalone CLI and packages for VS Code, Zed, and Vim.
+
+![The orbital map of the commerce database, with the invoice-total function selected and its SQL definition showing the read of billing.invoices.total.](docs/images/commerce-dependencies.png)
 
 ## 60-second demo
 
-Extract the CLI ZIP for your OS and CPU and put the executable on your PATH, or [build it from source](#development). The executable includes Prism, the SQL parser and a ten-schema commerce example. The demo runs without a database.
+Extract the CLI ZIP for your OS and CPU and put the executable on your PATH. On macOS, choose `darwin-arm64` for Apple silicon or `darwin-amd64` for Intel. On Linux and Windows, choose `amd64` for Intel or AMD, or `arm64` for ARM. The executable includes the viewer, the SQL parser and a ten-schema commerce example. The demo runs without a database.
 
 ```sh
 postgres-viz demo
@@ -16,7 +18,7 @@ postgres-viz demo
 2. Choose **Referenced by** and **2 hops**. In the row containing `billing.invoice_total(bigint, bigint)`, select **reporting.open_invoices**.
 3. Read the two SQL definitions. The function reads the invoice total, and the reporting view calls the function. The generated balance and a partial index also reference the original column.
 
-For a diagram of the same relationships, use **Visual neighborhood**. The **Orbital map**, **Dependency matrix**, **Arc diagram** and **Reference index** show connections across the database. Press Ctrl-C in the terminal to stop Prism.
+For a diagram of the same relationships, use **Visual neighborhood**. The **Orbital map**, **Dependency matrix**, **Arc diagram** and **Reference index** show connections across the database. Press Ctrl-C in the terminal to stop the viewer.
 
 ## Scan a PostgreSQL database
 
@@ -35,7 +37,7 @@ If `DATABASE_URL` is set, you can omit the URI. By default the CLI scans all eli
 
 ## Share and query offline
 
-Send the snapshot to a teammate. They can run `postgres-viz open database.pgviz.json` or open it in VS Code without database access. Prism serves the file on loopback. Use `open --no-browser` with the filename to print the local URL without launching a browser.
+Send the snapshot to a teammate. They can run `postgres-viz open database.pgviz.json` or open it in VS Code without database access. The CLI serves the file on loopback. Use `open --no-browser` with the filename to print the local URL without launching a browser.
 
 Snapshots contain object names, SQL definitions, snippets and diagnostics. Review literals and comments before sharing. The connection URI is excluded. From this checkout, use `refs` to trace the demo column in your terminal.
 
@@ -47,9 +49,9 @@ Use `--json` for machine-readable output. For mixed-case or spaced names, pass o
 
 ## Coverage and examples
 
-Postgres Viz supports PostgreSQL 16 through 19. It combines catalog dependencies with SQL and PL/pgSQL analysis. Its parser uses PostgreSQL 17 grammar and tracks `JSON_TABLE` inputs. Targeted support for later syntax includes PostgreSQL 18 `RETURNING` references to old and new rows and PostgreSQL 19 `ON CONFLICT DO SELECT` reads. Snapshots preserve virtual generated-column dependencies and foreign-key details such as `PERIOD` and `NOT ENFORCED`. PostgreSQL 18 and 19 also expose additional `NOT NULL` constraints in the catalog.
+postgres-viz supports PostgreSQL 16 through 19. It combines catalog dependencies with SQL and PL/pgSQL analysis. Its parser uses PostgreSQL 17 grammar and tracks `JSON_TABLE` inputs. Targeted support for later syntax includes PostgreSQL 18 `RETURNING` references to old and new rows and PostgreSQL 19 `ON CONFLICT DO SELECT` reads. Snapshots preserve virtual generated-column dependencies and foreign-key details such as `PERIOD` and `NOT ENFORCED`. PostgreSQL 18 and 19 also expose additional `NOT NULL` constraints in the catalog.
 
-A view calling a function can establish a dependency for the view as a whole. Check the recorded endpoint before attributing it to a particular output column. Prism labels catalog, parsed and fallback evidence. Snapshot diagnostics identify unresolved references, including dynamic SQL whose destination is only known at runtime. [Snapshot format and evidence](docs/snapshot-v1.md)
+A view calling a function can establish a dependency for the view as a whole. Check the recorded endpoint before attributing it to a particular output column. The viewer labels catalog, parsed and fallback evidence. Snapshot diagnostics identify unresolved references, including dynamic SQL whose destination is only known at runtime. [Snapshot format and evidence](docs/snapshot-v1.md)
 
 | Saved example | What to follow |
 | --- | --- |
@@ -59,8 +61,8 @@ A view calling a function can establish a dependency for the view as a whole. Ch
 
 ## Editors
 
-- **VS Code** - Use **Extensions: Install from VSIX** with the package for your platform. Open a snapshot in Prism or run **Postgres Viz: Capture Database Snapshot** from the Command Palette. Regenerating the file refreshes the viewer. Open evidence in a matching workspace source or in the captured SQL. [Extension](editors/vscode)
-- **Zed** - Extract the Zed ZIP. Run **zed: install dev extension** and choose the folder containing `extension.toml`. Open a snapshot to browse its outline, or launch Prism from the task picker with the CLI on Zed's PATH. [Setup and capture tasks](editors/zed/README.md)
+- **VS Code** - Use **Extensions: Install from VSIX** with the package for your platform. Open a snapshot in the viewer or run **postgres-viz: Capture Database Snapshot** from the Command Palette. Regenerating the file refreshes the viewer. Open evidence in a matching workspace source or in the captured SQL. [Extension](editors/vscode)
+- **Zed** - Extract the Zed ZIP. Run **zed: install dev extension** and choose the folder containing `extension.toml`. Open a snapshot to browse its outline, or launch the viewer from the task picker with the CLI on Zed's PATH. [Setup and capture tasks](editors/zed/README.md)
 - **Vim** - Extract the Vim ZIP into your Vim runtime directory, with `postgres-viz.vim` under `plugin/`. With the CLI on Vim's PATH and `DATABASE_URL` set, run `:PostgresVizScan database.pgviz.json`. Edit that file and run `:PostgresVizOpen`. Requires Vim with job support. [Plugin](editors/vim/plugin/postgres-viz.vim)
 
 ## Development
@@ -87,4 +89,4 @@ On macOS or Linux with `zip` installed, `pnpm release` writes the release packag
 
 ## License
 
-Postgres Viz is distributed under the [MIT License](LICENSE).
+postgres-viz is distributed under the [MIT License](LICENSE).

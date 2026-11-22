@@ -8,7 +8,7 @@ let s:jobs = {}
 
 function! s:show_error(message) abort
   echohl ErrorMsg
-  echomsg 'Postgres Viz: ' . a:message
+  echomsg 'postgres-viz: ' . a:message
   echohl None
 endfunction
 
@@ -20,7 +20,7 @@ function! s:exited(state, job, status) abort
 endfunction
 
 function! s:show_message(channel, message) abort
-  echomsg 'Postgres Viz: ' . a:message
+  echomsg 'postgres-viz: ' . a:message
 endfunction
 
 function! s:run(command, args) abort

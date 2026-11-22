@@ -25,7 +25,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   async function saveProfile(): Promise<string | undefined> {
     const input = await vscode.window.showInputBox({
-      title: "Postgres Viz: Add connection",
+      title: "postgres-viz: Add connection",
       prompt: "PostgreSQL connection URL",
       placeHolder: "postgresql://user:password@localhost:5432/database",
       password: true,
@@ -38,7 +38,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!input?.trim()) return;
     const connection = input.trim();
     const name = await vscode.window.showInputBox({
-      title: "Postgres Viz: Name connection",
+      title: "postgres-viz: Name connection",
       value: defaultProfileName(connection),
       ignoreFocusOut: true,
     });
@@ -58,7 +58,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }));
     const selected = await vscode.window.showQuickPick<
       vscode.QuickPickItem & { profile?: ConnectionProfile }
-    >([addOption, ...connections], { title: "Postgres Viz: Connections" });
+    >([addOption, ...connections], { title: "postgres-viz: Connections" });
     if (!selected) return;
     if (!selected.profile) {
       await saveProfile();
@@ -74,7 +74,7 @@ export function activate(context: vscode.ExtensionContext): void {
   async function capture(destination?: vscode.Uri): Promise<void> {
     if (activeCapture) {
       void vscode.window.showInformationMessage(
-        "Postgres Viz: A database capture is already running.",
+        "postgres-viz: A database capture is already running.",
       );
       return;
     }
@@ -93,7 +93,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const snapshot = await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: "Postgres Viz: Capturing PostgreSQL",
+          title: "postgres-viz: Capturing PostgreSQL",
           cancellable: true,
         },
         async (_progress, cancellation) => {
@@ -131,7 +131,7 @@ export function activate(context: vscode.ExtensionContext): void {
   async function exportSnapshot(): Promise<void> {
     const snapshot = latest;
     if (!snapshot) {
-      void vscode.window.showInformationMessage("Postgres Viz: Capture a database snapshot first.");
+      void vscode.window.showInformationMessage("postgres-viz: Capture a database snapshot first.");
       return;
     }
     const output = await chooseOutput();
@@ -143,7 +143,7 @@ export function activate(context: vscode.ExtensionContext): void {
       try {
         await run();
       } catch (error) {
-        void vscode.window.showErrorMessage(`Postgres Viz: ${String(error)}`);
+        void vscode.window.showErrorMessage(`postgres-viz: ${String(error)}`);
       }
     });
   context.subscriptions.push(
@@ -172,7 +172,7 @@ async function chooseOutput(): Promise<vscode.Uri | undefined> {
   const defaultUri = workspace ? vscode.Uri.joinPath(workspace, "database.pgviz.json") : undefined;
   const output = await vscode.window.showSaveDialog({
     defaultUri,
-    filters: { "Postgres Viz Snapshot": ["json"] },
+    filters: { "postgres-viz Snapshot": ["json"] },
   });
   if (output && !output.path.endsWith(".pgviz.json")) {
     throw new Error("Choose a file name ending in .pgviz.json.");

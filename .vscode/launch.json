@@ -7,7 +7,7 @@
       "request": "launch",
       "args": ["--extensionDevelopmentPath=${workspaceFolder}/editors/vscode"],
       "outFiles": ["${workspaceFolder}/editors/vscode/dist/**/*.js"],
-      "preLaunchTask": "Build Prism"
+      "preLaunchTask": "Build postgres-viz"
     }
   ]
 }

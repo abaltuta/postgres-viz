@@ -2,7 +2,7 @@
   "name": "postgres-viz",
   "version": "0.10.0",
   "license": "MIT",
-  "description": "Capture PostgreSQL dependencies and explore them offline in Prism.",
+  "description": "Capture PostgreSQL dependencies and explore them offline.",
   "private": true,
   "engines": {
     "node": ">=22.16"

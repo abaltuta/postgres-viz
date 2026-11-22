@@ -42,7 +42,7 @@ export async function captureSnapshot(
         else if (failedToStart) {
           reject(
             new Error(
-              "Could not start the packaged CLI. Reinstall Postgres Viz for this platform.",
+              "Could not start the packaged CLI. Reinstall postgres-viz for this platform.",
             ),
           );
         } else if (code !== 0) {

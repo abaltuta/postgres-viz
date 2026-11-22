@@ -30,7 +30,7 @@ const usage = `Usage:
   postgres-viz refs --file FILE --column SCHEMA.TABLE.COLUMN [--depth 1|2] [--json]
   postgres-viz demo [--no-browser]
 
-With a connection, capture the database and open Prism. DATABASE_URL supplies
+With a connection, capture the database and open the viewer. DATABASE_URL supplies
 the connection when omitted. The viewer prints a loopback URL and serves until
 interrupted. Use double quotes around case-sensitive SQL identifiers.`
 

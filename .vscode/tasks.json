@@ -6,7 +6,7 @@
       "command": "pnpm",
       "args": ["build"],
       "group": "build",
-      "label": "Build Prism"
+      "label": "Build postgres-viz"
     }
   ]
 }

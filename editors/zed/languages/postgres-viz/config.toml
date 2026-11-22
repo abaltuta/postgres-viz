@@ -1,4 +1,4 @@
-name = "Postgres Viz"
+name = "postgres-viz"
 grammar = "json"
 path_suffixes = ["pgviz.json"]
 prettier_parser_name = "json"
