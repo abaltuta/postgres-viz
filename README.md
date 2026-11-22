@@ -6,9 +6,33 @@ Which views, functions and indexes depend on the column you're about to change? 
 
 ![The orbital map of the commerce database, with the invoice-total function selected and its SQL definition showing the read of billing.invoices.total.](docs/images/commerce-dependencies.png)
 
+## Install
+
+For a private checkout, sign in with a GitHub account that has read access and follow the [authenticated install commands](docs/private-install.md).
+
+**mise** (macOS, Linux, Windows)
+
+```sh
+mise use -g github:abaltuta/postgres-viz@0.10.0
+```
+
+**Homebrew** (macOS, Linux)
+
+```sh
+brew tap abaltuta/postgres-viz https://github.com/abaltuta/postgres-viz
+brew install abaltuta/postgres-viz/postgres-viz
+```
+
+**Scoop** (Windows)
+
+```powershell
+scoop bucket add postgres-viz https://github.com/abaltuta/postgres-viz
+scoop install postgres-viz/postgres-viz
+```
+
 ## 60-second demo
 
-Extract the CLI ZIP for your OS and CPU and put the executable on your PATH. On macOS, choose `darwin-arm64` for Apple silicon or `darwin-amd64` for Intel. On Linux and Windows, choose `amd64` for Intel or AMD, or `arm64` for ARM. The executable includes the viewer, the SQL parser and a ten-schema commerce example. The demo runs without a database.
+After installing, run the bundled ten-schema commerce example. The demo works offline.
 
 ```sh
 postgres-viz demo
