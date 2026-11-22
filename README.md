@@ -1,6 +1,8 @@
 # postgres-viz
 
-Which views, functions and indexes depend on the column you're about to change? postgres-viz captures PostgreSQL dependencies in a portable `.pgviz.json` file. Open it in the viewer to follow a reference and inspect the SQL behind it, even after disconnecting from the database.
+Before you rename a PostgreSQL column, find the functions that read it and the views that depend on those functions. Click a reference to see the SQL behind it.
+
+postgres-viz is a standalone CLI with a built-in browser viewer. Scan your database once, then explore or share the resulting `.pgviz.json` file offline.
 
 **[Download the latest release](https://github.com/abaltuta/postgres-viz/releases/latest)** for macOS, Linux, or Windows. The release includes the standalone CLI and packages for VS Code, Zed, and Vim.
 
@@ -37,31 +39,35 @@ postgres-viz demo
 ```
 
 1. Open **Object explorer**, search for `billing.invoices.total`, and select **total**.
-2. Choose **Referenced by** and **2 hops**. In the row containing `billing.invoice_total(bigint, bigint)`, select **reporting.open_invoices**.
-3. Read the two SQL definitions. The function reads the invoice total, and the reporting view calls the function. The generated balance and a partial index also reference the original column.
+2. Choose **Referenced by** and **2 hops**. Find the path through `billing.invoice_total(bigint, bigint)` to `reporting.open_invoices`.
+3. Select the reporting view on that path. The first SQL definition shows where the function reads the column. The second shows where the view calls the function.
 
-For a diagram of the same relationships, use **Visual neighborhood**. The **Orbital map**, **Dependency matrix**, **Arc diagram** and **Reference index** show connections across the database. Press Ctrl-C in the terminal to stop the viewer.
+Switch to **Visual neighborhood** to see those connections side by side, or **Orbital map** for the whole database. Press Ctrl-C in the terminal to stop the viewer.
 
 ## Scan a PostgreSQL database
 
-Pass a URI to capture and immediately explore a database. Use `scan` to save a file you can reopen or share.
+Pass a connection URI to open your database in the viewer. If you already set `DATABASE_URL`, run `postgres-viz` on its own.
 
 ```sh
 postgres-viz 'postgresql://user@host:5432/database'
 ```
+
+Use `scan` to save a snapshot and `open` to read it later.
 
 ```sh
 postgres-viz scan 'postgresql://user@host:5432/database' --out database.pgviz.json
 postgres-viz open database.pgviz.json
 ```
 
-If `DATABASE_URL` is set, you can omit the URI. By default the CLI scans all eligible schemas. Repeat `--schema NAME` to include specific schemas, or repeat `--exclude-schema NAME` to exclude them. Use `--no-fks` to omit foreign-key links. A failed scan preserves the previous file.
+The default scan covers all eligible schemas. Repeat `--schema NAME` to select schemas or `--exclude-schema NAME` to skip them. Use `--no-fks` to omit foreign-key links. If a scan fails, your previous snapshot is preserved.
 
 ## Share and query offline
 
-Send the snapshot to a teammate. They can run `postgres-viz open database.pgviz.json` or open it in VS Code without database access. The CLI serves the file on loopback. Use `open --no-browser` with the filename to print the local URL without launching a browser.
+Send the snapshot to a teammate. They can open it with the CLI or VS Code without a database login. The CLI serves the viewer on localhost. To print its URL without launching a browser, run `postgres-viz open database.pgviz.json --no-browser`.
 
-Snapshots contain object names, SQL definitions, snippets and diagnostics. Review literals and comments before sharing. The connection URI is excluded. From this checkout, use `refs` to trace the demo column in your terminal.
+The file omits the connection URI but includes object names, SQL definitions, snippets and diagnostics. Review SQL literals and comments before sharing.
+
+You can also trace references from the terminal. From this checkout, try the same two-hop search as the demo.
 
 ```sh
 postgres-viz refs --file examples/commerce/commerce.pgviz.json --column billing.invoices.total --depth 2
@@ -71,13 +77,43 @@ Use `--json` for machine-readable output. For mixed-case or spaced names, pass o
 
 ## How the parser works
 
-1. **Read the catalog.** During a scan, postgres-viz asks PostgreSQL which objects and columns exist and which dependencies the database already records.
-2. **Follow names through SQL.** The parser reads view definitions and routine bodies, including SQL embedded in PL/pgSQL. In a function containing `SELECT i.total FROM billing.invoices AS i`, it resolves the alias `i` and records that the function reads `billing.invoices.total`. The scan never calls the function.
-3. **Save the evidence.** The snapshot stores the relationships and the SQL that supports them. In the viewer, select the column to see which functions reference it. If a routine builds a table name at runtime, the snapshot flags that reference as unresolved.
+In the routine lab, searching for references to `ledger.entries.account_id` leads to a line inside `ledger.account_deltas`.
+
+```sql
+WHERE e.owner = a.id
+```
+
+How did the viewer find a column whose name appears nowhere on that line?
+
+The scan starts with a read-only, repeatable-read transaction. It collects objects, column names and their order, plus dependencies PostgreSQL already records in `pg_depend`. These catalog entries can explain, for example, why a view depends on a function. To find reads inside a quoted SQL function body, postgres-viz also parses the definition. The embedded PostgreSQL parser runs in a child process and returns a syntax tree without executing the routine.
+
+The surrounding query gives `owner` its meaning.
+
+```sql
+SELECT a.id, calc.amount
+FROM ledger.accounts AS a
+CROSS JOIN LATERAL (
+  SELECT sum(e.amount) AS amount
+  FROM ledger.entries AS e(owner)
+  WHERE e.owner = a.id
+) AS calc
+```
+
+The analyzer walks the tree and keeps track of the names visible in each query. Inside the subquery, `e` refers to `ledger.entries`. The column alias list `(owner)` renames its first column, which the catalog identifies as `account_id`. The remaining columns keep their names, so `e.amount` still means `ledger.entries.amount`. Because the subquery is `LATERAL`, it can also see `a.id` from the outer query.
+
+The snapshot now records that `ledger.account_deltas` **reads** `ledger.entries.account_id`, with `WHERE e.owner = a.id` as evidence. Parsing the SQL embedded in the PL/pgSQL procedure `ledger.post_deltas` finds a **call** to that function. Those two relationships are enough to answer a two-hop reference query offline. [Read both routines](examples/routines/schema.sql)
+
+Try it against the saved snapshot from the repository root:
+
+```sh
+postgres-viz refs --file examples/routines/routines.pgviz.json --column ledger.entries.account_id --depth 2
+```
+
+Dynamic SQL shows the limit of this approach. The same procedure uses a literal `EXECUTE 'INSERT INTO ledger.journal ...'`, so the analyzer can parse that string and identify the destination. Another `EXECUTE` builds a table name from a procedure argument. The snapshot flags that destination as unresolved. If a routine body fails to parse, a simpler scan can still recover some references. The viewer labels that evidence **fallback**. [Snapshot format and evidence](docs/snapshot-v1.md)
 
 ## PostgreSQL parser coverage
 
-postgres-viz scans PostgreSQL 16 through 19. The table shows which dependencies it can trace in SQL and PL/pgSQL routines on each server version. It uses PostgreSQL 17 grammar with targeted extensions for 18 and 19. A dash means the server version has no such syntax.
+postgres-viz supports PostgreSQL 16 through 19. It uses the PostgreSQL 17 grammar with targeted extensions for newer syntax. A dash means the server version has no such syntax.
 
 | What the analyzer can trace | PG 16 | PG 17 | PG 18 | PG 19 |
 | --- | :---: | :---: | :---: | :---: |
@@ -91,11 +127,9 @@ postgres-viz scans PostgreSQL 16 through 19. The table shows which dependencies 
 | Old and new target-row columns in DML `RETURNING`, including `WITH (OLD AS ..., NEW AS ...)` aliases | - | - | Yes | Yes |
 | Conflict-target, predicate and returned-column reads in `INSERT ... ON CONFLICT (...) DO SELECT ... RETURNING` | - | - | - | Yes |
 
-For example, a literal `EXECUTE 'SELECT total FROM billing.invoices'` can yield a column reference. If the table name comes from a runtime variable, the analyzer reports the unresolved SQL. The fixtures exercise scope resolution, routine calls and version-specific statements. [Parser tests](internal/analysis) · [Live PostgreSQL version fixtures](internal/integration/version_features_test.go)
+The catalog also supplies dependencies for views, materialized views, indexes and constraints. A view's call to a function may be recorded for the whole view. Check the endpoint before attributing the call to an output column.
 
-**Catalog coverage.** The scan also reads dependencies directly from PostgreSQL, including those for views, materialized views, indexes and constraints. On 18 and 19 it captures virtual generated-column dependencies, additional `NOT NULL` constraint objects and foreign-key details such as `PERIOD` and `NOT ENFORCED`.
-
-A view calling a function can establish a dependency for the view as a whole. Check the recorded endpoint before attributing it to a particular output column. The viewer labels catalog, parsed and fallback evidence. Snapshot diagnostics identify unresolved references, including dynamic SQL whose destination is only known at runtime. [Snapshot format and evidence](docs/snapshot-v1.md)
+On PostgreSQL 18 and 19, snapshots also include virtual generated-column dependencies, additional `NOT NULL` constraint objects and foreign-key details such as `PERIOD` and `NOT ENFORCED`. [Parser tests](internal/analysis) · [Live PostgreSQL fixtures](internal/integration/version_features_test.go)
 
 ## Examples
 
@@ -107,9 +141,9 @@ A view calling a function can establish a dependency for the view as a whole. Ch
 
 ## Editors
 
-- **VS Code** - Use **Extensions: Install from VSIX** with the package for your platform. Open a snapshot in the viewer or run **postgres-viz: Capture Database Snapshot** from the Command Palette. Regenerating the file refreshes the viewer. Open evidence in a matching workspace source or in the captured SQL. [Extension](editors/vscode)
-- **Zed** - Extract the Zed ZIP. Run **zed: install dev extension** and choose the folder containing `extension.toml`. Open a snapshot to browse its outline, or launch the viewer from the task picker with the CLI on Zed's PATH. [Setup and capture tasks](editors/zed/README.md)
-- **Vim** - Extract the Vim ZIP into your Vim runtime directory, with `postgres-viz.vim` under `plugin/`. With the CLI on Vim's PATH and `DATABASE_URL` set, run `:PostgresVizScan database.pgviz.json`. Edit that file and run `:PostgresVizOpen`. Requires Vim with job support. [Plugin](editors/vim/plugin/postgres-viz.vim)
+- **VS Code**. Install the VSIX for your platform, then open a `.pgviz.json` file. To scan a live database, run **postgres-viz: Capture Database Snapshot**. Select evidence to open the matching workspace source or captured SQL. [VS Code setup](editors/vscode)
+- **Zed**. Extract the Zed ZIP and use **zed: install dev extension** on the folder containing `extension.toml`. Browse a snapshot in the outline, or launch the viewer from the task picker with `postgres-viz` on your PATH. [Zed setup and tasks](editors/zed/README.md)
+- **Vim**. Install the plugin and put `postgres-viz` on Vim's PATH. Open a snapshot and run `:PostgresVizOpen`. To capture one, set `DATABASE_URL` and run `:PostgresVizScan database.pgviz.json`. Requires Vim with job support. [Vim setup](editors/vim/README.md)
 
 ## Development
 
@@ -124,7 +158,13 @@ mise exec -- pnpm build
 ./dist/postgres-viz demo
 ```
 
-With the pinned toolchain active, run `pnpm typecheck`, `pnpm lint` and `pnpm smoke`. After building, set `CHROME_BIN` to a Chrome or Chromium executable and run `pnpm test:ui`. Run `pnpm test:db` for the database fixtures. It starts a disposable PostgreSQL 16 server with Docker by default. Set `PGVIZ_POSTGRES_MAJOR` to test 17, 18 or 19, or set `DATABASE_URL` to a disposable server where the test role can create databases.
+Run the local checks with the pinned toolchain active.
+
+| Check | Command |
+| --- | --- |
+| Types, lint and smoke tests | `pnpm typecheck`, `pnpm lint`, `pnpm smoke` |
+| Browser interactions | After building, set `CHROME_BIN` to your Chrome or Chromium executable and run `pnpm test:ui`. |
+| Live database fixtures | `pnpm test:db` starts PostgreSQL 16 in Docker. Set `PGVIZ_POSTGRES_MAJOR` for 17, 18 or 19, or point `DATABASE_URL` at a disposable server where the test role can create databases. |
 
 To regenerate the commerce example, set `DATABASE_URL` to an empty PostgreSQL 16 database, load the schema, then scan it.
 
