@@ -69,6 +69,12 @@ postgres-viz refs --file examples/commerce/commerce.pgviz.json --column billing.
 
 Use `--json` for machine-readable output. For mixed-case or spaced names, pass one shell argument with each SQL identifier quoted, such as `'billing."Invoice Lines"."Total"'`.
 
+## How the parser works
+
+1. **Read the catalog.** During a scan, postgres-viz asks PostgreSQL which objects and columns exist and which dependencies the database already records.
+2. **Follow names through SQL.** The parser reads view definitions and routine bodies, including SQL embedded in PL/pgSQL. In a function containing `SELECT i.total FROM billing.invoices AS i`, it resolves the alias `i` and records that the function reads `billing.invoices.total`. The scan never calls the function.
+3. **Save the evidence.** The snapshot stores the relationships and the SQL that supports them. In the viewer, select the column to see which functions reference it. If a routine builds a table name at runtime, the snapshot flags that reference as unresolved.
+
 ## PostgreSQL parser coverage
 
 postgres-viz scans PostgreSQL 16 through 19. The table shows which dependencies it can trace in SQL and PL/pgSQL routines on each server version. It uses PostgreSQL 17 grammar with targeted extensions for 18 and 19. A dash means the server version has no such syntax.
@@ -106,6 +112,8 @@ A view calling a function can establish a dependency for the view as a whole. Ch
 - **Vim** - Extract the Vim ZIP into your Vim runtime directory, with `postgres-viz.vim` under `plugin/`. With the CLI on Vim's PATH and `DATABASE_URL` set, run `:PostgresVizScan database.pgviz.json`. Edit that file and run `:PostgresVizOpen`. Requires Vim with job support. [Plugin](editors/vim/plugin/postgres-viz.vim)
 
 ## Development
+
+For issue reports and pull requests, see the [contribution guide](collaboration.md).
 
 Use the Go version pinned in [mise.toml](mise.toml), Node.js 22.16 or newer, and the pnpm version pinned in [package.json](package.json). Run the following from the repository root on macOS or Linux.
 
