@@ -4,7 +4,7 @@ import {
   defaultProfileName,
   type SecretStorageLike,
   type WorkspaceStateLike,
-} from "../src/connection-profiles";
+} from "../editors/vscode/connection-profiles";
 
 const STATE_KEY = "postgresViz.connectionProfiles";
 
@@ -77,6 +77,27 @@ async function main(): Promise<void> {
       "deleting the active profile picks a survivor",
     );
     assert.equal(await profiles.connection(zeta.id), undefined, "deleting removes its secret");
+  }
+
+  {
+    const profiles = store();
+    await profiles.save("alpha", "postgres://u@host/alpha");
+    const beta = await profiles.save("beta", "postgres://u@host/beta");
+    await profiles.save("zeta", "postgres://u@host/zeta");
+
+    await profiles.setActive("missing");
+    assert.equal(
+      profiles.activeProfile()?.name,
+      "zeta",
+      "selecting a missing profile keeps the active profile",
+    );
+
+    await profiles.delete(beta.id);
+    assert.equal(
+      profiles.activeProfile()?.name,
+      "zeta",
+      "forgetting an inactive profile keeps the active profile",
+    );
   }
 
   {
@@ -219,11 +240,22 @@ async function main(): Promise<void> {
 
     await profiles.migrateLegacy("Legacy");
     assert.equal(profiles.list().length, 1);
-    assert.equal(profiles.activeProfile()?.name, "Legacy");
+    const migrated = profiles.activeProfile();
+    assert.ok(migrated);
+    assert.equal(migrated.name, "Legacy");
     assert.equal((await profiles.activeConnection())?.conn, "postgres://u@host/legacy");
 
     await profiles.migrateLegacy("Duplicate");
     assert.equal(profiles.list().length, 1, "legacy migration is idempotent");
+
+    await profiles.delete(migrated.id);
+    const reopened = store(state, secrets);
+    await reopened.migrateLegacy();
+    assert.equal(
+      reopened.list().length,
+      0,
+      "forgetting the last profile does not reimport the legacy connection",
+    );
   }
 
   assert.equal(defaultProfileName("postgres://u:p@db.example.com/app"), "app@db.example.com");

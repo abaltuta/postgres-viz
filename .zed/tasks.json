@@ -1,0 +1,14 @@
+[
+  {
+    "label": "Postgres Viz: Scan workspace database",
+    "command": "postgres-viz",
+    "args": ["scan", "--out", "database.pgviz.json"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "Postgres Viz: Open current snapshot",
+    "command": "postgres-viz",
+    "args": ["open", "\"$ZED_FILE\""],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]

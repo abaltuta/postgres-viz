@@ -1,102 +1,35 @@
-import esbuild from "esbuild";
+import { build } from "esbuild";
+import { cp, mkdir, readdir } from "node:fs/promises";
 
-const watch = process.argv.includes("--watch");
-const smoke = process.argv.includes("--smoke");
-
-/** Extension host bundle (Node). pg-query-emscripten (embedded WASM blob) is bundled
- *  in so the .vsix needs no node_modules; pg-native is an optional dep of pg. */
-const extension = {
-  entryPoints: ["src/extension.ts"],
+const nodeBundle = {
   bundle: true,
   platform: "node",
   format: "cjs",
-  target: "node18",
-  outfile: "dist/extension.js",
-  external: ["vscode", "pg-native"],
-  sourcemap: true,
-  logLevel: "info",
+  target: "node22",
+  external: ["vscode"],
 };
-
-/** Out-of-process parser worker — killable when a sync WASM parse hangs. */
-const worker = {
-  entryPoints: ["src/parser-worker.ts"],
-  bundle: true,
-  platform: "node",
-  format: "cjs",
-  target: "node18",
-  outfile: "dist/parser-worker.js",
-  external: ["pg-native"],
-  sourcemap: true,
-  logLevel: "info",
-};
-
-const workerTest = { ...worker, outfile: "dist-test/parser-worker.js" };
-
-/** Webview bundle (browser) — cytoscape + app code. */
-const webview = {
-  entryPoints: ["webview/main.ts"],
-  bundle: true,
-  platform: "browser",
-  format: "iife",
-  target: "es2020",
-  outfile: "media/webview.js",
-  sourcemap: true,
-  logLevel: "info",
-};
-
-const smokeTest = {
-  entryPoints: [
-    "test/smoke.ts",
-    "test/db.ts",
-    "test/database-discovery.ts",
-    "test/ddl.ts",
-    "test/export-data.ts",
-    "test/connection-profiles.ts",
-    "test/cache-policy.ts",
-    "test/preference-store.ts",
-    "test/load-service.ts",
-    "test/protocol.ts",
-    "test/parser-worker-ipc.ts",
-    "test/parser-pool.ts",
-    "test/parser-lifecycle.ts",
-    "test/integration.ts",
-    "test/graph-diff.ts",
-    "test/graph-index.ts",
-    "test/graph-reports.ts",
-    "test/tree-model.ts",
-    "test/tree-provider.ts",
-    "test/webview.ts",
-    "test/usage-views.ts",
-    "test/connection-list.ts",
-    "test/column-usage.ts",
-    "test/keyboard-navigator.ts",
-    "test/webview-controller.ts",
-    "test/router.ts",
-    "test/hcl.ts",
-    "test/sql-migrations.ts",
-    "test/match.ts",
-    "test/lenses.ts",
-    "test/lens-providers.ts",
-    "test/ddl-symbols.ts",
-    "test/ddl-symbol-provider.ts",
-  ],
-  bundle: true,
-  platform: "node",
-  format: "cjs",
-  target: "node18",
-  outdir: "dist-test",
-  external: ["pg-native", "vscode"],
-  sourcemap: true,
-  logLevel: "info",
-};
-
-if (smoke) {
-  await Promise.all([esbuild.build(smokeTest), esbuild.build(workerTest)]);
-} else if (watch) {
-  const c1 = await esbuild.context(extension);
-  const c2 = await esbuild.context(webview);
-  const c3 = await esbuild.context(worker);
-  await Promise.all([c1.watch(), c2.watch(), c3.watch()]);
-} else {
-  await Promise.all([esbuild.build(extension), esbuild.build(webview), esbuild.build(worker)]);
+await mkdir("dist/viewer", { recursive: true });
+await Promise.all([
+  build({
+    ...nodeBundle,
+    entryPoints: ["editors/vscode/extension.ts"],
+    outdir: "editors/vscode/dist",
+  }),
+  build({
+    bundle: true,
+    platform: "browser",
+    target: "es2022",
+    entryPoints: ["viewer/main.ts"],
+    outfile: "dist/viewer/main.js",
+  }),
+  ...["index.html", "style.css"].map((name) => cp("viewer/" + name, "dist/viewer/" + name)),
+]);
+await cp("dist/viewer", "editors/vscode/dist/viewer", { recursive: true });
+if (process.argv.includes("--smoke")) {
+  const tests = (await readdir("test")).filter((name) => name.endsWith(".ts"));
+  await build({
+    ...nodeBundle,
+    entryPoints: tests.map((name) => "test/" + name),
+    outdir: "dist-test",
+  });
 }

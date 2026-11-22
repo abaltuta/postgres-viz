@@ -1,10 +1,15 @@
 node_modules/
 dist/
 dist-test/
-media/webview.js
-media/webview.js.map
+release/
+.pnpm-store/
+*.tgz
 *.vsix
 .DS_Store
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
 
 # AiDex local code index
 .aidex/

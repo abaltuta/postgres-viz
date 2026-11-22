@@ -1,79 +1,62 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
-const name = "pgviz-test";
-const defaultUrl = "postgres://postgres:pg@localhost:54339/postgres";
-
-function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, {
-    stdio: "inherit",
-    env: { ...process.env, ...opts.env },
-  });
-  if (res.error) throw res.error;
-  if (res.status !== 0) process.exit(res.status ?? 1);
-}
-
-function capture(cmd, args) {
-  const res = spawnSync(cmd, args, { encoding: "utf8" });
-  if (res.error) throw res.error;
-  if (res.status !== 0) return "";
-  return res.stdout.trim();
-}
-
-function hasDockerContainer(all = false) {
-  const out = capture("docker", [
-    "ps",
-    ...(all ? ["-a"] : []),
-    "--filter",
-    `name=^/${name}$`,
-    "--format",
-    "{{.Names}}",
-  ]);
-  return out.split(/\r?\n/).includes(name);
-}
-
+const name = "pgviz-test-" + process.pid;
 let started = false;
-let stopped = false;
-
-function stopStartedContainer() {
-  if (!started || stopped) return;
-  stopped = true;
-  spawnSync("docker", ["stop", name], { stdio: "inherit" });
+function stop() {
+  if (started) {
+    started = false;
+    execFileSync("docker", ["stop", name], { stdio: "inherit" });
+  }
 }
-
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.once(signal, () => {
-    stopStartedContainer();
-    process.kill(process.pid, signal);
-  });
-}
-
 try {
-  if (!process.env.DATABASE_URL) {
-    if (!hasDockerContainer()) {
-      if (hasDockerContainer(true)) {
-        run("docker", ["start", name]);
-      } else {
-        run("docker", [
-          "run",
-          "-d",
-          "--rm",
-          "--name",
-          name,
-          "-p",
-          "54339:5432",
-          "-e",
-          "POSTGRES_PASSWORD=pg",
-          "postgres:16",
-        ]);
+  let url = process.env.DATABASE_URL;
+  if (!url) {
+    const major = process.env.PGVIZ_POSTGRES_MAJOR ?? "16";
+    if (!["16", "17", "18", "19"].includes(major))
+      throw new Error("PGVIZ_POSTGRES_MAJOR must be 16, 17, 18, or 19");
+    execFileSync("docker", [
+      "run",
+      "-d",
+      "--rm",
+      "--name",
+      name,
+      "-p",
+      "127.0.0.1::5432",
+      "-e",
+      "POSTGRES_PASSWORD=test",
+      "postgres:" + major,
+    ]);
+    started = true;
+    const port = execFileSync("docker", ["port", name, "5432/tcp"], { encoding: "utf8" })
+      .trim()
+      .split(":")
+      .pop();
+    url = "postgres://postgres:test@127.0.0.1:" + port + "/postgres";
+    for (let attempt = 0; ; attempt++) {
+      try {
+        execFileSync("docker", ["exec", name, "pg_isready", "-h", "127.0.0.1", "-U", "postgres"], {
+          stdio: "ignore",
+        });
+        break;
+      } catch (error) {
+        if (attempt >= 60) throw error;
+        await sleep(500);
       }
-      started = true;
     }
   }
-
-  run("node", ["esbuild.mjs", "--smoke"]);
-  run("node", ["dist-test/integration.js"], {
-    env: { DATABASE_URL: process.env.DATABASE_URL ?? defaultUrl },
+  execFileSync("go", ["test", "-count=1", "-v", "./internal/catalog", "./internal/integration"], {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      DATABASE_URL: url,
+      PGVIZ_TEST_DATABASE_URL: url,
+      PGVIZ_BINARY:
+        process.env.PGVIZ_BINARY ||
+        resolve("dist", process.platform === "win32" ? "postgres-viz.exe" : "postgres-viz"),
+    },
   });
 } finally {
-  stopStartedContainer();
+  stop();
 }

@@ -1,0 +1,61 @@
+{
+  "format": "postgres-viz",
+  "version": 1,
+  "capturedAt": "2026-01-01T00:00:00Z",
+  "database": "commerce",
+  "schemas": { "include": ["billing"], "exclude": [] },
+  "objects": [
+    { "id": "t", "schema": "billing", "name": "Invoices", "kind": "table" },
+    { "id": "f", "schema": "billing", "name": "invoice_total()", "kind": "function" },
+    { "id": "v", "schema": "billing", "name": "summary", "kind": "view" },
+    {
+      "id": "k",
+      "schema": "billing",
+      "name": "replaces_invoice",
+      "kind": "constraint",
+      "parentId": "t"
+    }
+  ],
+  "columns": [
+    { "id": "a", "objectId": "t", "name": "amount", "type": "numeric", "position": 1 },
+    { "id": "b", "objectId": "t", "name": "memo", "type": "text", "position": 2 },
+    { "id": "key", "objectId": "t", "name": "id", "type": "integer", "position": 3 },
+    { "id": "previous", "objectId": "t", "name": "previous_id", "type": "integer", "position": 4 }
+  ],
+  "relationships": [
+    { "id": "reads", "source": "f", "target": "a", "kind": "reads", "provenance": "parsed" },
+    { "id": "calls", "source": "v", "target": "f", "kind": "calls", "provenance": "catalog" },
+    {
+      "id": "fk",
+      "source": "previous",
+      "target": "key",
+      "kind": "fk",
+      "provenance": "catalog",
+      "constraintId": "k",
+      "position": 1
+    }
+  ],
+  "definitions": [
+    { "ownerId": "f", "sql": "SELECT sum(amount) FROM billing.\"Invoices\"" },
+    { "ownerId": "v", "sql": "SELECT billing.invoice_total() AS total" }
+  ],
+  "evidence": [
+    {
+      "id": "e",
+      "ownerId": "f",
+      "relationshipId": "reads",
+      "provenance": "parsed",
+      "snippet": "sum(amount)",
+      "start": 11,
+      "end": 17
+    },
+    {
+      "id": "vdef",
+      "ownerId": "v",
+      "relationshipId": "calls",
+      "provenance": "catalog",
+      "snippet": ""
+    }
+  ],
+  "diagnostics": { "warnings": [], "unresolved": [] }
+}

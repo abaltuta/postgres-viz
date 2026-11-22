@@ -1,0 +1,678 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Prism viewer interaction test</title>
+<iframe id="viewer" src="../dist/viewer/index.html"></iframe>
+<output id="result">pending</output>
+<script type="module">
+  const frame = document.querySelector("iframe");
+  const result = document.querySelector("output");
+  try {
+    if (
+      frame.contentDocument.readyState !== "complete" ||
+      !frame.contentDocument.querySelector("#file")
+    ) {
+      await new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+    }
+    const doc = frame.contentDocument;
+    const base = {
+      format: "postgres-viz",
+      version: 1,
+      capturedAt: new Date().toISOString(),
+      database: "first",
+      schemas: { include: null, exclude: [] },
+      objects: [{ id: "t", schema: "public", name: "orders", kind: "table" }],
+      columns: [{ id: "c", objectId: "t", name: "total", position: 1, type: "integer" }],
+      relationships: [],
+      definitions: [],
+      evidence: [],
+      diagnostics: { warnings: [], unresolved: [] },
+    };
+    async function pick(value) {
+      const picker = doc.querySelector("#file");
+      const data = new DataTransfer();
+      data.items.add(new File([JSON.stringify(value)], "test.pgviz.json"));
+      picker.files = data.files;
+      picker.dispatchEvent(new Event("change"));
+      for (let i = 0; i < 100; i++) {
+        if (!picker.value) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw Error("File picker timed out");
+    }
+    function assert(test, message) {
+      if (!test) throw Error(message);
+    }
+    base.objects.push(
+      { id: "f", schema: "public", name: "sum_orders", kind: "function" },
+      { id: "v", schema: "public", name: "report", kind: "view" },
+      { id: "g", schema: "public", name: "archive_orders", kind: "function" },
+    );
+    base.columns.push({ id: "sibling", objectId: "t", name: "created", type: "date", position: 2 });
+    base.relationships.push(
+      { id: "r1", source: "f", target: "c", kind: "reads", provenance: "parsed" },
+      { id: "r2", source: "v", target: "f", kind: "calls", provenance: "parsed" },
+      { id: "r3", source: "g", target: "sibling", kind: "reads", provenance: "parsed" },
+    );
+    for (const [ownerId, relationshipId, snippet] of [
+      ["f", "r1", "SELECT total FROM orders"],
+      ["v", "r2", "SELECT sum_orders()"],
+    ]) {
+      base.definitions.push({ ownerId, sql: snippet });
+      base.evidence.push({
+        id: "e" + ownerId,
+        ownerId,
+        relationshipId,
+        snippet,
+        start: 0,
+        end: snippet.length,
+        provenance: "parsed",
+      });
+    }
+    await pick(base);
+    const headings = (selector) =>
+      [...doc.querySelectorAll(selector)].map((h) => h.textContent).join(",");
+    assert(headings("aside h3") === "Tables,Views,Functions", "Schema catalog group order");
+    const functionsToggle = () => doc.querySelector("input[type=checkbox][value=function]");
+    assert(functionsToggle()?.checked, "Functions should be visible by default");
+    functionsToggle().click();
+    assert(
+      headings("aside h3").includes("Functions"),
+      "Filtered functions disappeared from details",
+    );
+    doc.querySelectorAll("nav button")[1].click();
+    assert(
+      !doc.querySelector('svg [aria-label="public.sum_orders"]'),
+      "Filtered function still on map",
+    );
+    doc.querySelectorAll("nav button")[6].click();
+    assert(
+      !doc.querySelector('svg [aria-label="public.sum_orders"]'),
+      "Filtered function still in neighborhood",
+    );
+    assert(headings(".catalog h3").includes("Functions"), "Filtered function missing from catalog");
+    functionsToggle().click();
+    assert(
+      doc.querySelector('svg [aria-label="public.sum_orders"]'),
+      "Neighborhood missing routine",
+    );
+    const openFunction = [...doc.querySelectorAll(".catalog button")].find(
+      (b) => b.textContent === "public.sum_orders",
+    );
+    openFunction.click();
+    const hide = [...doc.querySelectorAll("button")].find(
+      (b) => b.textContent === "Hide object from diagrams",
+    );
+    assert(hide, "Missing per-object visibility control");
+    hide.click();
+    doc.querySelectorAll("nav button")[1].click();
+    assert(
+      !doc.querySelector('svg [aria-label="public.sum_orders"]') &&
+        doc.querySelector('svg [aria-label="public.archive_orders"]'),
+      "Hiding one function affected its sibling",
+    );
+    [...doc.querySelectorAll("#visibility button")]
+      .find((b) => b.textContent === "Show all")
+      .click();
+    await pick(base);
+    const mode = doc.querySelector("#mode");
+    for (const value of ["dark", "system", "light"]) {
+      mode.value = value;
+      mode.dispatchEvent(new Event("change"));
+      assert(doc.documentElement.dataset.mode === value, "Appearance mode did not apply");
+    }
+    for (const title of [
+      "Schema overview",
+      "Orbital map",
+      "Dependency matrix",
+      "Arc diagram",
+      "Reference index",
+      "Object explorer",
+      "Visual neighborhood",
+    ]) {
+      const button = [...doc.querySelectorAll("nav button")].find((el) => el.textContent === title);
+      assert(button, title);
+      button.click();
+      if (title === "Object explorer") {
+        assert(
+          headings(".catalog h3") === "Tables,Views,Functions",
+          "Explorer catalog group order",
+        );
+      }
+      assert(
+        doc.querySelector("#workspace").textContent.includes("orders"),
+        title + " is missing the object",
+      );
+    }
+    const clickText = (selector, text) =>
+      [...doc.querySelectorAll(selector)].find((e) => e.textContent.startsWith(text)).click();
+    clickText("button", "total");
+    const column = doc.querySelector(".catalog button[aria-pressed='true']");
+    const table = column.parentElement.querySelector("button");
+    assert(
+      column.getBoundingClientRect().left > table.getBoundingClientRect().left,
+      "Column should be indented beneath its table",
+    );
+    assert(
+      doc.querySelector('g.dim[aria-label="public.archive_orders"]'),
+      "Sibling context was not dimmed",
+    );
+    doc.querySelector('g[aria-label="public.report"]').dispatchEvent(new MouseEvent("click"));
+    assert(doc.querySelectorAll(".proof").length === 2, "Missing SQL for both hops");
+    assert(doc.defaultView.getComputedStyle(doc.querySelector(".proof")).borderRadius === "0px", "Evidence cards must have square corners");
+    assert(
+      doc.querySelector(".proof pre").textContent.includes("SELECT total"),
+      "Incorrect first hop",
+    );
+    const viewToggle = doc.querySelector("#visibility input[value=view]");
+    viewToggle.click();
+    assert(
+      doc.querySelector('svg [aria-label="public.sum_orders"]') &&
+        !doc.querySelector('svg [aria-label="public.report"]'),
+      "Hiding a second-hop endpoint should retain the direct reference",
+    );
+    assert(!doc.querySelector("aside > .proof"), "Filtered neighborhood path remains selected");
+    viewToggle.click();
+    assert(
+      doc.querySelector('svg [aria-label="public.report"]') && !doc.querySelector("aside > .proof"),
+      "Restoring a kind should show its paths without reselecting them",
+    );
+    const select = (i, value) => {
+      const input = doc.querySelectorAll("aside .tools select")[i];
+      input.value = value;
+      input.dispatchEvent(new Event("change"));
+    };
+    select(1, "1");
+    assert(
+      doc.querySelector('svg [aria-label="public.sum_orders"]') &&
+        doc.querySelector('svg g.dim[aria-label="public.archive_orders"]') &&
+        !doc.querySelector('svg [aria-label="public.report"]'),
+      "One-hop diagram should retain direct references and sibling context only",
+    );
+    const nav = (n) => doc.querySelectorAll("nav button")[n].click();
+    const positiveOrders = "SELECT balance FROM orders WHERE balance > 0";
+    await pick({
+      ...base,
+      objects: [
+        ...base.objects,
+        { id: "positive", schema: "public", name: "positive_orders", kind: "view" },
+        { id: "shipments", schema: "public", name: "shipments", kind: "table" },
+        {
+          id: "shipment-key",
+          schema: "public",
+          name: "order_created_fkey",
+          kind: "constraint",
+          parentId: "shipments",
+        },
+      ],
+      columns: [
+        ...base.columns,
+        { id: "balance", objectId: "t", name: "balance", type: "integer", position: 3 },
+        {
+          id: "order-created",
+          objectId: "shipments",
+          name: "order_created",
+          type: "date",
+          position: 1,
+        },
+      ],
+      relationships: [
+        ...base.relationships,
+        {
+          id: "shipment-order",
+          source: "order-created",
+          target: "sibling",
+          kind: "fk",
+          provenance: "catalog",
+          constraintId: "shipment-key",
+          position: 1,
+        },
+        { id: "generated", source: "balance", target: "c", kind: "default", provenance: "catalog" },
+        {
+          id: "selects",
+          source: "positive",
+          target: "balance",
+          kind: "selects",
+          provenance: "catalog",
+        },
+      ],
+      definitions: [...base.definitions, { ownerId: "positive", sql: positiveOrders }],
+      evidence: [
+        ...base.evidence,
+        {
+          id: "ep",
+          ownerId: "positive",
+          relationshipId: "selects",
+          snippet: positiveOrders,
+          provenance: "parsed",
+        },
+      ],
+    });
+    nav(5);
+    clickText(".catalog button", "total");
+    const pathTo = (...labels) =>
+      [...doc.querySelectorAll(".path")]
+        .map((row) => [...row.querySelectorAll("button")])
+        .find(
+          (row) => row.length === labels.length && row.every((b, i) => b.textContent === labels[i]),
+        );
+    assert(
+      !pathTo("public.orders.balance") &&
+        doc.querySelector("aside details summary").textContent === "Same-object details (1)",
+      "Direct same-table references should stay in the detail section",
+    );
+    const mixedPath = pathTo("public.orders.balance", "public.positive_orders");
+    assert(mixedPath, "Missing incoming path through a generated column");
+    assert(
+      !pathTo("public.orders.balance", "public.archive_orders"),
+      "A generated column must not inherit references to a sibling",
+    );
+    mixedPath[1].click();
+    assert(
+      headings("aside > .proof h3") ===
+        "public.orders.balance → public.orders.total,public.positive_orders → public.orders.balance" &&
+        doc.querySelector("aside > .proof pre").textContent === positiveOrders,
+      "Wrong evidence for incoming path through a generated column",
+    );
+    clickText(".catalog button", "public.positive_orders");
+    select(0, "outgoing");
+    assert(
+      pathTo("public.orders.balance", "public.orders.total"),
+      "Missing outgoing path through a generated column",
+    );
+    select(1, "1");
+    assert(
+      pathTo("public.orders.balance") && !pathTo("public.orders.balance", "public.orders.total"),
+      "One-hop outgoing query should stop at the generated column",
+    );
+    nav(6);
+    clickText(".catalog button", "public.orders");
+    clickText(".catalog button", "total");
+    select(1, "2");
+    assert(
+      !doc.querySelector('svg [aria-label="public.orders.balance"]'),
+      "Same-table column hop should stay out of the diagram",
+    );
+    const contextColumn = doc.querySelector(
+      'svg g.dim[aria-label="public.shipments.order_created"]',
+    );
+    assert(contextColumn, "Missing the column at the other end of the sibling's foreign key");
+    contextColumn.dispatchEvent(new MouseEvent("click"));
+    assert(
+      doc.querySelector("aside h2").textContent === "public.shipments.order_created",
+      "Opening a context column should select that column",
+    );
+    const kinds = [
+      "table",
+      "foreign",
+      "view",
+      "matview",
+      "function",
+      "procedure",
+      "index",
+      "constraint",
+      "trigger",
+    ];
+    const names = kinds.map((kind) => kind + "_item");
+    await pick({
+      ...base,
+      columns: [
+        { id: "table-column", objectId: "table", name: "amount", type: "integer", position: 1 },
+      ],
+      evidence: [],
+      definitions: [],
+      objects: kinds.map((kind, i) => ({
+        id: kind,
+        kind,
+        schema: "public",
+        name: names[i],
+        ...(["index", "constraint", "trigger"].includes(kind) && { parentId: "table" }),
+      })),
+      relationships: [
+        {
+          id: "trigger-call",
+          source: "trigger",
+          target: "function",
+          kind: "executes",
+          provenance: "catalog",
+        },
+        {
+          id: "trigger-update-of",
+          source: "trigger",
+          target: "table-column",
+          kind: "update-of",
+          provenance: "catalog",
+        },
+        {
+          id: "procedure-call",
+          source: "procedure",
+          target: "function",
+          kind: "calls",
+          provenance: "catalog",
+        },
+      ],
+    });
+    for (let view = 0; view < 7; view++) {
+      nav(view);
+      const selector =
+        view === 0
+          ? "aside .entry"
+          : view < 4
+            ? "svg g[role=button]"
+            : view === 4
+              ? ".board .entry"
+              : ".catalog .entry";
+      const entries = [...doc.querySelectorAll(selector)].map(
+        (e) => e.getAttribute("aria-label") || e.textContent,
+      );
+      for (const name of names) {
+        const display = ["trigger_item", "constraint_item"].includes(name)
+          ? "table_item." + name
+          : name;
+        assert(
+          entries.some((entry) => entry === display || entry === "public." + display),
+          "Missing " + name + " in view " + view,
+        );
+      }
+    }
+    assert(
+      doc.querySelector("#stats").textContent.includes("2 external object links"),
+      "A distinct nested node on the same table must not count as an external object link",
+    );
+    for (const view of [1, 2, 3]) {
+      nav(view);
+      assert(
+        doc.querySelector('svg [aria-label="public.table_item.trigger_item → public.table_item"]'),
+        "A link to a nested object on the same table should stay visible in view " + view,
+      );
+    }
+    const triggerToggle = doc.querySelector("#visibility input[value=trigger]");
+    triggerToggle.click();
+    assert(
+      !doc.querySelector('svg [aria-label="public.table_item.trigger_item → public.table_item"]'),
+      "Hiding triggers should also hide links to nested trigger endpoints",
+    );
+    triggerToggle.click();
+    const tableToggle = doc.querySelector("#visibility input[value=table]");
+    tableToggle.click();
+    assert(
+      !doc.querySelector('svg [aria-label="public.table_item.trigger_item → public.table_item"]'),
+      "Hiding tables should also hide links to their column endpoints",
+    );
+    tableToggle.click();
+    nav(6);
+    clickText(".catalog button", "public.function_item");
+    assert(
+      doc.querySelector('svg [aria-label="public.table_item.trigger_item"]') &&
+        doc.querySelector('svg [aria-label="public.procedure_item"]'),
+      "Nested and procedure callers must reach the function",
+    );
+    for (const checkbox of doc.querySelectorAll("#visibility input")) checkbox.click();
+    nav(1);
+    assert(
+      doc.querySelector(".pan").textContent.includes("No visible"),
+      "Missing all-hidden empty state",
+    );
+    nav(5);
+    assert(
+      doc.querySelector("#workspace aside").textContent.includes("public.procedure_item"),
+      "Detailed paths must survive filters",
+    );
+    await pick({
+      ...base,
+      database: "replacement",
+      objects: [{ id: "other", schema: "billing", name: "payments", kind: "table" }],
+      columns: [],
+      relationships: [],
+      evidence: [],
+      definitions: [],
+    });
+    assert(
+      doc.querySelector("nav [aria-current]").textContent === "Schema overview",
+      "File replacement retained view",
+    );
+    assert(
+      !doc.body.textContent.includes("orders") && !doc.querySelector(".proof"),
+      "Stale file evidence or selection",
+    );
+    const empty = {
+      ...base,
+      database: "empty",
+      objects: [],
+      columns: [],
+      relationships: [],
+      definitions: [],
+      evidence: [],
+    };
+    await pick(empty);
+    assert(!doc.body.textContent.includes("orders"), "Previous selection survived replacement");
+    assert(doc.querySelector("h1").textContent === "empty", "Empty capture did not load");
+    await pick({ ...base, version: 99 });
+    assert(doc.querySelector("[role=alert]").textContent, "Missing actionable load error");
+    await pick(base);
+    nav(4);
+    clickText(".board button", "→ public.sum_orders");
+    assert(doc.querySelector("aside .proof"), "Reference selection did not open evidence");
+    const explorerNav = doc.querySelectorAll("nav button")[5];
+    explorerNav.focus();
+    explorerNav.click();
+    assert(
+      doc.activeElement === explorerNav && explorerNav.getAttribute("aria-current") === "page",
+      "Changing views should retain focus on the navigation button",
+    );
+    const search = doc.querySelector("input[type=search]");
+    for (const term of ["TOTAL", "PUBLIC.ORDERS.TOTAL"]) {
+      search.value = term;
+      search.dispatchEvent(new Event("input"));
+      assert(
+        [...doc.querySelectorAll(".catalog button")]
+          .map((b) => b.firstChild.textContent)
+          .join(",") === "public.orders,total",
+        `Search for ${term} should show only the matching column and its owner`,
+      );
+    }
+    clickText(".catalog button", "total");
+    assert(
+      doc.querySelector("aside h2").textContent === "public.orders.total",
+      "Wrong search result opened",
+    );
+    nav(4);
+    assert(
+      doc.querySelector("aside h2").textContent === "public.orders" &&
+        !doc.querySelector("aside .proof"),
+      "Selecting a column should clear the previous map relationship",
+    );
+    for (const [snapshot, message] of [
+      [{ ...base, objects: [{ ...base.objects[0], name: { toString: null } }] }, "invalid name"],
+      [{ ...base, version: { toString: null } }, "version must be a number"],
+      [{ ...base, evidence: [{ ...base.evidence[0], end: 999999 }] }, "invalid evidence range"],
+      [
+        {
+          ...base,
+          diagnostics: {
+            warnings: [],
+            unresolved: [
+              {
+                ownerId: "f",
+                identifier: "x",
+                reason: "unknown",
+                snippet: "x",
+                candidateIds: [{ toString: null }],
+              },
+            ],
+          },
+        },
+        "candidateIds must be a string array",
+      ],
+    ]) {
+      await pick(snapshot);
+      assert(
+        doc.querySelector("[role=alert]").textContent === "Invalid snapshot: " + message,
+        "Malformed snapshot should report " + message,
+      );
+    }
+    await pick({
+      ...base,
+      objects: [
+        ...base.objects,
+        { id: "key", name: "orders_fk", schema: "public", kind: "constraint", parentId: "t" },
+      ],
+      relationships: [["sibling", 2], ["c", 1]].map(([id, position]) => ({
+        id: "fk" + position,
+        source: id,
+        target: id,
+        kind: "fk",
+        provenance: "catalog",
+        constraintId: "key",
+        position,
+      })),
+      evidence: [],
+    });
+    nav(5);
+    clickText(".catalog button", "public.orders.orders_fk");
+    assert(
+      headings("aside > .proof h3") ===
+        "public.orders.total → public.orders.total,public.orders.created → public.orders.created",
+      "Foreign key columns should be shown in constraint position order",
+    );
+    const host = document.createElement("iframe");
+    const markup = await (await fetch("../dist/viewer/index.html")).text();
+    host.srcdoc = markup.replace(
+      "<head>",
+      '<head><base href="../dist/viewer/"><script>window.acquireVsCodeApi=()=>({postMessage:m=>window.lastMessage=m})<\/script>',
+    );
+    const loaded = new Promise((resolve) => host.addEventListener("load", resolve, { once: true }));
+    document.body.append(host);
+    await loaded;
+    const hw = host.contentWindow,
+      hd = host.contentDocument;
+    assert(hw.lastMessage.type === "ready", "Missing host handshake");
+    const publish = (snapshot, preserveSelection) =>
+      hw.dispatchEvent(
+        new MessageEvent("message", { data: { type: "snapshot", snapshot, preserveSelection } }),
+      );
+    publish(base);
+    [...hd.querySelectorAll("nav button")].find((b) => b.textContent === "Object explorer").click();
+    [...hd.querySelectorAll("button")].find((b) => b.textContent.startsWith("total")).click();
+    const hostNav = hd.querySelectorAll("nav button")[1];
+    hostNav.focus();
+    const renamed = { ...base, columns: [{ ...base.columns[0], name: "amount" }, base.columns[1]] };
+    publish(renamed);
+    assert(hd.activeElement === hostNav, "Hosted refresh should retain focused navigation");
+    assert(
+      hd.querySelector("aside h2").textContent === "public.orders.amount",
+      "Host lost selected ID",
+    );
+    [...hd.querySelectorAll(".path button")].find((b) => b.textContent === "public.report").click();
+    publish({
+      ...renamed,
+      relationships: [
+        { ...base.relationships[0], provenance: "catalog" },
+        ...base.relationships.slice(1),
+      ],
+      evidence: [{ ...base.evidence[0], id: "ef-current" }, base.evidence[1]],
+    });
+    assert(
+      hd.querySelectorAll("aside > .proof").length === 2 &&
+        hd.querySelector("aside > .proof small").textContent === "catalog · reads",
+      "Hosted refresh should retain both path hops with current provenance",
+    );
+    [...hd.querySelectorAll(".proof button")]
+      .find((b) => b.textContent === "Open SQL in editor")
+      .click();
+    assert(
+      hw.lastMessage.type === "openEvidence" && hw.lastMessage.evidenceId === "ef-current",
+      "Host opened the wrong evidence",
+    );
+    publish({
+      ...renamed,
+      relationships: base.relationships.map((r) => (r.id === "r2" ? { ...r, source: "g" } : r)),
+      evidence: [base.evidence[0]],
+    });
+    assert(
+      !hd.querySelector("aside > .proof"),
+      "Reusing a hop ID for another source retained path evidence",
+    );
+    hd.querySelectorAll("nav button")[1].click();
+    const inspect = hd.querySelector("#workspace select");
+    inspect.value = "f";
+    inspect.dispatchEvent(new Event("change"));
+    [...hd.querySelectorAll("aside button")]
+      .find((b) => b.textContent === "Hide object from diagrams")
+      .click();
+    hd.querySelector("#visibility input[value=view]").click();
+    const hostNode = (name) => hd.querySelector('svg [aria-label="public.' + name + '"]');
+    const hostVisibility = () => hd.querySelector("#visibility summary").textContent;
+    publish(base);
+    assert(
+      hd.querySelector("aside h2").textContent === "public.sum_orders",
+      "Hosted refresh should preserve a selected object other than the first",
+    );
+    assert(
+      !hostNode("sum_orders") &&
+        !hostNode("report") &&
+        hostNode("archive_orders") &&
+        hostVisibility().includes("1 individually hidden"),
+      "Hosted refresh should preserve object and kind visibility",
+    );
+    publish({
+      ...base,
+      objects: base.objects.filter((o) => o.id !== "f"),
+      relationships: base.relationships.filter((r) => r.id === "r3"),
+      definitions: base.definitions.filter((d) => d.ownerId !== "f"),
+      evidence: [],
+    });
+    assert(
+      hostVisibility() === "Diagram visibility (2 of 3 types)" && !hostNode("report"),
+      "Hosted refresh should remove absent IDs from the hidden objects",
+    );
+    publish(base);
+    assert(
+      hostNode("sum_orders") && !hostNode("report"),
+      "An object that reappears in a later capture should be visible",
+    );
+    const selectPair = () =>
+      hd
+        .querySelector('svg [aria-label="public.sum_orders → public.orders"]')
+        .dispatchEvent(new MouseEvent("click"));
+    selectPair();
+    publish({
+      ...base,
+      relationships: [
+        { ...base.relationships[0], target: "sibling" },
+        ...base.relationships.slice(1),
+      ],
+      evidence: [],
+    });
+    assert(
+      hd.querySelector("aside > .proof h3")?.textContent ===
+        "public.sum_orders → public.orders.created" && !hd.querySelector("aside > .proof button"),
+      "Hosted refresh should resolve a selected object pair to its current relationships and evidence",
+    );
+    publish({
+      ...base,
+      objects: base.objects.map((o) => (o.id === "f" ? { ...o, name: "unrelated" } : o)),
+    });
+    assert(
+      !hd.querySelector("aside > .proof"),
+      "Reusing an object ID retained unrelated pair evidence",
+    );
+    publish(base);
+    selectPair();
+    publish({ ...base, relationships: base.relationships.slice(1), evidence: [base.evidence[1]] });
+    assert(!hd.querySelector("aside > .proof"), "A removed directed pair retained evidence");
+    publish(base);
+    selectPair();
+    publish(base, false);
+    hd.querySelectorAll("nav button")[1].click();
+    assert(!hd.querySelector("aside > .proof"), "An explicitly fresh load retained pair evidence");
+    selectPair();
+    publish({ ...base, database: "another database" });
+    hd.querySelectorAll("nav button")[1].click();
+    assert(!hd.querySelector("aside > .proof"), "A different database inherited pair evidence");
+    publish(empty);
+    assert(!hd.body.textContent.includes("orders"), "Host retained old object");
+    result.textContent = "PASS";
+  } catch (error) {
+    result.textContent = "FAIL " + error.message;
+  }
+</script>

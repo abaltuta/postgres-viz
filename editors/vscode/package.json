@@ -1,0 +1,104 @@
+{
+  "name": "postgres-viz",
+  "displayName": "Postgres Viz",
+  "version": "0.10.0",
+  "license": "MIT",
+  "description": "Capture PostgreSQL dependencies and explore snapshots in Prism.",
+  "categories": [
+    "Visualization"
+  ],
+  "publisher": "baltuta",
+  "files": [
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.txt",
+    "dist/extension.js",
+    "dist/postgres-viz{,.exe}",
+    "dist/viewer/"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "postgresViz.prism",
+        "displayName": "Prism",
+        "selector": [
+          {
+            "filenamePattern": "*.pgviz.json"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "postgresViz.load",
+        "title": "Postgres Viz: Capture Database Snapshot"
+      },
+      {
+        "command": "postgresViz.refreshGraph",
+        "title": "Postgres Viz: Refresh Database Snapshot"
+      },
+      {
+        "command": "postgresViz.exportGraphJson",
+        "title": "Postgres Viz: Export Snapshot JSON"
+      },
+      {
+        "command": "postgresViz.connectionMenu",
+        "title": "Postgres Viz: Manage Connections"
+      }
+    ],
+    "configuration": {
+      "title": "Postgres Viz",
+      "properties": {
+        "postgresViz.schemas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Schemas to capture. Leave empty to capture all eligible schemas."
+        },
+        "postgresViz.excludeSchemas": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "hdb_catalog"
+          ],
+          "description": "Schemas to exclude when no inclusion list is set."
+        },
+        "postgresViz.includeForeignKeys": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include foreign-key relationships in database captures."
+        },
+        "postgresViz.hclExcludeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/.baltuta/**",
+            "**/openspec/**"
+          ],
+          "description": "Glob patterns excluded when looking for captured SQL in workspace HCL files."
+        },
+        "postgresViz.sqlMigrationExcludeGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/.baltuta/**",
+            "**/openspec/**"
+          ],
+          "description": "Glob patterns excluded when looking for captured SQL in workspace up.sql files."
+        }
+      }
+    }
+  },
+  "engines": {
+    "vscode": "^1.125.0"
+  }
+}

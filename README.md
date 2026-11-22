@@ -1,95 +1,90 @@
 # Postgres Viz
 
-A VS Code extension that draws the **call graph / dependency graph of a PostgreSQL database**: which triggers fire which functions, which functions read/write which tables *and columns*, which views select which columns from which tables — across plain SQL, views, matviews, triggers, PL/pgSQL, FKs, and generated columns.
+Which views, functions and indexes depend on the column you're about to change? Postgres Viz captures PostgreSQL dependencies in a portable `.pgviz.json` file. Open it in Prism to follow a reference and inspect the SQL behind it, even after disconnecting from the database.
 
-## What it extracts
+![Prism's orbital map of the commerce database, with the invoice-total function selected and its SQL definition showing the read of billing.invoices.total.](docs/images/commerce-dependencies.png)
 
-| Dependency | Source | Precision |
-| --- | --- | --- |
-| view / matview → table columns | `pg_depend` + `pg_rewrite` | exact, column-level |
-| view → functions it calls | `pg_depend` | exact |
-| trigger → table, timing/events, `UPDATE OF` columns | `pg_trigger` | exact |
-| trigger → function it executes | `pg_trigger.tgfoid` | exact |
-| PL/pgSQL function → tables/columns read & written | `pg-query-emscripten` (real PG parser as WASM) over every embedded SQL expression | best-effort, column-level; `NEW.x`/`OLD.x` attributed to the trigger's table |
-| function → function calls (`PERFORM`, `CALL`, expressions) | parser | best-effort |
-| `BEGIN ATOMIC` SQL functions (PG 14+) | `pg_depend.prosqlbody` deps | exact, column-level |
-| foreign keys | `pg_constraint` | exact, column-level |
-| CHECK / PK / UNIQUE / EXCLUDE constraints → columns, and functions used in CHECK expressions | `pg_constraint` + `pg_depend` | exact |
-| column defaults / generated columns → columns & functions | `pg_attrdef` deps | exact |
+## 60-second demo
 
-If the WASM parser fails to load, function bodies degrade to a regex fallback (table-level only). The bundled parser grammar is PostgreSQL 16; newer syntax in function bodies degrades gracefully to the fallback.
+Extract the CLI ZIP for your OS and CPU and put the executable on your PATH, or [build it from source](#development). The executable includes Prism, the SQL parser and a ten-schema commerce example. The demo runs without a database.
 
-## Usage
-
-```bash
-pnpm install
-pnpm build
+```sh
+postgres-viz demo
 ```
 
-Open the folder in VS Code and press **F5** (Run Extension). In the dev host:
+1. Open **Object explorer**, search for `billing.invoices.total`, and select **total**.
+2. Choose **Referenced by** and **2 hops**. In the row containing `billing.invoice_total(bigint, bigint)`, select **reporting.open_invoices**.
+3. Read the two SQL definitions. The function reads the invoice total, and the reporting view calls the function. The generated balance and a partial index also reference the original column.
 
-1. `Postgres Viz: Visualize Database` — opens the graph panel and, when needed, a database picker. **Discover Databases** checks saved credentials, `DATABASE_URL`, detected local TCP listeners, and configured fallback ports using the PostgreSQL wire handshake; authenticated servers expose their databases directly, while detected servers without credentials open a prefilled connection form. Connection profiles are workspace-scoped (metadata in workspace state, URLs in VS Code secret storage). `Postgres Viz: Show Logs` opens the output channel with per-step introspection/analysis logs.
-2. Click a node → neighborhood highlight + side panel with all connections; column clicks zoom to a readable row and offer **Neighborhood** (a grouped radial dependency view) and **Usage matrix** (searchable read/write/structural counts with exact source occurrences). **Go to Definition** opens the source schema when found (`.hcl`, then the latest matching `folder/up.sql` migration); **Open DDL** shows generated database DDL.
-3. Editor-title commands: search, grid/tree layout selection, edge display mode, view options (including optional connection-based hub emphasis), faceted filters, fit, relayout, and refresh.
-4. Command palette / connection menu: impact analysis, dependency path reports, snapshot save/diff, JSON/PNG/SVG export, and load diagnostics.
+For a diagram of the same relationships, use **Visual neighborhood**. The **Orbital map**, **Dependency matrix**, **Arc diagram** and **Reference index** show connections across the database. Press Ctrl-C in the terminal to stop Prism.
 
-Columns and triggers are drawn *inside* their table (compound nodes). Only columns that participate in at least one dependency are drawn. Card mode shows one directional bundle per object pair; selecting an object reveals its typed relationships. All mode hides those bundles and expands row-level detail up to a fixed rendering budget, so large schemas remain responsive.
+## Scan a PostgreSQL database
 
-The graph footer reports visible objects and connections rather than raw database totals. Active schema, object-type, and edge-kind filters are shown with a one-click reset. Row-type filters also update virtual card previews without materializing every table.
+Pass a URI to capture and immediately explore a database. Use `scan` to save a file you can reopen or share.
 
-### Settings
+```sh
+postgres-viz 'postgresql://user@host:5432/database'
+```
 
-- `postgresViz.schemas` — schemas to introspect (empty = all non-system).
-- `postgresViz.excludeSchemas` — schemas skipped when no whitelist is set (default `hdb_catalog`).
-- `postgresViz.includeForeignKeys` — include FK edges (default true).
-- `postgresViz.discoveryPorts` — fallback local ports checked by **Discover Databases** in addition to detected TCP listeners (defaults cover common PostgreSQL, PgBouncer, Supabase, and project test ports; maximum 64).
-- `postgresViz.hclExcludeGlobs` — workspace globs excluded when scanning Atlas `.hcl` schema files for source definitions.
-- `postgresViz.sqlMigrationExcludeGlobs` — workspace globs excluded when scanning `folder/up.sql` migrations for source definitions.
+```sh
+postgres-viz scan 'postgresql://user@host:5432/database' --out database.pgviz.json
+postgres-viz open database.pgviz.json
+```
+
+If `DATABASE_URL` is set, you can omit the URI. By default the CLI scans all eligible schemas. Repeat `--schema NAME` to include specific schemas, or repeat `--exclude-schema NAME` to exclude them. Use `--no-fks` to omit foreign-key links. A failed scan preserves the previous file.
+
+## Share and query offline
+
+Send the snapshot to a teammate. They can run `postgres-viz open database.pgviz.json` or open it in VS Code without database access. Prism serves the file on loopback. Use `open --no-browser` with the filename to print the local URL without launching a browser.
+
+Snapshots contain object names, SQL definitions, snippets and diagnostics. Review literals and comments before sharing. The connection URI is excluded. From this checkout, use `refs` to trace the demo column in your terminal.
+
+```sh
+postgres-viz refs --file examples/commerce/commerce.pgviz.json --column billing.invoices.total --depth 2
+```
+
+Use `--json` for machine-readable output. For mixed-case or spaced names, pass one shell argument with each SQL identifier quoted, such as `'billing."Invoice Lines"."Total"'`.
+
+## Coverage and examples
+
+Postgres Viz supports PostgreSQL 16 through 19. It combines catalog dependencies with SQL and PL/pgSQL analysis. Its parser uses PostgreSQL 17 grammar and tracks `JSON_TABLE` inputs. Targeted support for later syntax includes PostgreSQL 18 `RETURNING` references to old and new rows and PostgreSQL 19 `ON CONFLICT DO SELECT` reads. Snapshots preserve virtual generated-column dependencies and foreign-key details such as `PERIOD` and `NOT ENFORCED`. PostgreSQL 18 and 19 also expose additional `NOT NULL` constraints in the catalog.
+
+A view calling a function can establish a dependency for the view as a whole. Check the recorded endpoint before attributing it to a particular output column. Prism labels catalog, parsed and fallback evidence. Snapshot diagnostics identify unresolved references, including dynamic SQL whose destination is only known at runtime. [Snapshot format and evidence](docs/snapshot-v1.md)
+
+| Saved example | What to follow |
+| --- | --- |
+| [Commerce](examples/commerce/commerce.pgviz.json) | The invoice total, its generated balance, the partial expression index and the reporting view across a 50-table database. |
+| [Simple ledger](examples/simple/simple.pgviz.json) | One table, one function and one view isolate a two-hop dependency. |
+| [Routine lab](examples/routines/routines.pgviz.json) | Follow `ledger.entries.account_id` to `ledger.post_deltas`. Compare its literal and runtime-built `EXECUTE` commands in the [routine definitions](examples/routines/schema.sql). |
+
+## Editors
+
+- **VS Code** - Use **Extensions: Install from VSIX** with the package for your platform. Open a snapshot in Prism or run **Postgres Viz: Capture Database Snapshot** from the Command Palette. Regenerating the file refreshes the viewer. Open evidence in a matching workspace source or in the captured SQL. [Extension](editors/vscode)
+- **Zed** - Extract the Zed ZIP. Run **zed: install dev extension** and choose the folder containing `extension.toml`. Open a snapshot to browse its outline, or launch Prism from the task picker with the CLI on Zed's PATH. [Setup and capture tasks](editors/zed/README.md)
+- **Vim** - Extract the Vim ZIP into your Vim runtime directory, with `postgres-viz.vim` under `plugin/`. With the CLI on Vim's PATH and `DATABASE_URL` set, run `:PostgresVizScan database.pgviz.json`. Edit that file and run `:PostgresVizOpen`. Requires Vim with job support. [Plugin](editors/vim/plugin/postgres-viz.vim)
 
 ## Development
 
-```bash
-pnpm watch       # rebuild extension + webview on change
-pnpm typecheck
-pnpm lint        # oxlint
-pnpm format      # oxfmt
-pnpm smoke       # no-DB smoke/unit suite
+Use the Go version pinned in [mise.toml](mise.toml), Node.js 22.16 or newer, and the pnpm version pinned in [package.json](package.json). Run the following from the repository root on macOS or Linux.
+
+```sh
+mise install
+mise exec -- pnpm install --frozen-lockfile
+mise exec -- pnpm build
+./dist/postgres-viz demo
 ```
 
-### Integration test (real Postgres)
+With the pinned toolchain active, run `pnpm typecheck`, `pnpm lint` and `pnpm smoke`. After building, set `CHROME_BIN` to a Chrome or Chromium executable and run `pnpm test:ui`. Run `pnpm test:db` for the database fixtures. It starts a disposable PostgreSQL 16 server with Docker by default. Set `PGVIZ_POSTGRES_MAJOR` to test 17, 18 or 19, or set `DATABASE_URL` to a disposable server where the test role can create databases.
 
-Runs the full introspect → analyze → graph pipeline against real Postgres and asserts every edge kind:
+To regenerate the commerce example, set `DATABASE_URL` to an empty PostgreSQL 16 database, load the schema, then scan it.
 
-```bash
-pnpm test:db:docker  # starts/stops postgres:16 on localhost:54339 when DATABASE_URL is unset
-pnpm test:db         # uses DATABASE_URL, or postgres://postgres:pg@localhost:54339/postgres
+```sh
+psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -1 -f examples/commerce/schema.sql
+./dist/postgres-viz scan --out examples/commerce/commerce.pgviz.json
 ```
 
-## Architecture
+On macOS or Linux with `zip` installed, `pnpm release` writes the release packages to `release/assets/`. It builds CLI ZIPs and matching VSIX packages for macOS, Linux and Windows on amd64 and arm64, plus Zed and Vim ZIPs and `SHA256SUMS`. [Release instructions](docs/releasing.md)
 
-- `src/introspect.ts` — one pass over the system catalogs (`pg_class`, `pg_attribute`, `pg_trigger`, `pg_proc`, `pg_depend`, `pg_rewrite`, `pg_constraint`, `pg_attrdef`).
-- `src/analyze.ts` — parses PL/pgSQL bodies with `pg-query-emscripten` (`parsePlpgsql` → every `PLpgSQL_expr` → `parse`), then runs two passes per statement: a conservative whole-tree pass for table-level reads/writes and calls, and a **scope-aware pass for column attribution** that models FROM aliases, CTEs (including `WITH x(a, b)` column lists), derived tables, and correlated subqueries — so `rc.cid` reached through a CTE and a subquery alias still traces back to `orders.customer_id`, and the same alias bound to different tables in sibling scopes cannot cross-contaminate. Regex fallback included.
-- `src/graph.ts` — turns catalog + analysis into Cytoscape elements (tables as compound nodes containing referenced columns and triggers).
-- `src/graph-index.ts` / `src/graph-reports.ts` / `src/graph-diff.ts` — pure graph traversal, impact/path reports, and snapshot diff reports.
-- `src/load-service.ts` — cancellable database load pipeline with diagnostics.
-- `src/connection-profiles.ts` — named workspace connection profiles.
-- `src/db.ts` / `src/ddl.ts` — shared Postgres client timeouts and DDL query helpers.
-- `src/sql-migrations.ts` — pure scanner/indexer for `folder/up.sql` migrations; latest matching migration wins for source jumps.
-- `src/protocol.ts` — shared view preferences and host/webview message contracts.
-- `src/tree-provider.ts` — native VS Code explorer tree for database objects.
-- `src/webview-controller.ts` — webview panel lifecycle, HTML, message dispatch, and ready replay.
-- `src/extension.ts` — VS Code command chrome, connection menu, graph cache, reports/exports, DDL viewer.
-- `webview/core.ts` — read-only webview graph helpers for class-derived visibility, unit ownership, call-tree closure, shared unit topology/connection emphasis, and position snapshots.
-- `webview/layout.ts` — pure, deterministic layered layout adapter around maintained `@dagrejs/dagre`.
-- `webview/view-mode.ts` — pure navigation transition planner for base, matrix, focus, call-tree, and radial modes.
-- `webview/usage-views.ts` — pure column-usage aggregation, adaptive radial capacity, and deterministic radial positioning.
-- `webview/cytoscape-adapter.ts` — the only webview layer that writes Cytoscape elements, classes, positions, parent moves, styles, and edge routes.
-- `webview/router.ts` — spatial obstacle index used by optional edge routing; bounded and benchmarked for dense graphs.
-- `webview/main.ts` — webview orchestration, Cytoscape rendering decisions, mode effects, filters, search, and detail panel.
+## License
 
-## Known limitations
-
-- Dynamic SQL (`EXECUTE format(...)`) can't be statically resolved.
-- Unqualified column refs are attributed only when unambiguous within the visible scopes.
-- Languages other than `plpgsql`/`sql` (plpython, C, …) appear as nodes but their bodies aren't analyzed.
-- Tested against PG 14+; PG ≤ 13 works without `BEGIN ATOMIC` body deps.
+Postgres Viz is distributed under the [MIT License](LICENSE).

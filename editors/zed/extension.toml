@@ -1,0 +1,7 @@
+id = "postgres-viz"
+name = "Postgres Viz"
+version = "0.1.0"
+schema_version = 1
+authors = ["Andrei Baltuta"]
+description = "Explore PostgreSQL snapshots in Prism and navigate their objects and columns in Zed."
+languages = ["languages/postgres-viz"]

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en" data-mode="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prism | Postgres Viz</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script defer src="./main.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <strong class="brand">Postgres Viz</strong>
+        <label class="file"
+          >Open snapshot<input id="file" type="file" accept=".json,application/json"
+        /></label>
+        <label
+          >Appearance
+          <select id="mode">
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+            <option value="system">System</option>
+          </select></label
+        >
+      </header>
+      <p id="error" role="alert" hidden></p>
+      <h1>Prism</h1>
+      <p id="stats">Open a .pgviz.json snapshot to explore its database.</p>
+      <nav aria-label="Snapshot views"></nav>
+      <details id="visibility" hidden>
+        <summary>Diagram visibility</summary>
+        <div class="tools"></div>
+      </details>
+      <div id="workspace"></div>
+    </main>
+  </body>
+</html>

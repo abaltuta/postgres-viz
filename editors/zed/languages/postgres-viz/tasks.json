@@ -1,0 +1,13 @@
+[
+  {
+    "label": "Postgres Viz: Open current snapshot in Prism",
+    "command": "postgres-viz",
+    "args": ["open", "\"$ZED_FILE\""]
+  },
+  {
+    "label": "Postgres Viz: Scan workspace database",
+    "command": "postgres-viz",
+    "args": ["scan", "--out", "database.pgviz.json"],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]
