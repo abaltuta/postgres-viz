@@ -114,10 +114,11 @@ type Hop struct {
 	Evidence   []ReferenceEvidence `json:"evidence"`
 }
 type References struct {
-	Database string  `json:"database"`
-	Column   Column  `json:"column,omitzero"`
-	Object   Object  `json:"object,omitzero"`
-	Paths    [][]Hop `json:"paths"`
+	Database  string  `json:"database"`
+	Column    Column  `json:"column,omitzero"`
+	Object    Object  `json:"object,omitzero"`
+	Paths     [][]Hop `json:"paths"`
+	direction string
 }
 
 var plainReferenceIdentifier = regexp.MustCompile(`^[a-z_][a-z0-9_$]*$`)
@@ -153,26 +154,44 @@ func routineReferenceName(name string) string {
 	return referenceIdentifier(name)
 }
 
+type ReferenceQuery struct {
+	Column, Object string
+	Depth          int
+	Direction      string
+}
+
 func (s *Snapshot) References(selector string, depth int) (References, error) {
-	names, err := qualifiedColumn(selector)
-	if err != nil {
-		return References{}, err
-	}
-	return s.references(selector, names, depth)
+	return s.QueryReferences(ReferenceQuery{Column: selector, Depth: depth, Direction: "incoming"})
 }
 
 // ObjectReferences follows edges to the exact object named by its viewer label.
 func (s *Snapshot) ObjectReferences(label string, depth int) (References, error) {
-	return s.references(label, nil, depth)
+	return s.QueryReferences(ReferenceQuery{Object: label, Depth: depth, Direction: "incoming"})
 }
 
-func (s *Snapshot) references(selector string, columnNames []string, depth int) (References, error) {
-	if depth != 1 && depth != 2 {
+func (s *Snapshot) QueryReferences(q ReferenceQuery) (References, error) {
+	if (q.Column == "") == (q.Object == "") {
+		return References{}, fmt.Errorf("refs requires exactly one of --column or --object")
+	}
+	if q.Direction != "incoming" && q.Direction != "outgoing" {
+		return References{}, fmt.Errorf("--direction must be incoming or outgoing")
+	}
+	if q.Depth != 1 && q.Depth != 2 {
 		return References{}, fmt.Errorf("--depth must be 1 or 2")
+	}
+	selector := q.Object
+	var columnNames []string
+	if q.Column != "" {
+		selector = q.Column
+		var err error
+		columnNames, err = qualifiedColumn(selector)
+		if err != nil {
+			return References{}, err
+		}
 	}
 	labels := map[string]string{}
 	owners := map[string]Object{}
-	result := References{Database: s.Database, Paths: [][]Hop{}}
+	result := References{Database: s.Database, Paths: [][]Hop{}, direction: q.Direction}
 	var endpoint string
 	for _, o := range s.Objects {
 		owners[o.ID] = o
@@ -222,20 +241,28 @@ func (s *Snapshot) references(selector string, columnNames []string, depth int) 
 		}
 		evidence[e.RelationshipID] = append(evidence[e.RelationshipID], r)
 	}
-	incoming := map[string][]Hop{}
+	type step struct {
+		next string
+		hop  Hop
+	}
+	adjacent := map[string][]step{}
 	for _, r := range s.Relationships {
 		ev := evidence[r.ID]
 		if ev == nil {
 			ev = []ReferenceEvidence{}
 		}
-		incoming[r.Target] = append(incoming[r.Target], Hop{r, labels[r.Source], labels[r.Target], ev})
+		from, to := r.Target, r.Source
+		if q.Direction == "outgoing" {
+			from, to = r.Source, r.Target
+		}
+		adjacent[from] = append(adjacent[from], step{to, Hop{r, labels[r.Source], labels[r.Target], ev}})
 	}
-	for _, a := range incoming[endpoint] {
-		result.Paths = append(result.Paths, []Hop{a})
-		if depth == 2 && a.Source != endpoint {
-			for _, b := range incoming[a.Source] {
-				if b.Source != a.Source && b.Source != endpoint {
-					result.Paths = append(result.Paths, []Hop{a, b})
+	for _, a := range adjacent[endpoint] {
+		result.Paths = append(result.Paths, []Hop{a.hop})
+		if q.Depth == 2 && a.next != endpoint {
+			for _, b := range adjacent[a.next] {
+				if b.next != a.next && b.next != endpoint {
+					result.Paths = append(result.Paths, []Hop{a.hop, b.hop})
 				}
 			}
 		}
@@ -244,10 +271,19 @@ func (s *Snapshot) references(selector string, columnNames []string, depth int) 
 }
 func (r References) Print(w io.Writer) {
 	if len(r.Paths) == 0 {
-		fmt.Fprintln(w, "No recorded incoming references.")
+		direction := r.direction
+		if direction == "" {
+			direction = "incoming"
+		}
+		fmt.Fprintf(w, "No recorded %s references.\n", direction)
 		return
 	}
-	fmt.Fprintln(w, r.Paths[0][0].TargetName)
+	first := r.Paths[0][0]
+	label := first.TargetName
+	if r.direction == "outgoing" {
+		label = first.SourceName
+	}
+	fmt.Fprintln(w, label)
 	for _, p := range r.Paths {
 		var labels []string
 		for _, hop := range p {

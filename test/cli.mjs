@@ -109,6 +109,29 @@ try {
   assert.match(run(...objectArgs).stdout, /^ledger\.invoice_total\(bigint\)\n/);
   assert.notEqual(run(...objectArgs, "--column", "ledger.invoices.total").status, 0);
   const refArgs = ["refs", "--file", simple, "--column", "ledger.invoices.total", "--json"];
+  assert.equal(run(...objectArgs, "--direction", "incoming", "--json").stdout, objectResult.stdout);
+  const outgoingArgs = ["--object", "ledger.invoice_summary", "--direction", "outgoing"];
+  for (const depth of ["1", "2"]) {
+    const result = run("refs", "--file", simple, ...outgoingArgs, "--depth", depth, "--json");
+    assert.equal(result.status, 0, result.stderr);
+    const paths = JSON.parse(result.stdout).paths;
+    assert.deepEqual(paths.map(path => path.map(h => h.targetName)), [
+      ["ledger.invoice_total(bigint)"],
+      ...(depth === "1" ? [] : [
+        ["ledger.invoice_total(bigint)", "ledger.invoices.id"],
+        ["ledger.invoice_total(bigint)", "ledger.invoices.total"],
+      ]),
+    ]);
+    assert.deepEqual(paths[0][0], objectRefs.paths[0][0]);
+  }
+  assert.match(run("refs", "--file", simple, ...outgoingArgs).stdout, /^ledger\.invoice_summary\n/);
+  assert.deepEqual(JSON.parse(run(...refArgs, "--direction", "outgoing").stdout).paths, []);
+  assert.equal(run(...refArgs, "--direction", "outgoing", "--json=false").stdout, "No recorded outgoing references.\n");
+  for (const value of ["", "both"]) {
+    const result = run(...refArgs, "--direction", value);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--direction must be incoming or outgoing/);
+  }
   const marked = JSON.parse(await readFile(simple, "utf8"));
   const marker = "private_sql_literal_7ea2";
   for (const object of marked.objects) object.detail = marker;
@@ -125,6 +148,11 @@ try {
   const structure = run("export-structure", privateFile, "--out", sharedFile);
   assert.equal(structure.status, 0, structure.stderr);
   const shared = await readFile(sharedFile, "utf8");
+  const sharedOutgoing = run("refs", "--file", sharedFile, ...outgoingArgs, "--json");
+  assert.equal(sharedOutgoing.status, 0, sharedOutgoing.stderr);
+  const sharedPaths = JSON.parse(sharedOutgoing.stdout).paths;
+  assert.equal(sharedPaths.length, 3);
+  assert(sharedPaths.flat().every(hop => hop.evidence.length === 0));
   const sharedObject = run("refs", "--file", sharedFile, "--object", "ledger.invoice_total(bigint)", "--json");
   assert.equal(sharedObject.status, 0, sharedObject.stderr);
   assert.equal(JSON.parse(sharedObject.stdout).paths[0][0].id, objectRefs.paths[0][0].id);

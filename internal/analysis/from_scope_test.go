@@ -20,9 +20,13 @@ func TestFromSubqueryVisibility(t *testing.T) {
 		{"nested join lateral alias", "SELECT (SELECT q.v FROM customers a, audit b CROSS JOIN LATERAL (SELECT a.id AS v) q) FROM orders a", "customers.id"},
 		{"same level CTE", "WITH c AS (SELECT id FROM orders) SELECT q.id FROM customers CROSS JOIN (SELECT id FROM c) q", "orders.id"},
 		{"correlated join condition", "SELECT (SELECT 1 FROM customers a, audit b JOIN audit c ON a.id = c.id) FROM orders a", "audit.id orders.id"},
+		{"implicit function label", "SELECT (SELECT sum FROM (SELECT sum(o.total) FROM orders o) q) FROM audit", "orders.total"},
+		{"qualified function in CTE", "WITH totals AS (SELECT pg_catalog.sum(o.total) FROM orders o) SELECT (SELECT sum FROM totals) FROM audit", "orders.total"},
+		{"explicit alias overrides function label", "SELECT (SELECT sum FROM (SELECT sum(o.total) AS amount FROM orders o) q) FROM audit", "audit.sum orders.total"},
 	}
 	for _, language := range []string{"sql", "plpgsql"} {
 		s := scopeCatalog()
+		s.Columns = append(s.Columns, snapshot.Column{ID: "audit.sum", ObjectID: "audit", Name: "sum", Position: 3})
 		var routines []snapshot.Routine
 		for _, tc := range cases {
 			body := tc.query

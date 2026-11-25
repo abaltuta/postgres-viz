@@ -17,6 +17,10 @@ CREATE TABLE review.orders(total int);
 CREATE TABLE "Actual, Data".orders(total int);
 INSERT INTO review.orders VALUES (10);
 INSERT INTO "Actual, Data".orders VALUES (20);
+CREATE TABLE review.audit(sum bigint);
+INSERT INTO review.audit VALUES (99);
+CREATE FUNCTION review.implicit_output() RETURNS bigint LANGUAGE sql
+  AS $$ SELECT (SELECT sum FROM (SELECT sum(o.total) FROM review.orders AS o) q) FROM review.audit $$;
 CREATE FUNCTION review.by_path() RETURNS int LANGUAGE sql SET search_path = "Actual, Data", review
   AS $$ SELECT total FROM orders $$;
 CREATE FUNCTION review.sampled() RETURNS int LANGUAGE sql
@@ -27,7 +31,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]int{"by_path": 20, "sampled": 10, "forward_cte": 20} {
+	for name, want := range map[string]int{"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
 			t.Fatalf("%s: got %d, want %d (%v)", name, got, want, err)
@@ -35,7 +39,8 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	}
 	s := read(scan("--schema", "review", "--schema", "Actual, Data"))
 	for column, want := range map[string][]string{
-		"review.orders.total":         {"review.sampled()"},
+		"review.orders.total":         {"review.implicit_output()", "review.sampled()"},
+		"review.audit.sum":            {},
 		`"Actual, Data".orders.total`: {"review.by_path()", "review.forward_cte()"},
 	} {
 		refs, err := s.References(column, 1)

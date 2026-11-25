@@ -225,13 +225,16 @@ func TestReferencesLookupAndWalk(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		depth int
-		paths []string
+		depth     int
+		direction string
+		paths     []string
 	}{
-		{1, []string{"middle-wanted", "branch-wanted"}},
-		{2, []string{"middle-wanted", "middle-wanted/caller-middle", "branch-wanted", "branch-wanted/caller-branch"}},
+		{1, "incoming", []string{"middle-wanted", "branch-wanted"}},
+		{2, "incoming", []string{"middle-wanted", "middle-wanted/caller-middle", "branch-wanted", "branch-wanted/caller-branch"}},
+		{1, "outgoing", []string{"wanted-middle"}},
+		{2, "outgoing", []string{"wanted-middle", "wanted-middle/middle-subtotal", "wanted-middle/middle-caller"}},
 	} {
-		refs, err := s.References("BILLING.invoices.total", tc.depth)
+		refs, err := s.QueryReferences(ReferenceQuery{Column: "BILLING.invoices.total", Depth: tc.depth, Direction: tc.direction})
 		if err != nil || refs.Column.ID != "wanted" {
 			t.Fatalf("depth %d selected column %q, error %v", tc.depth, refs.Column.ID, err)
 		}
@@ -246,5 +249,22 @@ func TestReferencesLookupAndWalk(t *testing.T) {
 		if !slices.Equal(paths, tc.paths) {
 			t.Errorf("depth %d returned %v, want %v", tc.depth, paths, tc.paths)
 		}
+	}
+}
+
+func TestReferenceQuerySelectorValidation(t *testing.T) {
+	s := New("test", nil, nil)
+	for _, query := range []ReferenceQuery{
+		{Depth: 1, Direction: "incoming"},
+		{Depth: 1, Direction: "outgoing", Column: "x.y.z", Object: "x.y"},
+	} {
+		if _, err := s.QueryReferences(query); err == nil || !strings.Contains(err.Error(), "exactly one") {
+			t.Errorf("query %+v: want selector error, got %v", query, err)
+		}
+	}
+	var out strings.Builder
+	References{}.Print(&out)
+	if got := out.String(); got != "No recorded incoming references.\n" {
+		t.Errorf("empty references: %q", got)
 	}
 }

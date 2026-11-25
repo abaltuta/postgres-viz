@@ -28,7 +28,7 @@ const usage = `Usage:
   postgres-viz scan [POSTGRESQL_URI] --out FILE [--schema NAME ...] [--exclude-schema NAME ...] [--no-fks]
   postgres-viz open FILE [--no-browser]
   postgres-viz export-structure FILE --out FILE
-  postgres-viz refs --file FILE (--column SCHEMA.TABLE.COLUMN | --object LABEL) [--depth 1|2] [--json]
+  postgres-viz refs --file FILE (--column SCHEMA.TABLE.COLUMN | --object LABEL) [--direction incoming|outgoing] [--depth 1|2] [--json]
   postgres-viz demo [--no-browser]
 
 With a connection, capture the database and open the viewer. DATABASE_URL supplies
@@ -93,7 +93,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	set.SetOutput(io.Discard)
 	var noBrowser, noFK, asJSON bool
 	var include, exclude list
-	var output, file, column, object, depth string
+	var output, file, column, object, depth, direction string
 	if command == "demo" || command == "open" || command == "view" {
 		set.BoolVar(&noBrowser, "no-browser", false, "")
 	}
@@ -110,6 +110,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		set.StringVar(&column, "column", "", "")
 		set.StringVar(&object, "object", "", "")
 		set.StringVar(&depth, "depth", "2", "")
+		set.StringVar(&direction, "direction", "incoming", "")
 		set.BoolVar(&asJSON, "json", false, "")
 	}
 	pos, err := parse(set, args)
@@ -175,12 +176,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		}
 		if command == "refs" {
 			d, _ := strconv.Atoi(depth)
-			var refs snapshot.References
-			if object != "" {
-				refs, err = s.ObjectReferences(object, d)
-			} else {
-				refs, err = s.References(column, d)
-			}
+			refs, err := s.QueryReferences(snapshot.ReferenceQuery{Column: column, Object: object, Depth: d, Direction: direction})
 			if err != nil {
 				return err
 			}
