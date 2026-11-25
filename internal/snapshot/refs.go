@@ -115,7 +115,8 @@ type Hop struct {
 }
 type References struct {
 	Database string  `json:"database"`
-	Column   Column  `json:"column"`
+	Column   Column  `json:"column,omitzero"`
+	Object   Object  `json:"object,omitzero"`
 	Paths    [][]Hop `json:"paths"`
 }
 
@@ -157,12 +158,22 @@ func (s *Snapshot) References(selector string, depth int) (References, error) {
 	if err != nil {
 		return References{}, err
 	}
+	return s.references(selector, names, depth)
+}
+
+// ObjectReferences follows edges to the exact object named by its viewer label.
+func (s *Snapshot) ObjectReferences(label string, depth int) (References, error) {
+	return s.references(label, nil, depth)
+}
+
+func (s *Snapshot) references(selector string, columnNames []string, depth int) (References, error) {
 	if depth != 1 && depth != 2 {
 		return References{}, fmt.Errorf("--depth must be 1 or 2")
 	}
 	labels := map[string]string{}
 	owners := map[string]Object{}
-	var column Column
+	result := References{Database: s.Database, Paths: [][]Hop{}}
+	var endpoint string
 	for _, o := range s.Objects {
 		owners[o.ID] = o
 	}
@@ -179,15 +190,24 @@ func (s *Snapshot) References(selector string, depth int) (References, error) {
 			prefix = referenceIdentifier(parent.Schema) + "." + referenceIdentifier(parent.Name)
 		}
 		labels[o.ID] = prefix + "." + name
+		if columnNames == nil && labels[o.ID] == selector {
+			if endpoint != "" {
+				return References{}, fmt.Errorf("ambiguous object label %q (%s and %s)", selector, result.Object.Kind, o.Kind)
+			}
+			endpoint, result.Object = o.ID, o
+		}
 	}
 	for _, c := range s.Columns {
 		owner := owners[c.ObjectID]
 		labels[c.ID] = labels[c.ObjectID] + "." + referenceIdentifier(c.Name)
-		if owner.Schema == names[0] && owner.Name == names[1] && c.Name == names[2] {
-			column = c
+		if columnNames != nil && owner.Schema == columnNames[0] && owner.Name == columnNames[1] && c.Name == columnNames[2] {
+			endpoint, result.Column = c.ID, c
 		}
 	}
-	if column.ID == "" {
+	if endpoint == "" {
+		if columnNames == nil {
+			return References{}, fmt.Errorf("object not found: %s", selector)
+		}
 		return References{}, fmt.Errorf("column not found: %s", selector)
 	}
 	defs := map[string]string{}
@@ -210,12 +230,11 @@ func (s *Snapshot) References(selector string, depth int) (References, error) {
 		}
 		incoming[r.Target] = append(incoming[r.Target], Hop{r, labels[r.Source], labels[r.Target], ev})
 	}
-	result := References{s.Database, column, [][]Hop{}}
-	for _, a := range incoming[column.ID] {
+	for _, a := range incoming[endpoint] {
 		result.Paths = append(result.Paths, []Hop{a})
-		if depth == 2 && a.Source != column.ID {
+		if depth == 2 && a.Source != endpoint {
 			for _, b := range incoming[a.Source] {
-				if b.Source != a.Source && b.Source != column.ID {
+				if b.Source != a.Source && b.Source != endpoint {
 					result.Paths = append(result.Paths, []Hop{a, b})
 				}
 			}

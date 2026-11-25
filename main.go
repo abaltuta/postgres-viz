@@ -28,7 +28,7 @@ const usage = `Usage:
   postgres-viz scan [POSTGRESQL_URI] --out FILE [--schema NAME ...] [--exclude-schema NAME ...] [--no-fks]
   postgres-viz open FILE [--no-browser]
   postgres-viz export-structure FILE --out FILE
-  postgres-viz refs --file FILE --column SCHEMA.TABLE.COLUMN [--depth 1|2] [--json]
+  postgres-viz refs --file FILE (--column SCHEMA.TABLE.COLUMN | --object LABEL) [--depth 1|2] [--json]
   postgres-viz demo [--no-browser]
 
 With a connection, capture the database and open the viewer. DATABASE_URL supplies
@@ -93,7 +93,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	set.SetOutput(io.Discard)
 	var noBrowser, noFK, asJSON bool
 	var include, exclude list
-	var output, file, column, depth string
+	var output, file, column, object, depth string
 	if command == "demo" || command == "open" || command == "view" {
 		set.BoolVar(&noBrowser, "no-browser", false, "")
 	}
@@ -108,6 +108,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if command == "refs" {
 		set.StringVar(&file, "file", "", "")
 		set.StringVar(&column, "column", "", "")
+		set.StringVar(&object, "object", "", "")
 		set.StringVar(&depth, "depth", "2", "")
 		set.BoolVar(&asJSON, "json", false, "")
 	}
@@ -135,8 +136,16 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 			if command == "export-structure" && output == "" {
 				return errors.New("export-structure requires --out FILE")
 			}
-		} else if len(pos) != 0 || file == "" || column == "" {
-			return errors.New("refs requires --file and --column")
+		} else {
+			var selectors int
+			set.Visit(func(f *flag.Flag) {
+				if f.Name == "column" || f.Name == "object" {
+					selectors++
+				}
+			})
+			if len(pos) != 0 || file == "" || selectors != 1 || (column == "" && object == "") {
+				return errors.New("refs requires --file and exactly one of --column or --object")
+			}
 		}
 		data, err = os.ReadFile(file)
 		if err != nil {
@@ -166,7 +175,12 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		}
 		if command == "refs" {
 			d, _ := strconv.Atoi(depth)
-			refs, err := s.References(column, d)
+			var refs snapshot.References
+			if object != "" {
+				refs, err = s.ObjectReferences(object, d)
+			} else {
+				refs, err = s.References(column, d)
+			}
 			if err != nil {
 				return err
 			}

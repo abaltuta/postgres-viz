@@ -243,7 +243,7 @@ function load(value: unknown, preserve: boolean, hosted: boolean) {
     depth = 2;
     zoom = 1;
   }
-  for (const id of hiddenObjects) if (!objects.has(id)) hiddenObjects.delete(id);
+  for (const id of hiddenObjects) if (!sameEndpoint(id)) hiddenObjects.delete(id);
   if (
     !preserve ||
     !path.every(
@@ -254,9 +254,16 @@ function load(value: unknown, preserve: boolean, hosted: boolean) {
     )
   )
     path = [];
-  if (!preserve || !objects.has(objectId)) objectId = next.objects[0]?.id ?? "";
-  if (!preserve || columns.get(columnId)?.objectId !== objectId) columnId = "";
-  if (!preserve || !groups.has(schema)) schema = objects.get(objectId)?.schema ?? "";
+  if (!preserve || !sameEndpoint(objectId)) {
+    const previousSchema = previousObjects.get(objectId)?.schema;
+    const survivors = preserve ? next.objects.filter((o) => sameEndpoint(o.id)) : [];
+    const selected = survivors.find((o) => o.schema === previousSchema) ?? survivors[0] ?? next.objects[0];
+    objectId = selected?.id ?? "";
+    schema = selected?.schema ?? "";
+  } else if (!groups.has(schema)) {
+    schema = objects.get(objectId)!.schema;
+  }
+  if (!preserve || !sameEndpoint(columnId) || columns.get(columnId)?.objectId !== objectId) columnId = "";
   targetSchema = undefined;
   const previousPair = pair;
   pair =

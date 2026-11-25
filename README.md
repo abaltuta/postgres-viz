@@ -79,6 +79,12 @@ You can also trace references from the terminal. From this checkout, try the sam
 postgres-viz refs --file examples/commerce/commerce.pgviz.json --column billing.invoices.total --depth 2
 ```
 
+To find callers of a function, pass its full Object explorer label, including the displayed arguments. `--object` follows incoming links to that exact object. To trace a particular column, use `--column`.
+
+```sh
+postgres-viz refs --file examples/routines/routines.pgviz.json --object 'ledger.account_deltas(floor_amount numeric)'
+```
+
 Use `--json` for machine-readable output. For mixed-case or spaced names, pass one shell argument with each SQL identifier quoted, such as `'billing."Invoice Lines"."Total"'`.
 
 ## How the parser works

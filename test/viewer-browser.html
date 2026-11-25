@@ -579,9 +579,13 @@
     publish(renamed);
     assert(hd.activeElement === hostNav, "Hosted refresh should retain focused navigation");
     assert(
-      hd.querySelector("aside h2").textContent === "public.orders.amount",
-      "Host lost selected ID",
+      hd.querySelector("aside h2").textContent === "public.orders",
+      "Reused column ID transferred selection to another column",
     );
+    [...hd.querySelectorAll(".catalog button")].find((b) => b.textContent.startsWith("amount")).click();
+    publish(renamed);
+    assert(hd.querySelector("aside h2").textContent === "public.orders.amount",
+      "Identical column identity lost selection");
     [...hd.querySelectorAll(".path button")].find((b) => b.textContent === "public.report").click();
     publish({
       ...renamed,
@@ -634,6 +638,23 @@
         hostVisibility().includes("1 individually hidden"),
       "Hosted refresh should preserve object and kind visibility",
     );
+    const replacement = { ...base.objects.find((o) => o.id === "f"), name: "new_routine" };
+    publish({ ...base, objects: [replacement, ...base.objects.filter((o) => o.id !== "f")] });
+    assert(hd.querySelector("aside h2").textContent === "public.orders" &&
+      hostNode("new_routine") && !hostNode("report") && !hostVisibility().includes("individually hidden"),
+      "Reused object ID retained unrelated selection or per-object visibility");
+    const owners = [
+      { id: "p", schema: "public", name: "tenant", kind: "policy", parentId: "t" },
+      { id: "alt", schema: "public", name: "archive", kind: "table" },
+    ];
+    publish({ ...base, objects: [...base.objects, ...owners] });
+    hd.querySelectorAll("nav button")[5].click();
+    [...hd.querySelectorAll(".catalog button")]
+      .find((b) => b.textContent === "public.orders.tenant").click();
+    publish({ ...base, objects: [...base.objects, { ...owners[0], parentId: "alt" }, owners[1]] });
+    assert(hd.querySelector("aside h2").textContent === "public.orders",
+      "Reparented policy retained its selection");
+    hd.querySelectorAll("nav button")[1].click();
     publish({
       ...base,
       objects: base.objects.filter((o) => o.id !== "f"),

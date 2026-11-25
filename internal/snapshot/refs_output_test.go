@@ -94,8 +94,36 @@ func TestReferencesOutputQualifiesParentScopedNames(t *testing.T) {
 				if hop.SourceName != wantNames[j] || hop.TargetName != column {
 					t.Errorf("hop labels = %q, %q, want %q, %q", hop.SourceName, hop.TargetName, wantNames[j], column)
 				}
+				selected, err := s.ObjectReferences(hop.SourceName, 1)
+				if err != nil || selected.Object.ID != hop.Source || len(selected.Paths) != 0 {
+					t.Errorf("object label lookup %s: %+v, %v", hop.SourceName, selected, err)
+				}
 			}
 		})
+	}
+}
+
+func TestObjectReferencesOverloadsAndCollisions(t *testing.T) {
+	s := New("test", nil, nil)
+	s.Objects = []Object{
+		{ID: "fn1", Kind: "function", Schema: "sales", Name: "total(input numeric)"},
+		{ID: "fn2", Kind: "function", Schema: "sales", Name: "total(input int)"},
+		{ID: "table", Kind: "table", Schema: "sales", Name: "orders"},
+		{ID: "policy", Kind: "policy", Schema: "sales", Name: "check", ParentID: "table"},
+		{ID: "constraint", Kind: "constraint", Schema: "sales", Name: "check", ParentID: "table"},
+	}
+	s.Relationships = []Relationship{{ID: "r", Source: "fn1", Target: "fn2", Kind: "calls", Provenance: "parsed"}}
+	for _, fn := range s.Objects[:2] {
+		refs, err := s.ObjectReferences("sales."+fn.Name, 2)
+		if err != nil || refs.Object.ID != fn.ID || (len(refs.Paths) == 1) != (fn.ID == "fn2") {
+			t.Fatalf("wrong overload: %+v, error %v", refs, err)
+		}
+	}
+	if _, err := s.ObjectReferences("sales.orders.check", 1); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguous object error, got %v", err)
+	}
+	if _, err := s.ObjectReferences("sales.total()", 1); err == nil || !strings.Contains(err.Error(), "object not found") {
+		t.Fatalf("expected missing object error, got %v", err)
 	}
 }
 

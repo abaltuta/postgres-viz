@@ -98,6 +98,16 @@ try {
   );
   const simple = join(cwd, "simple.pgviz.json");
   await copyFile(new URL("../examples/simple/simple.pgviz.json", import.meta.url), simple);
+  const objectArgs = ["refs", "--file", simple, "--object", "ledger.invoice_total(bigint)"];
+  const objectResult = run(...objectArgs, "--json");
+  assert.equal(objectResult.status, 0, objectResult.stderr);
+  const objectRefs = JSON.parse(objectResult.stdout);
+  assert.equal(objectRefs.object.kind, "function");
+  assert.equal(objectRefs.column, undefined);
+  assert.equal(objectRefs.paths[0][0].sourceName, "ledger.invoice_summary");
+  assert.match(objectRefs.paths[0][0].evidence[0].snippet, /invoice_total/);
+  assert.match(run(...objectArgs).stdout, /^ledger\.invoice_total\(bigint\)\n/);
+  assert.notEqual(run(...objectArgs, "--column", "ledger.invoices.total").status, 0);
   const refArgs = ["refs", "--file", simple, "--column", "ledger.invoices.total", "--json"];
   const marked = JSON.parse(await readFile(simple, "utf8"));
   const marker = "private_sql_literal_7ea2";
@@ -115,6 +125,9 @@ try {
   const structure = run("export-structure", privateFile, "--out", sharedFile);
   assert.equal(structure.status, 0, structure.stderr);
   const shared = await readFile(sharedFile, "utf8");
+  const sharedObject = run("refs", "--file", sharedFile, "--object", "ledger.invoice_total(bigint)", "--json");
+  assert.equal(sharedObject.status, 0, sharedObject.stderr);
+  assert.equal(JSON.parse(sharedObject.stdout).paths[0][0].id, objectRefs.paths[0][0].id);
   assert(!shared.includes(marker));
   const graph = JSON.parse(shared);
   assert.deepEqual(
