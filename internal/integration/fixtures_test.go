@@ -175,6 +175,7 @@ func TestCaptureFixtures(t *testing.T) {
 			if name == "simple" && !t.Failed() {
 				exerciseLateralValues(t, db, scan, read)
 				exerciseImplicitInserts(t, db, scan, read)
+				exerciseRoutineResolution(t, db, scan, read)
 				exerciseServerFeatures(t, db, major, scan)
 			}
 		})

@@ -56,6 +56,21 @@ assert.throws(
   /FK.*position/i,
 );
 const index = new SnapshotIndex(fixture);
+const policy = readSnapshot({
+  ...fixture,
+  objects: [
+    ...fixture.objects,
+    { id: "policy", parentId: "t", name: "guard", schema: "billing", kind: "policy" },
+  ],
+  relationships: [
+    ...fixture.relationships,
+    { id: "policy-read", source: "policy", target: "a", kind: "reads", provenance: "catalog" },
+    { id: "policy-call", source: "policy", target: "f", kind: "calls", provenance: "catalog" },
+  ],
+});
+const policyIndex = new SnapshotIndex(policy);
+assert(policyIndex.columnReferences("a").some((edge) => edge.id === "policy-read"));
+assert(policyIndex.neighborhood("f", "incoming", 1).some(([edge]) => edge?.id === "policy-call"));
 assert.deepEqual(
   index.neighborhood("a", "incoming", 2).map((path) => path.map((edge) => edge.id)),
   [["reads"], ["reads", "calls"]],

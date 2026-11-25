@@ -174,7 +174,7 @@ func (s *Snapshot) References(selector string, depth int) (References, error) {
 			name = referenceIdentifier(o.Name)
 		}
 		prefix := referenceIdentifier(o.Schema)
-		if o.ParentID != "" && (o.Kind == "constraint" || o.Kind == "trigger") {
+		if o.ParentID != "" && (o.Kind == "constraint" || o.Kind == "trigger" || o.Kind == "policy") {
 			parent := owners[o.ParentID]
 			prefix = referenceIdentifier(parent.Schema) + "." + referenceIdentifier(parent.Name)
 		}

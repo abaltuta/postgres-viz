@@ -67,6 +67,12 @@ Send the snapshot to a teammate. They can open it with the CLI or VS Code withou
 
 The file omits the connection URI but includes object names, SQL definitions, snippets and diagnostics. Review SQL literals and comments before sharing.
 
+To share only the dependency graph, export a structural snapshot. It keeps database and schema names, object names, column names and types, and relationships. It removes SQL definitions, object details, evidence and diagnostics. The recipient can open it in the viewer or run `refs` offline.
+
+```sh
+postgres-viz export-structure database.pgviz.json --out shared.pgviz.json
+```
+
 You can also trace references from the terminal. From this checkout, try the same two-hop search as the demo.
 
 ```sh
@@ -94,6 +100,8 @@ CROSS JOIN LATERAL (
 
 **Following the caller.** For PL/pgSQL, the analyzer walks the procedural tree and parses the SQL inside it. In `ledger.post_deltas`, the query inside a `FOR` loop calls `ledger.account_deltas`. Following that call and the column read backwards gives the two-hop path from `account_id` to the procedure. Literal `EXECUTE` strings can be parsed the same way. When the procedure constructs a table name from an argument, the snapshot records an unresolved reference. [Routine definitions](examples/routines/schema.sql) · [Scope resolution](internal/analysis/scope.go)
 
+Open the procedure in **Object explorer** to inspect the unresolved SQL alongside its known references. Select a parsed call to see each occurrence the analyzer could locate in the captured definition.
+
 ```sh
 postgres-viz refs --file examples/routines/routines.pgviz.json --column ledger.entries.account_id --depth 2
 ```
@@ -101,6 +109,8 @@ postgres-viz refs --file examples/routines/routines.pgviz.json --column ledger.e
 ## PostgreSQL parser coverage
 
 postgres-viz supports PostgreSQL 16 through 19. It uses the PostgreSQL 17 grammar with targeted extensions for newer syntax. A dash means the server version has no such syntax.
+
+For unqualified names, the analyzer honors a routine's `SET search_path`. A caller-dependent schema such as `"$user"`, an earlier schema excluded from the scan, or a path changed at runtime can limit resolution. The scan covers user objects and omits system and extension-owned objects by default.
 
 | What the analyzer can trace | PG 16 | PG 17 | PG 18 | PG 19 |
 | --- | :---: | :---: | :---: | :---: |
@@ -114,7 +124,7 @@ postgres-viz supports PostgreSQL 16 through 19. It uses the PostgreSQL 17 gramma
 | Old and new target-row columns in DML `RETURNING`, including `WITH (OLD AS ..., NEW AS ...)` aliases | - | - | Yes | Yes |
 | Conflict-target, predicate and returned-column reads in `INSERT ... ON CONFLICT (...) DO SELECT ... RETURNING` | - | - | - | Yes |
 
-The catalog also supplies dependencies for views, materialized views, indexes and constraints. A view's call to a function may be recorded for the whole view. Check the endpoint before attributing the call to an output column.
+The catalog also supplies dependencies for views, materialized views, indexes, constraints and row-level security policies. Inspect a policy to see which columns and functions its `USING` and `WITH CHECK` expressions depend on. A view's call to a function may be recorded for the whole view. Check the endpoint before attributing the call to an output column.
 
 On PostgreSQL 18 and 19, snapshots also include virtual generated-column dependencies, additional `NOT NULL` constraint objects and foreign-key details such as `PERIOD` and `NOT ENFORCED`. [Parser tests](internal/analysis) · [Live PostgreSQL fixtures](internal/integration/version_features_test.go)
 

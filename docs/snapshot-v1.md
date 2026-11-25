@@ -6,7 +6,7 @@ Use the RFC 3339 form `YYYY-MM-DDTHH:mm:ssZ` for `capturedAt`. A signed `+HH:mm`
 
 | Collection | Fields and meaning |
 | --- | --- |
-| `objects` | `id`, `schema`, `name`, and `kind`. Kinds include table, foreign, view, matview, function, procedure, trigger, constraint, and index. Routine names include identity arguments. A nested object's `parentId` identifies its relation. Optional `detail` describes the object. |
+| `objects` | `id`, `schema`, `name`, and `kind`. Kinds include table, foreign, view, matview, function, procedure, trigger, constraint, index, and policy. Routine names include identity arguments. A nested object's `parentId` identifies its relation. Optional `detail` describes the object. |
 | `columns` | `id`, `objectId`, `name`, `type`, and positive catalog `position`. Positions retain PostgreSQL attribute order, including gaps left by dropped columns. |
 | `relationships` | `id`, `kind`, `source`, `target`, and `provenance`. Source and target identify an object or column. For example, a view that calls a function points to the function. Foreign-key pairs point from referencing to referenced column and carry `constraintId` plus a one-based `position` within that constraint. |
 | `definitions` | One captured SQL `sql` string per `ownerId`. |
@@ -17,6 +17,10 @@ IDs are opaque and scoped to the file. Preserve identifiers exactly, including c
 
 `catalog` identifies PostgreSQL catalog facts. `parsed` identifies SQL syntax analysis. `fallback` identifies lexical matches or conservative relation-level references. A catalog relationship can also have parsed evidence for a particular occurrence. A view's call to a routine identifies the view as its source. PostgreSQL's routine dependency alone does not identify an output column. For SQL-standard function bodies, the catalog records dependencies without distinguishing reads and writes. Capture represents relation dependencies for those bodies with the `reads` kind.
 
-Queries follow relationships in the selected direction and join on exact endpoint IDs. Maps group column endpoints under their relation and draw triggers, indexes and constraints as distinct objects. Same-table column links remain available in details. Visibility filters apply to the diagrams. Catalog browsing, SQL and detailed reference queries use the full snapshot.
+Repeated routine calls can have several evidence records on the same relationship. Verified ranges cover the callee's name, including its schema if the SQL qualifies it. A row-level security policy belongs to its table. Its definition includes the command, roles, and explicit `USING` and `WITH CHECK` expressions. The policy's catalog relationships point to the columns it reads and the captured functions it calls.
+
+Use a viewer with policy support to open a snapshot containing `policy` objects. Older snapshots remain readable.
+
+Queries follow relationships in the selected direction and join on exact endpoint IDs. Maps group column endpoints under their relation and draw triggers, indexes, constraints and policies as distinct objects. Same-table column links remain available in details. Visibility filters apply to the diagrams. Catalog browsing, SQL and detailed reference queries use the full snapshot.
 
 The [round-trip fixture](../test/fixtures/commerce.pgviz.json) includes a SQL function, a view that calls it, a self-referencing foreign key and an unused column.

@@ -29,6 +29,15 @@ trg AS (
   SELECT t.*,r.nspname FROM pg_trigger t JOIN rels r ON r.oid=t.tgrelid
   WHERE NOT t.tgisinternal AND NOT EXISTS(SELECT FROM pg_depend x WHERE x.classid='pg_trigger'::regclass AND x.objid=t.oid AND x.deptype='e')
 ),
+policies AS (
+  SELECT p.*,r.nspname,r.relname FROM pg_policy p JOIN rels r ON r.oid=p.polrelid
+  WHERE NOT EXISTS(SELECT FROM pg_depend x WHERE x.classid='pg_policy'::regclass AND x.objid=p.oid AND x.deptype='e')
+),
+policy_deps AS (
+  SELECT p.oid,d.refclassid,d.refobjid,d.refobjsubid FROM policies p
+  JOIN pg_depend d ON d.classid='pg_policy'::regclass AND d.objid=p.oid AND d.deptype IN ('a','n')
+  WHERE NOT(d.refclassid='pg_class'::regclass AND d.refobjid=p.polrelid AND d.refobjsubid=0)
+),
 vdeps AS (
   SELECT w.ev_class,d.refclassid,d.refobjid,d.refobjsubid FROM pg_rewrite w JOIN rels v ON v.oid=w.ev_class
   JOIN pg_depend d ON d.classid='pg_rewrite'::regclass AND d.objid=w.oid
@@ -44,6 +53,7 @@ defaults AS (
 -- Catalog references that bring routines from outside the requested schemas into scope.
 direct_calls(source,kind,func) AS (
   SELECT 'r'||ev_class,'calls',refobjid FROM vdeps WHERE refclassid='pg_proc'::regclass
+  UNION ALL SELECT 'p'||oid,'calls',refobjid FROM policy_deps WHERE refclassid='pg_proc'::regclass
   UNION ALL SELECT 'g'||oid,'executes',tgfoid FROM trg
   UNION ALL SELECT 'c'||adrelid||'_'||adnum,'default',refobjid FROM defaults WHERE refclassid='pg_proc'::regclass
   UNION ALL SELECT 'k'||k.oid,'calls',d.refobjid FROM cons k JOIN pg_depend d
@@ -73,6 +83,7 @@ procs AS (
 -- Keep relation-level dependencies when no more specific column dependency exists.
 relation_refs(source,kind,rel,att) AS (
   SELECT 'r'||v.ev_class,'selects',v.refobjid,v.refobjsubid FROM vdeps v WHERE v.refclassid='pg_class'::regclass
+  UNION ALL SELECT 'p'||oid,'reads',refobjid,refobjsubid FROM policy_deps WHERE refclassid='pg_class'::regclass
   UNION ALL SELECT 'f'||p.oid,'reads',d.refobjid,d.refobjsubid FROM procs p JOIN pg_depend d
     ON d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.refclassid='pg_class'::regclass AND d.deptype='n' WHERE p.has_body
 ),
@@ -108,6 +119,14 @@ objects(id,schema,name,kind,parent,detail,sql) AS (
     CASE WHEN to_jsonb(f)->>'conperiod'='true' OR to_jsonb(f)->>'conenforced'='false'
       THEN pg_get_constraintdef(oid,true) ELSE 'FOREIGN KEY' END,NULL FROM fk f
   UNION ALL SELECT 'i'||oid,nspname,relname,'index','r'||indrelid,NULL,pg_get_indexdef(oid,0,true) FROM idx
+  UNION ALL SELECT 'p'||oid,nspname,polname,'policy','r'||polrelid,NULL,
+    format('CREATE POLICY %I ON %I.%I AS %s FOR %s TO %s',polname,nspname,relname,
+      CASE WHEN polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END,
+      CASE polcmd WHEN '*' THEN 'ALL' WHEN 'r' THEN 'SELECT' WHEN 'a' THEN 'INSERT' WHEN 'w' THEN 'UPDATE' WHEN 'd' THEN 'DELETE' END,
+      (SELECT string_agg(CASE WHEN role_id=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(role_id)) END, ', ' ORDER BY pos)
+       FROM unnest(polroles) WITH ORDINALITY AS roles(role_id,pos)))
+    || coalesce(' USING ('||pg_get_expr(polqual,polrelid)||')','')
+    || coalesce(' WITH CHECK ('||pg_get_expr(polwithcheck,polrelid)||')','') FROM policies
   UNION ALL SELECT 'g'||oid,nspname,tgname,'trigger','r'||tgrelid,
     concat_ws(' ',CASE WHEN tgtype&2<>0 THEN 'BEFORE' WHEN tgtype&64<>0 THEN 'INSTEAD OF' ELSE 'AFTER' END,
       concat_ws(' OR ',CASE WHEN tgtype&4<>0 THEN 'INSERT' END,CASE WHEN tgtype&8<>0 THEN 'DELETE' END,
@@ -118,6 +137,12 @@ SELECT 'object' AS category, jsonb_build_object('id',id,'schema',schema,'name',n
 UNION ALL SELECT 'column',jsonb_build_object('id','c'||attrelid||'_'||attnum,'objectId','r'||attrelid,'name',attname,'type',typename,'position',attnum) FROM cols
 UNION ALL SELECT 'routine',jsonb_build_object('id','f'||oid,'schema',nspname,'name',proname,'args',pg_get_function_identity_arguments(oid),
   'inputCount',pronargs,'defaultCount',pronargdefaults,'argModes',proargmodes,'argNames',proargnames,
+  'inputTypes',proargtypes::text,
+  'searchPath',(SELECT ARRAY(
+    SELECT CASE WHEN m[1] IS NULL THEN lower(m[2]) ELSE replace(m[1],'""','"') END
+    FROM regexp_matches(o.option_value,'"((?:[^"]|"")*)"|([^",[:space:]]+)','g') WITH ORDINALITY AS token(m,pos)
+    ORDER BY pos
+  ) FROM pg_options_to_table(proconfig) o WHERE o.option_name='search_path'),
   'returns',format_type(prorettype,NULL),'body',prosrc,'language',lanname,'kind',prokind,'hasSQLBody',has_body,
   'definition',CASE WHEN lanname IN ('sql','plpgsql') THEN pg_get_functiondef(oid) END) FROM procs
 UNION ALL SELECT 'edge',jsonb_build_object('id',kind||'|'||source||'|'||target,'kind',kind,'source',source,'target',target,'provenance','catalog') FROM edges

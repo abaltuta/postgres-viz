@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, link, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -99,6 +99,57 @@ try {
   const simple = join(cwd, "simple.pgviz.json");
   await copyFile(new URL("../examples/simple/simple.pgviz.json", import.meta.url), simple);
   const refArgs = ["refs", "--file", simple, "--column", "ledger.invoices.total", "--json"];
+  const marked = JSON.parse(await readFile(simple, "utf8"));
+  const marker = "private_sql_literal_7ea2";
+  for (const object of marked.objects) object.detail = marker;
+  for (const definition of marked.definitions) definition.sql += " /* " + marker + " */";
+  for (const proof of marked.evidence) proof.snippet = marker;
+  marked.diagnostics.warnings = [marker];
+  marked.diagnostics.unresolved = [
+    { ownerId: marked.objects[0].id, reason: marker, identifier: marker, snippet: marker },
+  ];
+  const original = JSON.stringify(marked);
+  const privateFile = join(cwd, "private.pgviz.json");
+  const sharedFile = join(cwd, "structure.pgviz.json");
+  await writeFile(privateFile, original);
+  const structure = run("export-structure", privateFile, "--out", sharedFile);
+  assert.equal(structure.status, 0, structure.stderr);
+  const shared = await readFile(sharedFile, "utf8");
+  assert(!shared.includes(marker));
+  const graph = JSON.parse(shared);
+  assert.deepEqual(
+    graph.objects,
+    marked.objects.map(({ detail: _detail, ...object }) => object),
+  );
+  assert.deepEqual(graph.columns, marked.columns);
+  assert.deepEqual(graph.relationships, marked.relationships);
+  assert.deepEqual(graph.definitions, []);
+  assert.deepEqual(graph.evidence, []);
+  assert.deepEqual(graph.diagnostics, { warnings: [], unresolved: [] });
+  const sharedRefs = run(
+    "refs",
+    "--file",
+    sharedFile,
+    "--column",
+    "ledger.invoices.total",
+    "--json",
+  );
+  assert.equal(sharedRefs.status, 0, sharedRefs.stderr);
+  assert.deepEqual(
+    JSON.parse(sharedRefs.stdout).paths.map((p) => p.map((h) => h.sourceName)),
+    [["ledger.invoice_total(bigint)"], ["ledger.invoice_total(bigint)", "ledger.invoice_summary"]],
+  );
+  const sameSource = join(cwd, "alias.pgviz.json");
+  await link(privateFile, sameSource);
+  for (const out of [privateFile, sameSource]) {
+    const same = run("export-structure", privateFile, "--out", out);
+    assert.equal(same.status, 1);
+    assert.match(same.stderr, /different/);
+    assert.equal(await readFile(out, "utf8"), original);
+  }
+  await writeFile(sameSource, "invalid snapshot");
+  assert.equal(run("export-structure", privateFile, "--out", sharedFile).status, 1);
+  assert.equal(await readFile(sharedFile, "utf8"), shared);
   for (const depth of [undefined, "1", "2"]) {
     const result = run(...refArgs, ...(depth ? ["--depth", depth] : []));
     assert.equal(result.status, 0, result.stderr);
@@ -123,6 +174,7 @@ try {
   await copyFile(file, join(cwd, "-"));
   const viewers = [
     [["open", file, "--no-browser"], "demo", file],
+    [["open", sharedFile, "--no-browser"], "simple", sharedFile],
     [["demo", "--no-browser=true"], "commerce"],
     [["open", "-", "--no-browser"], "demo", file],
   ];

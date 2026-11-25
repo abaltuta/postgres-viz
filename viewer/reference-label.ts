@@ -26,7 +26,7 @@ export function objectLabel(
   qualified: boolean,
 ): string {
   const parent =
-    obj.parentId && (obj.kind === "trigger" || obj.kind === "constraint")
+    obj.parentId && (obj.kind === "trigger" || obj.kind === "constraint" || obj.kind === "policy")
       ? objects.get(obj.parentId)
       : undefined;
   const parts = qualified ? [identifier(parent?.schema ?? obj.schema)] : [];

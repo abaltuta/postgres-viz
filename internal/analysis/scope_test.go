@@ -35,6 +35,11 @@ func TestSQLScopesAndWrites(t *testing.T) {
 		{"using", "SELECT 1 FROM orders o, customers c JOIN audit a USING (id)", []string{"reads orders", "reads customers.id", "reads audit.id"}},
 		{"natural", "SELECT id FROM orders NATURAL JOIN customers", []string{"reads orders.id", "reads customers.id"}},
 		{"nested", "SELECT count(*) FROM orders WHERE EXISTS (WITH orders AS (SELECT 1) SELECT 1 FROM orders)", []string{"reads orders"}},
+		{"sample arguments", "SELECT (SELECT o.total FROM orders o TABLESAMPLE SYSTEM(c.id) REPEATABLE(c.id)) FROM customers c", []string{"reads customers.id", "reads orders.total"}},
+		{"recursive anchor", "WITH RECURSIVE audit(n) AS (SELECT total FROM orders UNION ALL SELECT n+1 FROM audit WHERE n<3) SELECT n FROM audit", []string{"reads orders.total"}},
+		{"forward CTE", "WITH RECURSIVE first_pass AS (SELECT n FROM orders), orders(n) AS (SELECT id FROM customers) SELECT n FROM first_pass", []string{"reads customers.id"}},
+		{"ordinary CTE sees physical table", "WITH first_pass AS (SELECT total FROM orders), orders AS (SELECT 1) SELECT total FROM first_pass", []string{"reads orders.total"}},
+		{"nested CTE shadows forward sibling", "WITH RECURSIVE a AS (WITH orders(n) AS (SELECT total FROM public.orders) SELECT n FROM orders), orders(n) AS (SELECT id FROM customers) SELECT n FROM a", []string{"reads orders.total", "reads customers.id"}},
 		{"join alias", "SELECT j.debit, j.who FROM (orders o JOIN customers c ON c.id=o.customer_id) j(key,debit,cid,label,pk,who)", []string{"reads orders.total", "reads orders.customer_id", "reads customers.id", "reads customers.name"}},
 		{"order alias", "SELECT o.total AS id FROM orders o ORDER BY id", []string{"reads orders.total"}},
 		{"set operation", "WITH all_ids(k) AS (SELECT o.customer_id FROM orders o UNION ALL SELECT c.id FROM customers c) SELECT v.id FROM all_ids AS v(id)", []string{"reads orders.customer_id", "reads customers.id"}},
@@ -139,7 +144,7 @@ func TestSelectNameResolution(t *testing.T) {
 	s.Columns = append(s.Columns, snapshot.Column{ID: "billing.orders.id", ObjectID: "billing.orders", Name: "id", Position: 1})
 	var routines []snapshot.Routine
 	for _, tc := range cases {
-		routines = append(routines, snapshot.Routine{ID: tc.name, Schema: "public", Language: "sql", Body: tc.sql})
+		routines = append(routines, snapshot.Routine{ID: tc.name, Schema: "public", SearchPath: []string{"public"}, Language: "sql", Body: tc.sql})
 	}
 	if err := Analyze(context.Background(), s, routines); err != nil {
 		t.Fatal(err)
@@ -238,7 +243,7 @@ func TestFallbackAndQuotedNames(t *testing.T) {
 	routines := []snapshot.Routine{
 		{ID: "fd", Schema: "sales.eu", Name: "audit"}, {ID: "fw", Schema: "sales", Name: "eu.audit"},
 		{ID: "sql", Name: "sql", Language: "sql", Schema: "public", Body: body, Definition: body},
-		{ID: "bad", Name: "bad", Language: "plpgsql", Schema: "public", Definition: "invalid", Body: `BEGIN INSERT INTO audit(id) SELECT id FROM orders; PERFORM 'SELECT id FROM customers'; END`},
+		{ID: "bad", Name: "bad", Language: "plpgsql", Schema: "public", SearchPath: []string{"public"}, Definition: "invalid", Body: `BEGIN INSERT INTO audit(id) SELECT id FROM orders; PERFORM 'SELECT id FROM customers'; END`},
 	}
 	if err := Analyze(context.Background(), s, routines); err != nil {
 		t.Fatal(err)

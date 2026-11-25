@@ -110,6 +110,17 @@ func (a *analyzer) analyze() error {
 		return nil
 	}
 	masked := maskSQL(a.r.Body)
+	a.plCallSites = make(map[int][]int)
+	line, previous := 1, 0
+	for _, span := range callIdentifier.FindAllStringIndex(masked, -1) {
+		token := masked[span[0]:span[1]]
+		if !strings.EqualFold(token, "perform") && !strings.EqualFold(token, "call") {
+			continue
+		}
+		line += strings.Count(masked[previous:span[0]], "\n")
+		a.plCallSites[line] = append(a.plCallSites[line], span[0])
+		previous = span[0]
+	}
 	for _, m := range triggerAssign.FindAllStringSubmatch(masked, -1) {
 		for _, id := range a.triggerRels {
 			cols, _ := a.base(id).lookup(folded(m[2]))
@@ -145,11 +156,15 @@ func (a *analyzer) fragments(v any, dynamic bool) {
 		}
 	case map[string]any:
 		if e := child(n, "PLpgSQL_expr"); e != nil {
-			a.fragment(str(e, "query"), num(e, "parseMode"), dynamic)
+			a.fragment(str(e, "query"), num(e, "parseMode"), dynamic, 0, "")
 			return
 		}
 		for _, k := range slices.Sorted(maps.Keys(n)) {
-			if k == "PLpgSQL_stmt_dynexecute" || k == "PLpgSQL_stmt_dynfors" {
+			if k == "PLpgSQL_stmt_perform" || k == "PLpgSQL_stmt_call" {
+				stmt := obj(n[k])
+				expr := child(stmt, "expr", "PLpgSQL_expr")
+				a.fragment(str(expr, "query"), num(expr, "parseMode"), false, num(stmt, "lineno"), strings.TrimPrefix(k, "PLpgSQL_stmt_"))
+			} else if k == "PLpgSQL_stmt_dynexecute" || k == "PLpgSQL_stmt_dynfors" {
 				stmt := obj(n[k])
 				for _, key := range slices.Sorted(maps.Keys(stmt)) {
 					a.fragments(stmt[key], key == "query")
@@ -160,7 +175,43 @@ func (a *analyzer) fragments(v any, dynamic bool) {
 		}
 	}
 }
-func (a *analyzer) fragment(sql string, mode int, dynamic bool) {
+
+// The PL parser rewrites PERFORM to SELECT and gives statements line numbers.
+// Match their actual argument text on that line, consuming each occurrence
+// once so repeated calls on the same line can be distinguished.
+func (a *analyzer) callStatementSource(sql string, line int, command string) {
+	const sqlWhitespace = " \t\n\r\f\v"
+	prefix := len(command)
+	if command == "perform" {
+		prefix = len("SELECT")
+	}
+	if len(sql) <= prefix {
+		return
+	}
+	tail := strings.TrimLeft(sql[prefix:], sqlWhitespace)
+	bodyStart := strings.Index(a.r.Definition, a.r.Body)
+	if tail == "" || bodyStart < 0 || bodyStart != strings.LastIndex(a.r.Definition, a.r.Body) {
+		return
+	}
+	for i, start := range a.plCallSites[line] {
+		body := a.r.Body[start:]
+		if len(body) < len(command) || !strings.EqualFold(body[:len(command)], command) {
+			continue
+		}
+		args := strings.TrimLeft(body[len(command):], sqlWhitespace)
+		after, match := strings.CutPrefix(args, tail)
+		if !match || !strings.HasPrefix(strings.TrimLeft(after, sqlWhitespace), ";") {
+			continue
+		}
+		a.sql = tail
+		a.delta = -(len(sql) - len(tail))
+		a.offset = bodyStart + start + len(body) - len(args)
+		a.plCallSites[line] = slices.Delete(a.plCallSites[line], i, i+1)
+		return
+	}
+}
+
+func (a *analyzer) fragment(sql string, mode int, dynamic bool, line int, command string) {
 	if a.r.Returns == "trigger" {
 		switch strings.ToLower(strings.TrimSpace(sql)) {
 		case "old", "new":
@@ -182,6 +233,9 @@ func (a *analyzer) fragment(sql string, mode int, dynamic bool) {
 	tree, err := a.p.parse(input, false)
 	if err == nil {
 		a.source(sql, delta, true)
+		if command != "" {
+			a.callStatementSource(sql, line, command)
+		}
 		a.query(tree)
 		if !dynamic || a.literalCommand(tree, sql) {
 			return

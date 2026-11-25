@@ -99,6 +99,25 @@
       (b) => b.textContent === "public.sum_orders",
     );
     openFunction.click();
+    await pick({
+      ...base,
+      objects: [...base.objects, { id: "p", schema: "public", name: "dispatch", kind: "procedure" }],
+      diagnostics: { warnings: [], unresolved: [
+        { ownerId: "p", identifier: "EXECUTE", reason: "missing", snippet: "format('SELECT %I', destination)", candidateIds: ["c"] },
+        { ownerId: "f", identifier: "other", reason: "ambiguous", snippet: "other routine SQL" },
+      ] },
+    });
+    for (const view of ["Object explorer", "Visual neighborhood"]) {
+      [...doc.querySelectorAll("nav button")].find((b) => b.textContent === view).click();
+      [...doc.querySelectorAll(".catalog button")].find((b) => b.textContent === "public.dispatch").click();
+      const unresolved = doc.querySelector(".routine-diagnostics");
+      assert(unresolved?.textContent.includes("format('SELECT %I', destination)") &&
+        unresolved.textContent.includes("public.orders.total") && !unresolved.textContent.includes("other routine SQL"),
+        "Selected procedure should show its unresolved SQL and candidates");
+    }
+    await pick(base);
+    doc.querySelectorAll("nav button")[6].click();
+    [...doc.querySelectorAll(".catalog button")].find((b) => b.textContent === "public.sum_orders").click();
     const hide = [...doc.querySelectorAll("button")].find(
       (b) => b.textContent === "Hide object from diagrams",
     );
@@ -311,6 +330,7 @@
       "index",
       "constraint",
       "trigger",
+      "policy",
     ];
     const names = kinds.map((kind) => kind + "_item");
     await pick({
@@ -325,7 +345,7 @@
         kind,
         schema: "public",
         name: names[i],
-        ...(["index", "constraint", "trigger"].includes(kind) && { parentId: "table" }),
+        ...(["index", "constraint", "trigger", "policy"].includes(kind) && { parentId: "table" }),
       })),
       relationships: [
         {
@@ -365,7 +385,7 @@
         (e) => e.getAttribute("aria-label") || e.textContent,
       );
       for (const name of names) {
-        const display = ["trigger_item", "constraint_item"].includes(name)
+        const display = ["trigger_item", "constraint_item", "policy_item"].includes(name)
           ? "table_item." + name
           : name;
         assert(

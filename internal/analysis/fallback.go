@@ -65,7 +65,14 @@ func maskSQL(sql string) string {
 			sql = sql[end:]
 			continue
 		}
-		out.WriteByte(' ')
+		// Keep byte positions and line numbers usable against the routine body.
+		for i := start; i < end; i++ {
+			if sql[i] == '\n' {
+				out.WriteByte('\n')
+			} else {
+				out.WriteByte(' ')
+			}
+		}
 		sql = sql[end:]
 	}
 	return out.String()

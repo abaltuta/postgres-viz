@@ -179,7 +179,29 @@ func expectCurrentParser(t *testing.T, expected, actual *snapshot.Snapshot) {
 	}
 	edge := snapshot.Relationship{ID: "calls|" + caller + "|" + callee, Source: caller, Target: callee, Kind: "calls", Provenance: "parsed"}
 	expected.Relationships = append(expected.Relationships, edge)
-	expected.Evidence = append(expected.Evidence, snapshot.Evidence{RelationshipID: edge.ID, OwnerID: caller, Provenance: "parsed"})
+	start, end := 106, 115
+	expected.Evidence = append(expected.Evidence, snapshot.Evidence{
+		RelationshipID: edge.ID, OwnerID: caller, Provenance: "parsed", Snippet: "SELECT child_sum()", Start: &start, End: &end,
+	})
+	// Three other call edges already exist in the frozen snapshot with only
+	// owner-level evidence. Require each new occurrence independently of the scanner.
+	for _, call := range []struct {
+		source, target, snippet string
+		start, end              int
+	}{
+		{logOrder, objectID("public", "function", "notify_stats()"), "notify_stats()", 369, 381},
+		{recalculate, objectID("payroll", "function", "entry_amount(entry payroll.report_entry)"), sumLine, 328, 348},
+		{objectID("public", "view", "child_summary"), callee, "SELECT child_sum() AS total;", 8, 17},
+	} {
+		id := "calls|" + call.source + "|" + call.target
+		i := slices.IndexFunc(expected.Evidence, func(e snapshot.Evidence) bool { return e.RelationshipID == id })
+		if i < 0 || expected.Evidence[i].Snippet != "" || expected.Evidence[i].Start != nil || expected.Evidence[i].End != nil {
+			t.Fatalf("frozen fixture lacks definition-only evidence for %s", id)
+		}
+		e := &expected.Evidence[i]
+		e.Snippet, e.Provenance = call.snippet, "parsed"
+		e.Start, e.End = &call.start, &call.end
+	}
 	// The old grammar also fell back for the generic updated_at trigger. Require
 	// both the exact old aggregate warnings and the exact new result.
 	old := []string{"1 routines required fallback analysis", "4 unresolved SQL references"}

@@ -93,6 +93,8 @@ type Routine struct {
 	HasSQLBody                                                  bool
 	ServerVersion                                               int
 	CallParameters                                              []CallParameter
+	SearchPath                                                  []string // nil means the caller supplies the search path
+	InputTypes                                                  *string  // pg_proc.proargtypes, used to compare overload identities
 }
 
 // CallParameter describes a parameter supplied by the caller. Procedures include OUT slots.
@@ -160,13 +162,13 @@ func (s *Snapshot) Validate() error {
 	}
 	relations := []string{"table", "foreign", "view", "matview"}
 	for _, o := range s.Objects {
-		if !unique(o.ID) || (!slices.Contains(relations, o.Kind) && !slices.Contains([]string{"function", "procedure", "constraint", "index", "trigger"}, o.Kind)) {
+		if !unique(o.ID) || (!slices.Contains(relations, o.Kind) && !slices.Contains([]string{"function", "procedure", "constraint", "index", "trigger", "policy"}, o.Kind)) {
 			return fmt.Errorf("invalid object %q", o.ID)
 		}
 		objects[o.ID] = o
 	}
 	for _, o := range s.Objects {
-		if o.ParentID != "" && (!slices.Contains(relations, objects[o.ParentID].Kind) || !slices.Contains([]string{"constraint", "trigger", "index"}, o.Kind)) {
+		if o.ParentID != "" && (!slices.Contains(relations, objects[o.ParentID].Kind) || !slices.Contains([]string{"constraint", "trigger", "index", "policy"}, o.Kind)) {
 			return fmt.Errorf("invalid parent for %q", o.ID)
 		}
 	}

@@ -21,7 +21,7 @@ export interface SnapshotObject {
   id: string;
   schema: string;
   name: string;
-  kind: RelKind | "function" | "procedure" | "trigger" | "constraint" | "index";
+  kind: RelKind | "function" | "procedure" | "trigger" | "constraint" | "index" | "policy";
   parentId?: string;
   detail?: string;
 }
@@ -85,6 +85,7 @@ const kinds = [
   "function",
   "procedure",
   "trigger",
+  "policy",
   "constraint",
   "index",
 ];
@@ -185,7 +186,7 @@ export function readSnapshot(value: unknown): Snapshot {
       parents.set(String(o.id), parent);
       check(
         relationKinds.includes(objects.get(parent)!) &&
-          ["constraint", "index", "trigger"].includes(String(o.kind)),
+          ["constraint", "index", "trigger", "policy"].includes(String(o.kind)),
         "invalid object parent " + parent,
       );
     }

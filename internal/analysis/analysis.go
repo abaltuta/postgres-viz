@@ -58,15 +58,17 @@ func unique(ids []string) []string {
 }
 
 type catalog struct {
-	s          *snapshot.Snapshot
-	objs       map[string]snapshot.Object
-	relations  map[string][]string
-	functions  map[string][]string
-	signatures map[string][]snapshot.CallParameter
-	cols       map[string][]snapshot.Column
-	parents    map[string]string
-	edges      map[string]bool
-	triggers   map[string][]string
+	s            *snapshot.Snapshot
+	objs         map[string]snapshot.Object
+	relations    map[string][]string
+	functions    map[string][]string
+	signatures   map[string][]snapshot.CallParameter
+	inputTypes   map[string]*string
+	cols         map[string][]snapshot.Column
+	parents      map[string]string
+	edges        map[string]bool
+	catalogCalls map[string]bool
+	triggers     map[string][]string
 }
 
 func index(s *snapshot.Snapshot, routines []snapshot.Routine) *catalog {
@@ -74,8 +76,9 @@ func index(s *snapshot.Snapshot, routines []snapshot.Routine) *catalog {
 		s: s, objs: map[string]snapshot.Object{},
 		relations: map[string][]string{}, functions: map[string][]string{},
 		signatures: map[string][]snapshot.CallParameter{},
+		inputTypes: map[string]*string{},
 		cols:       map[string][]snapshot.Column{}, parents: map[string]string{},
-		edges: map[string]bool{}, triggers: map[string][]string{},
+		edges: map[string]bool{}, catalogCalls: map[string]bool{}, triggers: map[string][]string{},
 	}
 	for _, o := range s.Objects {
 		c.objs[o.ID] = o
@@ -87,6 +90,7 @@ func index(s *snapshot.Snapshot, routines []snapshot.Routine) *catalog {
 	for _, r := range routines {
 		c.functions[r.Name] = append(c.functions[r.Name], r.ID)
 		c.signatures[r.ID] = r.CallParameters
+		c.inputTypes[r.ID] = r.InputTypes
 	}
 	for _, col := range s.Columns {
 		c.cols[col.ObjectID] = append(c.cols[col.ObjectID], col)
@@ -97,6 +101,9 @@ func index(s *snapshot.Snapshot, routines []snapshot.Routine) *catalog {
 	}
 	for _, e := range s.Relationships {
 		c.edges[e.ID] = true
+		if e.Kind == "calls" && e.Provenance == "catalog" {
+			c.catalogCalls[e.Source] = true
+		}
 		if e.Kind == "executes" {
 			if p := c.objs[e.Source].ParentID; p != "" {
 				c.triggers[e.Target] = append(c.triggers[e.Target], p)
@@ -116,6 +123,7 @@ type analyzer struct {
 	view          bool
 	sql           string
 	offset, delta int
+	plCallSites   map[int][]int
 	// A known column replaces a relation-wide reference of the same kind.
 	whole, precise, uncertain map[string]bool
 }
@@ -130,6 +138,11 @@ func (a *analyzer) schemaMatches(ids []string, parts []string) []string {
 	var schemas []string
 	if len(parts) > 1 {
 		schemas = []string{parts[len(parts)-2]}
+	} else if a.r.SearchPath != nil {
+		return a.pathMatches(ids)
+	} else if len(ids) > 1 && !a.isRoutine(ids[0]) {
+		// Routine bodies without SET search_path inherit the caller's settings.
+		return ids
 	} else {
 		schemas = []string{a.r.Schema, "public"}
 	}
@@ -149,6 +162,54 @@ func (a *analyzer) schemaMatches(ids []string, parts []string) []string {
 	}
 	return ids
 }
+
+func (a *analyzer) isRoutine(id string) bool {
+	kind := a.objs[id].Kind
+	return kind == "function" || kind == "procedure"
+}
+
+func (a *analyzer) pathMatches(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	routine := a.isRoutine(ids[0])
+	var matches []string
+	seenTypes := map[string]bool{}
+	for _, schema := range a.r.SearchPath {
+		if routine && schema == "pg_temp" {
+			continue // PostgreSQL searches temporary schemas only for relations and types.
+		}
+		// A runtime-dependent or unscanned schema can shadow a later table or
+		// contribute a better-matching overload. Do not guess across it.
+		if schema == "$user" || schema == "pg_temp" ||
+			(a.s.Schemas.Include != nil && !slices.Contains(a.s.Schemas.Include, schema)) ||
+			(a.s.Schemas.Include == nil && (slices.Contains(a.s.Schemas.Exclude, schema) ||
+				strings.HasPrefix(schema, "pg_") || schema == "information_schema")) {
+			return nil
+		}
+		for _, id := range ids {
+			o := a.objs[id]
+			if o.Schema != schema {
+				continue
+			}
+			if !routine {
+				return []string{id}
+			}
+			// Earlier schemas hide identical input signatures, not other overloads.
+			if types := a.inputTypes[id]; types != nil {
+				key := o.Kind + ":" + *types
+				if seenTypes[key] {
+					continue
+				}
+				seenTypes[key] = true
+			}
+			if !slices.Contains(matches, id) {
+				matches = append(matches, id)
+			}
+		}
+	}
+	return matches
+}
 func (a *analyzer) rel(name, schema string) string {
 	parts := []string{name}
 	if schema != "" {
@@ -157,6 +218,26 @@ func (a *analyzer) rel(name, schema string) string {
 	ids := a.matches(a.relations, parts)
 	if len(ids) == 1 {
 		return ids[0]
+	}
+	return ""
+}
+
+func (a *analyzer) sqlRelation(rv node) string {
+	if rv == nil {
+		return ""
+	}
+	name, schema := str(rv, "relname"), str(rv, "schemaname")
+	if schema != "" {
+		return a.rel(name, schema)
+	}
+	ids := a.matches(a.relations, []string{name})
+	if len(ids) == 1 {
+		return ids[0]
+	}
+	if len(ids) > 1 {
+		a.diagnostic("ambiguous", name, name, ids)
+	} else if a.r.SearchPath != nil {
+		a.diagnostic("missing", name, name, nil)
 	}
 	return ""
 }
@@ -184,15 +265,16 @@ func (a *analyzer) diagnostic(reason, identifier, snippet string, candidates []s
 		Snippet: snippet, CandidateIDs: unique(candidates),
 	})
 }
-func (a *analyzer) recordCall(parts, ids []string, origin string) {
+func (a *analyzer) recordCall(parts, ids []string, origin string) string {
 	if len(ids) > 1 {
 		label := strings.Join(parts, ".")
 		a.diagnostic("ambiguous", label, label+"(...)", ids)
-		return
+		return ""
 	}
-	if len(ids) == 1 && ids[0] != a.r.ID && !a.view {
-		a.addEdge("calls", ids[0], origin)
+	if len(ids) == 1 && ids[0] != a.r.ID {
+		return a.addEdge("calls", ids[0], origin)
 	}
+	return ""
 }
 func (a *analyzer) table(kind, id string) {
 	if id != "" && !a.view {
@@ -269,6 +351,15 @@ func (a *analyzer) column(kind, id string, loc int, identifier string) {
 	}
 	a.precise[kind+"|"+parent] = true
 	edge := a.addEdge(kind, id, "parsed")
+	pos := loc + a.delta
+	left, right := pos, pos
+	if loc >= 0 && pos >= 0 && pos < len(a.sql) {
+		left, right = columnSpan(a.sql, pos)
+	}
+	a.evidence(edge, loc, identifier, left, right)
+}
+
+func (a *analyzer) evidence(edge string, loc int, identifier string, left, right int) {
 	if loc < 0 {
 		return
 	}
@@ -278,13 +369,10 @@ func (a *analyzer) column(kind, id string, loc int, identifier string) {
 		snippet = identifier
 	}
 	e := snapshot.Evidence{ID: fmt.Sprintf("e%d", len(a.s.Evidence)), OwnerID: a.r.ID, RelationshipID: edge, Provenance: "parsed", Snippet: snippet}
-	if a.offset >= 0 && pos >= 0 && pos < len(a.sql) && utf8.ValidString(a.sql[:pos]) {
-		left, right := columnSpan(a.sql, pos)
-		if right > left {
-			start := units(a.r.Definition[:a.offset]) + units(a.sql[:left])
-			end := start + units(a.sql[left:right])
-			e.Start, e.End = &start, &end
-		}
+	if a.offset >= 0 && right > left && utf8.ValidString(a.sql[:left]) {
+		start := units(a.r.Definition[:a.offset]) + units(a.sql[:left])
+		end := start + units(a.sql[left:right])
+		e.Start, e.End = &start, &end
 	}
 	a.s.Evidence = append(a.s.Evidence, e)
 }
@@ -315,7 +403,7 @@ func Analyze(ctx context.Context, s *snapshot.Snapshot, routines []snapshot.Rout
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if r.HasSQLBody || (r.Language != "sql" && r.Language != "plpgsql") {
+		if r.Language != "sql" && r.Language != "plpgsql" {
 			continue
 		}
 		if r.Definition == "" {
@@ -325,6 +413,21 @@ func Analyze(ctx context.Context, s *snapshot.Snapshot, routines []snapshot.Rout
 			catalog: c, p: p, r: r, variables: map[string]string{},
 			triggerRels: c.triggers[r.ID], view: c.objs[r.ID].Kind == "view" || c.objs[r.ID].Kind == "matview",
 			whole: map[string]bool{}, precise: map[string]bool{}, uncertain: map[string]bool{},
+		}
+		if r.HasSQLBody {
+			if !c.catalogCalls[r.ID] {
+				continue
+			}
+			if tree, err := p.parse(r.Definition, false); err == nil {
+				a.source(r.Definition, 0, true)
+				for _, stmt := range statements(tree) {
+					a.catalogBodyCalls(child(stmt, "stmt", "CreateFunctionStmt")["sql_body"])
+				}
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			continue
 		}
 		if err := a.analyze(); err != nil {
 			if ctx.Err() != nil {

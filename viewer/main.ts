@@ -43,6 +43,7 @@ const titles = {
   constraint: "Constraints",
   index: "Indexes",
   trigger: "Triggers",
+  policy: "Policies",
 } satisfies Record<SnapshotObject["kind"], string>;
 function endpointObject(id: string) {
   return objects.get(columns.get(id)?.objectId ?? id)!;
@@ -986,6 +987,17 @@ function explorer() {
     }
   }
   const definition = data.definitions.find((d) => d.ownerId === root);
+  const unresolved = data.diagnostics.unresolved.filter((ref) => ref.ownerId === root);
+  if (unresolved.length) {
+    const section = el(main, "section", undefined, "routine-diagnostics");
+    el(section, "h3", "Unresolved references");
+    for (const ref of unresolved) {
+      el(section, "p", ref.identifier + " · " + ref.reason);
+      if (ref.snippet) el(section, "pre", ref.snippet);
+      if (ref.candidateIds?.length)
+        el(section, "small", "Candidates: " + ref.candidateIds.map(label).join(", "));
+    }
+  }
   if (definition) {
     const section = el(main, "details");
     el(section, "summary", "Captured SQL");

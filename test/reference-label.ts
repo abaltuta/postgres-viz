@@ -18,7 +18,7 @@ for (const [kind, name, expected] of [
 const column = { id: "c", objectId: "table", name: 'min"qty', type: "int", position: 1 };
 const columns = new Map([[column.id, column]]);
 assert.equal(referenceLabel("c", objects, columns), '"Sales Ops"."confirmed.orders"."min""qty"');
-for (const kind of ["trigger", "constraint", "index"] as const) {
+for (const kind of ["trigger", "constraint", "index", "policy"] as const) {
   objects.set(kind, { id: kind, schema, kind, name: "changed.at", parentId: "table" });
   const parent = kind === "index" ? '"Sales Ops"' : '"Sales Ops"."confirmed.orders"';
   assert.equal(referenceLabel(kind, objects, columns), parent + '."changed.at"');

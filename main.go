@@ -27,6 +27,7 @@ const usage = `Usage:
   postgres-viz [POSTGRESQL_URI] [--no-browser]
   postgres-viz scan [POSTGRESQL_URI] --out FILE [--schema NAME ...] [--exclude-schema NAME ...] [--no-fks]
   postgres-viz open FILE [--no-browser]
+  postgres-viz export-structure FILE --out FILE
   postgres-viz refs --file FILE --column SCHEMA.TABLE.COLUMN [--depth 1|2] [--json]
   postgres-viz demo [--no-browser]
 
@@ -84,7 +85,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 			return nil
 		case "__parser":
 			return analysis.Worker()
-		case "scan", "open", "refs", "demo":
+		case "scan", "open", "export-structure", "refs", "demo":
 			command, args = args[0], args[1:]
 		}
 	}
@@ -101,7 +102,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		set.Var(&exclude, "exclude-schema", "")
 		set.BoolVar(&noFK, "no-fks", false, "")
 	}
-	if command == "scan" {
+	if command == "scan" || command == "export-structure" {
 		set.StringVar(&output, "out", "", "")
 	}
 	if command == "refs" {
@@ -125,12 +126,15 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 			return errors.New("demo takes no positional arguments")
 		}
 		data, err = assets.ReadFile("examples/commerce/commerce.pgviz.json")
-	case "open", "refs":
-		if command == "open" {
+	case "open", "export-structure", "refs":
+		if command != "refs" {
 			if len(pos) != 1 {
-				return errors.New("open expects one snapshot file")
+				return fmt.Errorf("%s expects one snapshot file", command)
 			}
 			file = pos[0]
+			if command == "export-structure" && output == "" {
+				return errors.New("export-structure requires --out FILE")
+			}
 		} else if len(pos) != 0 || file == "" || column == "" {
 			return errors.New("refs requires --file and --column")
 		}
@@ -141,6 +145,24 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		s, err := snapshot.Read(data)
 		if err != nil {
 			return err
+		}
+		if command == "export-structure" {
+			source, err := os.Stat(file)
+			if err != nil {
+				return err
+			}
+			dest, err := os.Stat(output)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if os.SameFile(source, dest) {
+				return errors.New("choose a different output file to preserve the original snapshot")
+			}
+			if err := snapshot.Write(ctx, output, s.Structure()); err != nil {
+				return err
+			}
+			fmt.Fprintln(errOut, "Saved", output)
+			return nil
 		}
 		if command == "refs" {
 			d, _ := strconv.Atoi(depth)

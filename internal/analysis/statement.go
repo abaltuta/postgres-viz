@@ -39,7 +39,7 @@ func (a *analyzer) statement(stmt node, parent *scope) binding {
 	for tag, data := range stmt {
 		n := obj(data)
 		rv := child(n, "relation")
-		rel := a.rel(str(rv, "relname"), str(rv, "schemaname"))
+		rel := a.sqlRelation(rv)
 		a.with(child(n, "withClause"), s)
 		target := a.base(rel)
 		name := str(child(rv, "alias"), "aliasname")
@@ -134,7 +134,7 @@ func (a *analyzer) statement(stmt node, parent *scope) binding {
 		case "TruncateStmt":
 			for _, v := range items(n["relations"]) {
 				r := child(v, "RangeVar")
-				a.table("deletes", a.rel(str(r, "relname"), str(r, "schemaname")))
+				a.table("deletes", a.sqlRelation(r))
 			}
 		case "CallStmt":
 			f := child(n, "funccall")

@@ -59,6 +59,9 @@ func TestCapturePostgres(t *testing.T) {
  CREATE TABLE child(x int,y int,unused text, amount int, double_amount int GENERATED ALWAYS AS (amount*2) STORED, CONSTRAINT "paired FK" FOREIGN KEY (x,y) REFERENCES "Parent.A"(b,a));
  CREATE FUNCTION AUX.twice(int) RETURNS int LANGUAGE sql IMMUTABLE AS 'SELECT $1*2';
  CREATE FUNCTION AUX.is_positive(int) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1>0';
+ CREATE FUNCTION AUX.can_insert(int) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1>=0';
+ CREATE POLICY tenant_filter ON child USING (AUX.is_positive(x)) WITH CHECK (AUX.can_insert(y));
+ CREATE POLICY tenant_filter ON "Parent.A" USING (a=b);
  CREATE FUNCTION AUX.highest() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT max(amount) FROM APP.child; END;
  ALTER TABLE child ADD COLUMN prior int DEFAULT AUX.highest();
  ALTER TABLE child ADD CONSTRAINT positive CHECK(AUX.twice(amount)>=x);
@@ -95,12 +98,32 @@ func TestCapturePostgres(t *testing.T) {
 		cols[c.ObjectID+"/"+c.Name] = c.ID
 	}
 	child := objs["child"]
+	policies := map[string]snapshot.Object{}
+	for _, o := range s.Objects {
+		if o.Kind == "policy" && o.Name == "tenant_filter" {
+			policies[o.ParentID] = o
+		}
+	}
+	if len(policies) != 2 || policies[child].ID == "" || policies[objs["Parent.A"]].ID == "" {
+		t.Fatalf("missing table-owned policies: %+v", policies)
+	}
+	var policySQL string
+	for _, def := range s.Definitions {
+		if def.OwnerID == policies[child].ID {
+			policySQL = def.SQL
+		}
+	}
+	if !strings.Contains(policySQL, "USING") || !strings.Contains(policySQL, "WITH CHECK") {
+		t.Fatalf("missing policy expressions: %s", policySQL)
+	}
 	amount := cols[child+"/amount"]
 	twice := objs["twice(integer)"]
 	if amount == "" || twice == "" || objs["run()"] == "" || cols[child+"/unused"] == "" || len(routines) < 5 {
 		t.Fatalf("missing object or column: %v", objs)
 	}
 	wantEdges := [][3]string{
+		{"reads", policies[child].ID, cols[child+"/x"]}, {"reads", policies[child].ID, cols[child+"/y"]},
+		{"calls", policies[child].ID, objs["is_positive(integer)"]}, {"calls", policies[child].ID, objs["can_insert(integer)"]},
 		{"selects", objs["copies"], amount}, {"calls", objs["summaries"], objs["sum_amount()"]},
 		{"reads", objs["sum_amount()"], amount}, {"calls", objs["sum_amount()"], twice},
 		{"default", cols[child+"/prior"], objs["highest()"]}, {"reads", objs["highest()"], amount},

@@ -105,8 +105,13 @@ func TestReferencesFollowColumnAndOverload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(refs.Paths) != 2 || len(refs.Paths[1]) != 2 || refs.Paths[1][1].Kind != "calls" || refs.Paths[1][1].Evidence[0].Definition == "" {
-		t.Fatal("lost two-hop definition evidence")
+	if len(refs.Paths) != 2 || len(refs.Paths[1]) != 2 || refs.Paths[1][1].Kind != "calls" {
+		t.Fatal("lost two-hop routine call")
+	}
+	proof := refs.Paths[1][1].Evidence
+	if len(proof) != 1 || proof[0].Snippet != "FROM ledger.account_deltas(cutoff) AS d(account_key, delta)" ||
+		proof[0].Start == nil || proof[0].End == nil {
+		t.Fatalf("lost call-site evidence: %+v", proof)
 	}
 	sibling, err := s.References("ledger.pending.delta", 2)
 	if err != nil || len(sibling.Paths) != 0 {

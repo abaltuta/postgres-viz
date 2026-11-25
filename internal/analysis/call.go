@@ -1,7 +1,10 @@
 package analysis
 
 import (
+	"maps"
+	"regexp"
 	"slices"
+	"strings"
 
 	"postgres-viz/internal/snapshot"
 )
@@ -23,7 +26,61 @@ func (a *analyzer) parsedCall(f node, kind string) {
 			candidates = append(candidates, id)
 		}
 	}
-	a.recordCall(parts, a.schemaMatches(candidates, parts), "parsed")
+	if a.view || a.r.HasSQLBody {
+		// The server resolved these calls already. Never attach a location to
+		// an overload which is not a catalog dependency of this definition.
+		ids = slices.DeleteFunc(candidates, func(id string) bool {
+			return !a.edges["calls|"+a.r.ID+"|"+id] || (len(parts) > 1 && a.objs[id].Schema != parts[len(parts)-2])
+		})
+	} else {
+		ids = a.schemaMatches(candidates, parts)
+	}
+	edge := a.recordCall(parts, ids, "parsed")
+	if edge != "" {
+		label := strings.Join(parts, ".")
+		loc := num(f, "location")
+		pos := loc + a.delta
+		width := 0
+		if loc >= 0 && pos >= 0 && pos < len(a.sql) {
+			text := columnText.FindString(a.sql[pos:])
+			tokens := callIdentifier.FindAllString(text, -1)
+			if len(tokens) == len(parts) && strings.HasPrefix(strings.TrimSpace(a.sql[pos+len(text):]), "(") {
+				for i := range tokens {
+					tokens[i] = folded(tokens[i])
+				}
+				if slices.Equal(tokens, parts) {
+					width = len(text)
+				}
+			}
+		}
+		a.evidence(edge, loc, label, pos, pos+width)
+	}
+}
+
+var callIdentifier = regexp.MustCompile(ident)
+
+// SQL-standard bodies already have server-resolved dependency edges. Walk
+// only their body for call locations, leaving the catalog's semantics intact.
+func (a *analyzer) catalogBodyCalls(v any) {
+	switch n := v.(type) {
+	case []any:
+		for _, item := range n {
+			a.catalogBodyCalls(item)
+		}
+	case map[string]any:
+		if f := child(n, "FuncCall"); f != nil {
+			a.parsedCall(f, "function")
+		}
+		if stmt := child(n, "CallStmt"); stmt != nil {
+			f := child(stmt, "funccall")
+			a.parsedCall(f, "procedure")
+			a.catalogBodyCalls(f["args"])
+			return
+		}
+		for _, k := range slices.Sorted(maps.Keys(n)) {
+			a.catalogBodyCalls(n[k])
+		}
+	}
 }
 
 func acceptsCall(params []snapshot.CallParameter, names []string, explicitVariadic bool) bool {

@@ -2,10 +2,78 @@ package analysis
 
 import (
 	"slices"
+	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"postgres-viz/internal/snapshot"
 )
+
+func TestCallSiteOccurrences(t *testing.T) {
+	const sql = `SELECT '🍒', public."F Δ"(), public."F Δ"();`
+	for _, kind := range []string{"function", "view", "sql-body"} {
+		t.Run(kind, func(t *testing.T) {
+			s := snapshot.New("test", nil, nil)
+			s.Objects = append(s.Objects, snapshot.Object{ID: "callee", Schema: "public", Name: "F Δ()", Kind: "function"})
+			routines := []snapshot.Routine{{ID: "callee", Schema: "public", Name: "F Δ", CallParameters: []snapshot.CallParameter{}}}
+			def := sql
+			objKind := kind
+			if kind == "sql-body" {
+				objKind = "function"
+				def = "CREATE FUNCTION public.caller() RETURNS record LANGUAGE SQL BEGIN ATOMIC " + sql + " END"
+			}
+			s.Objects = append(s.Objects, snapshot.Object{ID: "caller", Schema: "public", Name: "caller", Kind: objKind})
+			s.Definitions = append(s.Definitions, snapshot.Definition{OwnerID: "caller", SQL: def})
+			if kind != "view" {
+				routines = append(routines, snapshot.Routine{ID: "caller", Name: "caller", Schema: "public", Language: "sql", Body: sql, Definition: def, HasSQLBody: kind == "sql-body"})
+			}
+			if kind != "function" {
+				s.Relationships = append(s.Relationships, snapshot.Relationship{ID: "calls|caller|callee", Kind: "calls", Source: "caller", Target: "callee", Provenance: "catalog"})
+			}
+			if err := Analyze(t.Context(), s, routines); err != nil {
+				t.Fatal(err)
+			}
+			if len(s.Relationships) != 1 || len(s.Evidence) != 2 {
+				t.Fatalf("relationships=%+v evidence=%+v", s.Relationships, s.Evidence)
+			}
+			chars := utf16.Encode([]rune(def))
+			for i, e := range s.Evidence {
+				if e.Start == nil || e.End == nil || !strings.Contains(e.Snippet, `"F Δ"`) ||
+					string(utf16.Decode(chars[*e.Start:*e.End])) != `public."F Δ"` ||
+					(i > 0 && *e.Start <= *s.Evidence[i-1].End) || e.RelationshipID != s.Relationships[0].ID {
+					t.Fatalf("bad occurrence %d: %+v", i, e)
+				}
+			}
+		})
+	}
+}
+
+func TestRepeatedPLCallLocations(t *testing.T) {
+	body := "\nBEGIN\n  /* PERFORM public.f(); */ PERFORM public.f(); PERFORM public.f();\n  CALL public.p();\n  CALL public.p();\nEND"
+	def := "CREATE PROCEDURE public.caller() LANGUAGE plpgsql AS $$" + body + "$$"
+	s := snapshot.Snapshot{Objects: []snapshot.Object{
+		{ID: "f", Kind: "function", Schema: "public"}, {ID: "p", Kind: "procedure", Schema: "public"},
+	}}
+	routines := []snapshot.Routine{{ID: "caller", Language: "plpgsql", Schema: "public", Body: body, Definition: def},
+		{ID: "f", Name: "f", Schema: "public"}, {ID: "p", Name: "p", Schema: "public"}}
+	if err := Analyze(t.Context(), &s, routines); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Evidence) != 4 {
+		t.Fatalf("got %d occurrences", len(s.Evidence))
+	}
+	lastEnd := 0
+	for i, e := range s.Evidence {
+		name := "public.f"
+		if i >= 2 {
+			name = "public.p"
+		}
+		if e.Start == nil || e.End == nil || *e.Start < lastEnd || def[*e.Start:*e.End] != name {
+			t.Fatalf("occurrence %d: %+v", i, e)
+		}
+		lastEnd = *e.End
+	}
+}
 
 func TestParsedCallCandidates(t *testing.T) {
 	s := &snapshot.Snapshot{}

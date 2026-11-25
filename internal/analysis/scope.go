@@ -64,8 +64,22 @@ func (b binding) renamed(aliases []string) binding {
 type scope struct {
 	parent  *scope
 	names   []rangeName
-	ctes    map[string]binding
+	ctes    map[string]*cteBinding
 	sources []binding
+}
+
+// Recursive WITH exposes sibling names before their queries have been visited.
+type cteBinding struct {
+	columns binding
+	resolve func() binding
+}
+
+func (c *cteBinding) get() binding {
+	if resolve := c.resolve; resolve != nil {
+		c.resolve = nil // Self-references see the current anchor binding.
+		c.columns = resolve()
+	}
+	return c.columns
 }
 
 type rangeName struct {
@@ -74,12 +88,12 @@ type rangeName struct {
 }
 
 func newScope(parent *scope) *scope {
-	return &scope{parent: parent, ctes: map[string]binding{}}
+	return &scope{parent: parent, ctes: map[string]*cteBinding{}}
 }
 func (s *scope) cte(name string) (binding, bool) {
 	for ; s != nil; s = s.parent {
 		if b, ok := s.ctes[name]; ok {
-			return b, true
+			return b.get(), true
 		}
 	}
 	return binding{}, false
@@ -360,6 +374,11 @@ func (a *analyzer) from(item node, s *scope) binding {
 	var alias node
 	var defaultName, schema string
 	switch {
+	case child(item, "RangeTableSample") != nil:
+		sample := child(item, "RangeTableSample")
+		a.expr(sample["args"], s)
+		a.expr(sample["repeatable"], s)
+		return a.from(child(sample, "relation"), s)
 	case child(item, "RangeVar") != nil:
 		r := child(item, "RangeVar")
 		alias = child(r, "alias")
@@ -370,7 +389,7 @@ func (a *analyzer) from(item node, s *scope) binding {
 			b, cte = s.cte(defaultName)
 		}
 		if !cte {
-			id := a.rel(defaultName, schema)
+			id := a.sqlRelation(r)
 			a.table("reads", id)
 			b = a.base(id)
 			schema = a.objs[id].Schema
@@ -509,18 +528,35 @@ func (a *analyzer) valuesRow(values any, s *scope) binding {
 	return out
 }
 func (a *analyzer) with(n node, s *scope) {
+	var pending []*cteBinding
 	for _, w := range items(n["ctes"]) {
 		c := child(w, "CommonTableExpr")
 		name := str(c, "ctename")
+		aliases := names(c["aliascolnames"])
+		query := child(c, "ctequery")
+		entry := &cteBinding{columns: binding{unknownWidth: true}}
+		entry.resolve = func() binding {
+			var b binding
+			if sel := child(query, "SelectStmt"); sel != nil && n["recursive"] == true {
+				b = a.selectWithAnchor(sel, s, func(anchor binding) { entry.columns = anchor.renamed(aliases) })
+			} else {
+				b = a.statement(query, s)
+			}
+			// SEARCH and CYCLE add columns after the recursive query's outputs.
+			if c["search_clause"] != nil || c["cycle_clause"] != nil {
+				b.unknownWidth = true
+			}
+			return b.renamed(aliases)
+		}
 		if n["recursive"] == true {
-			s.ctes[name] = binding{unknownWidth: true}
+			pending = append(pending, entry)
+		} else {
+			entry.get() // An ordinary CTE sees only its previously declared siblings.
 		}
-		b := a.statement(child(c, "ctequery"), s).renamed(names(c["aliascolnames"]))
-		// SEARCH and CYCLE add columns after the recursive query's outputs.
-		if c["search_clause"] != nil || c["cycle_clause"] != nil {
-			b.unknownWidth = true
-		}
-		s.ctes[name] = b
+		s.ctes[name] = entry
+	}
+	for _, entry := range pending {
+		entry.get() // Include dependencies from unreferenced CTEs as well.
 	}
 }
 
@@ -559,11 +595,18 @@ func (a *analyzer) clauseExpr(v any, s *scope, out binding, group bool) {
 }
 
 func (a *analyzer) selectStmt(n node, parent *scope) binding {
+	return a.selectWithAnchor(n, parent, nil)
+}
+
+func (a *analyzer) selectWithAnchor(n node, parent *scope, anchor func(binding)) binding {
 	s := newScope(parent)
 	a.with(child(n, "withClause"), s)
 	var out binding
 	if op := str(n, "op"); op != "" && op != "SETOP_NONE" {
 		out = a.selectStmt(child(n, "larg"), s)
+		if anchor != nil {
+			anchor(out)
+		}
 		right := a.selectStmt(child(n, "rarg"), s)
 		out.mergeRow(right)
 	} else {
