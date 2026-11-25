@@ -73,11 +73,14 @@ To share only the dependency graph, export a structural snapshot. It keeps datab
 postgres-viz export-structure database.pgviz.json --out shared.pgviz.json
 ```
 
-You can also trace references from the terminal. From this checkout, try the same two-hop search as the demo.
+From the terminal, use `find` to search object and column names in a full or structural snapshot. It matches a literal substring anywhere in the qualified label, ignoring case. The first field gives the kind. Copy the second field into `refs --column` for a column or `refs --object` for an object, including the argument signature for an overloaded routine.
 
 ```sh
+postgres-viz find --file examples/commerce/commerce.pgviz.json invoices.total
 postgres-viz refs --file examples/commerce/commerce.pgviz.json --column billing.invoices.total --depth 2
 ```
+
+If two objects share a label, such as a constraint and a trigger with the same name on one table, `find` lists both kinds and `refs --object` reports the ambiguity.
 
 To find callers of a function, pass its full Object explorer label, including the displayed arguments. The default direction is `incoming`. Use `--direction outgoing` to see what that function calls, reads or writes. Both directions work with `--object` and `--column`. Each hop shows the recorded source, relationship and target.
 

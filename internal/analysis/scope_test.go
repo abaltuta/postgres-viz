@@ -33,6 +33,9 @@ func TestSQLScopesAndWrites(t *testing.T) {
 		edges     []string
 	}{
 		{"using", "SELECT 1 FROM orders o, customers c JOIN audit a USING (id)", []string{"reads orders", "reads customers.id", "reads audit.id"}},
+		{"set limit", "SELECT 1 UNION ALL SELECT 2 LIMIT (SELECT count(id) FROM customers)", []string{"reads customers.id"}},
+		{"set offset", "SELECT 1 INTERSECT SELECT 2 OFFSET (SELECT count(id) FROM orders)", []string{"reads orders.id"}},
+		{"simple limit and offset", "SELECT 1 LIMIT (SELECT count(id) FROM customers) OFFSET (SELECT count(id) FROM orders)", []string{"reads customers.id", "reads orders.id"}},
 		{"natural", "SELECT id FROM orders NATURAL JOIN customers", []string{"reads orders.id", "reads customers.id"}},
 		{"nested", "SELECT count(*) FROM orders WHERE EXISTS (WITH orders AS (SELECT 1) SELECT 1 FROM orders)", []string{"reads orders"}},
 		{"sample arguments", "SELECT (SELECT o.total FROM orders o TABLESAMPLE SYSTEM(c.id) REPEATABLE(c.id)) FROM customers c", []string{"reads customers.id", "reads orders.total"}},

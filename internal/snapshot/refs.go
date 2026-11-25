@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -169,6 +170,35 @@ func (s *Snapshot) ObjectReferences(label string, depth int) (References, error)
 	return s.QueryReferences(ReferenceQuery{Object: label, Depth: depth, Direction: "incoming"})
 }
 
+type Match struct {
+	Kind     string
+	Selector string
+}
+
+func (s *Snapshot) Find(term string) []Match {
+	labels, _ := s.referenceLabels()
+	term = strings.ToLower(term)
+	var matches []Match
+	add := func(id, kind string) {
+		if label := labels[id]; strings.Contains(strings.ToLower(label), term) {
+			matches = append(matches, Match{kind, label})
+		}
+	}
+	for _, o := range s.Objects {
+		add(o.ID, o.Kind)
+	}
+	for _, c := range s.Columns {
+		add(c.ID, "column")
+	}
+	slices.SortFunc(matches, func(a, b Match) int {
+		if a.Selector == b.Selector {
+			return strings.Compare(a.Kind, b.Kind)
+		}
+		return strings.Compare(a.Selector, b.Selector)
+	})
+	return matches
+}
+
 func (s *Snapshot) QueryReferences(q ReferenceQuery) (References, error) {
 	if (q.Column == "") == (q.Object == "") {
 		return References{}, fmt.Errorf("refs requires exactly one of --column or --object")
@@ -189,26 +219,10 @@ func (s *Snapshot) QueryReferences(q ReferenceQuery) (References, error) {
 			return References{}, err
 		}
 	}
-	labels := map[string]string{}
-	owners := map[string]Object{}
+	labels, owners := s.referenceLabels()
 	result := References{Database: s.Database, Paths: [][]Hop{}, direction: q.Direction}
 	var endpoint string
 	for _, o := range s.Objects {
-		owners[o.ID] = o
-	}
-	for _, o := range s.Objects {
-		var name string
-		if o.Kind == "function" || o.Kind == "procedure" {
-			name = routineReferenceName(o.Name)
-		} else {
-			name = referenceIdentifier(o.Name)
-		}
-		prefix := referenceIdentifier(o.Schema)
-		if o.ParentID != "" && (o.Kind == "constraint" || o.Kind == "trigger" || o.Kind == "policy") {
-			parent := owners[o.ParentID]
-			prefix = referenceIdentifier(parent.Schema) + "." + referenceIdentifier(parent.Name)
-		}
-		labels[o.ID] = prefix + "." + name
 		if columnNames == nil && labels[o.ID] == selector {
 			if endpoint != "" {
 				return References{}, fmt.Errorf("ambiguous object label %q (%s and %s)", selector, result.Object.Kind, o.Kind)
@@ -218,7 +232,6 @@ func (s *Snapshot) QueryReferences(q ReferenceQuery) (References, error) {
 	}
 	for _, c := range s.Columns {
 		owner := owners[c.ObjectID]
-		labels[c.ID] = labels[c.ObjectID] + "." + referenceIdentifier(c.Name)
 		if columnNames != nil && owner.Schema == columnNames[0] && owner.Name == columnNames[1] && c.Name == columnNames[2] {
 			endpoint, result.Column = c.ID, c
 		}
@@ -268,6 +281,30 @@ func (s *Snapshot) QueryReferences(q ReferenceQuery) (References, error) {
 		}
 	}
 	return result, nil
+}
+
+func (s *Snapshot) referenceLabels() (map[string]string, map[string]Object) {
+	owners := make(map[string]Object, len(s.Objects))
+	labels := make(map[string]string, len(s.Objects)+len(s.Columns))
+	for _, o := range s.Objects {
+		owners[o.ID] = o
+	}
+	for _, o := range s.Objects {
+		name := referenceIdentifier(o.Name)
+		if o.Kind == "function" || o.Kind == "procedure" {
+			name = routineReferenceName(o.Name)
+		}
+		prefix := referenceIdentifier(o.Schema)
+		if o.ParentID != "" && (o.Kind == "constraint" || o.Kind == "trigger" || o.Kind == "policy") {
+			parent := owners[o.ParentID]
+			prefix = referenceIdentifier(parent.Schema) + "." + referenceIdentifier(parent.Name)
+		}
+		labels[o.ID] = prefix + "." + name
+	}
+	for _, c := range s.Columns {
+		labels[c.ID] = labels[c.ObjectID] + "." + referenceIdentifier(c.Name)
+	}
+	return labels, owners
 }
 func (r References) Print(w io.Writer) {
 	if len(r.Paths) == 0 {

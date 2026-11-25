@@ -28,6 +28,7 @@ const usage = `Usage:
   postgres-viz scan [POSTGRESQL_URI] --out FILE [--schema NAME ...] [--exclude-schema NAME ...] [--no-fks]
   postgres-viz open FILE [--no-browser]
   postgres-viz export-structure FILE --out FILE
+  postgres-viz find --file FILE TERM
   postgres-viz refs --file FILE (--column SCHEMA.TABLE.COLUMN | --object LABEL) [--direction incoming|outgoing] [--depth 1|2] [--json]
   postgres-viz demo [--no-browser]
 
@@ -85,7 +86,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 			return nil
 		case "__parser":
 			return analysis.Worker()
-		case "scan", "open", "export-structure", "refs", "demo":
+		case "scan", "open", "export-structure", "find", "refs", "demo":
 			command, args = args[0], args[1:]
 		}
 	}
@@ -105,8 +106,10 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if command == "scan" || command == "export-structure" {
 		set.StringVar(&output, "out", "", "")
 	}
-	if command == "refs" {
+	if command == "refs" || command == "find" {
 		set.StringVar(&file, "file", "", "")
+	}
+	if command == "refs" {
 		set.StringVar(&column, "column", "", "")
 		set.StringVar(&object, "object", "", "")
 		set.StringVar(&depth, "depth", "2", "")
@@ -128,8 +131,13 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 			return errors.New("demo takes no positional arguments")
 		}
 		data, err = assets.ReadFile("examples/commerce/commerce.pgviz.json")
-	case "open", "export-structure", "refs":
-		if command != "refs" {
+	case "open", "export-structure", "refs", "find":
+		switch command {
+		case "find":
+			if file == "" || len(pos) != 1 || pos[0] == "" {
+				return errors.New("find requires --file and one non-empty search term")
+			}
+		case "open", "export-structure":
 			if len(pos) != 1 {
 				return fmt.Errorf("%s expects one snapshot file", command)
 			}
@@ -137,7 +145,7 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 			if command == "export-structure" && output == "" {
 				return errors.New("export-structure requires --out FILE")
 			}
-		} else {
+		case "refs":
 			var selectors int
 			set.Visit(func(f *flag.Flag) {
 				if f.Name == "column" || f.Name == "object" {
@@ -155,6 +163,16 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 		s, err := snapshot.Read(data)
 		if err != nil {
 			return err
+		}
+		if command == "find" {
+			matches := s.Find(pos[0])
+			if len(matches) == 0 {
+				fmt.Fprintln(out, "No matching objects or columns.")
+			}
+			for _, match := range matches {
+				fmt.Fprintf(out, "%s\t%s\n", match.Kind, match.Selector)
+			}
+			return nil
 		}
 		if command == "export-structure" {
 			source, err := os.Stat(file)

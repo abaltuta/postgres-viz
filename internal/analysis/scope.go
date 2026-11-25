@@ -629,10 +629,12 @@ func (a *analyzer) selectWithAnchor(n node, parent *scope, anchor func(binding))
 		for _, item := range items(n["groupClause"]) {
 			a.clauseExpr(item, s, out, true)
 		}
-		for _, key := range []string{"whereClause", "havingClause", "windowClause", "limitOffset", "limitCount"} {
+		for _, key := range []string{"whereClause", "havingClause", "windowClause"} {
 			a.expr(n[key], s)
 		}
 	}
+	a.expr(n["limitOffset"], s)
+	a.expr(n["limitCount"], s)
 	for _, item := range items(n["sortClause"]) {
 		a.clauseExpr(child(item, "SortBy")["node"], s, out, false)
 	}

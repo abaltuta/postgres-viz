@@ -98,7 +98,16 @@ try {
   );
   const simple = join(cwd, "simple.pgviz.json");
   await copyFile(new URL("../examples/simple/simple.pgviz.json", import.meta.url), simple);
-  const objectArgs = ["refs", "--file", simple, "--object", "ledger.invoice_total(bigint)"];
+  const find = (...args) => run("find", "--file", simple, ...args);
+  const found = find("ICE_TOTAL");
+  assert.equal(found.status, 0, found.stderr);
+  assert.equal(found.stdout, "function\tledger.invoice_total(bigint)\n");
+  assert.equal(find("ledger.invoices.total").stdout, "column\tledger.invoices.total\n");
+  const noMatch = find("ledger.*");
+  assert.equal(noMatch.status, 0, noMatch.stderr);
+  assert.equal(noMatch.stdout, "No matching objects or columns.\n");
+  for (const args of [[], [""], ["a", "b"]]) assert.equal(find(...args).status, 1);
+  const objectArgs = ["refs", "--file", simple, "--object", found.stdout.trimEnd().split("\t")[1]];
   const objectResult = run(...objectArgs, "--json");
   assert.equal(objectResult.status, 0, objectResult.stderr);
   const objectRefs = JSON.parse(objectResult.stdout);
@@ -148,6 +157,9 @@ try {
   const structure = run("export-structure", privateFile, "--out", sharedFile);
   assert.equal(structure.status, 0, structure.stderr);
   const shared = await readFile(sharedFile, "utf8");
+  const sharedFind = run("find", "--file", sharedFile, "invoice");
+  assert.equal(sharedFind.status, 0, sharedFind.stderr);
+  assert.equal(sharedFind.stdout, find("invoice").stdout);
   const sharedOutgoing = run("refs", "--file", sharedFile, ...outgoingArgs, "--json");
   assert.equal(sharedOutgoing.status, 0, sharedOutgoing.stderr);
   const sharedPaths = JSON.parse(sharedOutgoing.stdout).paths;

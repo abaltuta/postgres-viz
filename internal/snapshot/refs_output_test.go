@@ -23,6 +23,11 @@ func TestReferencesOutputQualifiesEndpointNames(t *testing.T) {
 		{ID: "reads3", Source: "routine", Target: "column", Kind: "reads", Provenance: "parsed"},
 	}
 	const column = `"Billing Ops"."invoice.lines"."a""b"`
+	if got := s.Find("Invoice.Lines"); !slices.Equal(got, []Match{
+		{"table", `"Billing Ops"."invoice.lines"`}, {"column", column},
+	}) {
+		t.Fatalf("quoted results: %v", got)
+	}
 	refs, err := s.References(column, 2)
 	if err != nil {
 		t.Fatal(err)
@@ -113,6 +118,16 @@ func TestObjectReferencesOverloadsAndCollisions(t *testing.T) {
 		{ID: "constraint", Kind: "constraint", Schema: "sales", Name: "check", ParentID: "table"},
 	}
 	s.Relationships = []Relationship{{ID: "r", Source: "fn1", Target: "fn2", Kind: "calls", Provenance: "parsed"}}
+	if got := s.Find("SaLeS.ToTaL"); !slices.Equal(got, []Match{
+		{"function", "sales.total(input int)"}, {"function", "sales.total(input numeric)"},
+	}) {
+		t.Fatalf("overload results: %v", got)
+	}
+	if got := s.Find("orders.check"); !slices.Equal(got, []Match{
+		{"constraint", "sales.orders.check"}, {"policy", "sales.orders.check"},
+	}) {
+		t.Fatalf("parent-scoped results: %v", got)
+	}
 	for _, fn := range s.Objects[:2] {
 		refs, err := s.ObjectReferences("sales."+fn.Name, 2)
 		if err != nil || refs.Object.ID != fn.ID || (len(refs.Paths) == 1) != (fn.ID == "fn2") {

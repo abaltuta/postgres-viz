@@ -19,6 +19,13 @@ INSERT INTO review.orders VALUES (10);
 INSERT INTO "Actual, Data".orders VALUES (20);
 CREATE TABLE review.audit(sum bigint);
 INSERT INTO review.audit VALUES (99);
+CREATE TABLE review.pagination(page_size int, skip_rows int);
+INSERT INTO review.pagination VALUES (1, 1);
+CREATE FUNCTION review.paged_union() RETURNS SETOF int LANGUAGE sql AS $$
+  SELECT 10 UNION ALL SELECT 20 ORDER BY 1
+  LIMIT (SELECT page_size FROM review.pagination)
+  OFFSET (SELECT skip_rows FROM review.pagination)
+$$;
 CREATE FUNCTION review.implicit_output() RETURNS bigint LANGUAGE sql
   AS $$ SELECT (SELECT sum FROM (SELECT sum(o.total) FROM review.orders AS o) q) FROM review.audit $$;
 CREATE FUNCTION review.by_path() RETURNS int LANGUAGE sql SET search_path = "Actual, Data", review
@@ -31,7 +38,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]int{"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10} {
+	for name, want := range map[string]int{"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10, "paged_union": 20} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
 			t.Fatalf("%s: got %d, want %d (%v)", name, got, want, err)
@@ -41,6 +48,8 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	for column, want := range map[string][]string{
 		"review.orders.total":         {"review.implicit_output()", "review.sampled()"},
 		"review.audit.sum":            {},
+		"review.pagination.page_size": {"review.paged_union()"},
+		"review.pagination.skip_rows": {"review.paged_union()"},
 		`"Actual, Data".orders.total`: {"review.by_path()", "review.forward_cte()"},
 	} {
 		refs, err := s.References(column, 1)
