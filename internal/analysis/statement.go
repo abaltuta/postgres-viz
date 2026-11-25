@@ -58,6 +58,7 @@ func (a *analyzer) statement(stmt node, parent *scope) binding {
 		case "InsertStmt":
 			source := a.statement(child(n, "selectStmt"), s)
 			a.insertTargets(n["cols"], rel, source)
+			a.expr(n["cols"], s)
 			bindTarget()
 			if conflict := child(n, "onConflictClause"); conflict != nil {
 				for _, elem := range items(child(conflict, "infer")["indexElems"]) {

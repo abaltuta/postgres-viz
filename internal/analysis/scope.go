@@ -510,8 +510,12 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 		}
 		return binding{columns: []output{{name, ids}}}
 	}
-	if f := child(value, "FuncCall"); name == "" && f != nil {
-		name = last(names(f["funcname"]))
+	if name == "" {
+		if f := child(value, "FuncCall"); f != nil {
+			name = last(names(f["funcname"]))
+		} else if child(value, "CoalesceExpr") != nil {
+			name = "coalesce"
+		}
 	}
 	// A composite expression ending in .* expands according to its result type.
 	return binding{

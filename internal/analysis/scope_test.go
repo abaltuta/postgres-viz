@@ -45,6 +45,8 @@ func TestSQLScopesAndWrites(t *testing.T) {
 		{"nested CTE shadows forward sibling", "WITH RECURSIVE a AS (WITH orders(n) AS (SELECT total FROM public.orders) SELECT n FROM orders), orders(n) AS (SELECT id FROM customers) SELECT n FROM a", []string{"reads orders.total", "reads customers.id"}},
 		{"join alias", "SELECT j.debit, j.who FROM (orders o JOIN customers c ON c.id=o.customer_id) j(key,debit,cid,label,pk,who)", []string{"reads orders.total", "reads orders.customer_id", "reads customers.id", "reads customers.name"}},
 		{"order alias", "SELECT o.total AS id FROM orders o ORDER BY id", []string{"reads orders.total"}},
+		{"implicit coalesce output", `SELECT (SELECT "coalesce" FROM (SELECT COALESCE(1, 2)) s) FROM t`, []string{"reads t"}},
+		{"explicit coalesce output", `SELECT (SELECT "coalesce" + renamed FROM (SELECT COALESCE(1, 2) AS renamed) s) FROM t`, []string{"reads t.coalesce"}},
 		{"set operation", "WITH all_ids(k) AS (SELECT o.customer_id FROM orders o UNION ALL SELECT c.id FROM customers c) SELECT v.id FROM all_ids AS v(id)", []string{"reads orders.customer_id", "reads customers.id"}},
 		{"star", "WITH picked AS (SELECT o.* FROM orders o JOIN customers c ON c.id=o.customer_id) SELECT p.total FROM picked p", []string{"reads orders.id", "reads orders.total", "reads orders.customer_id", "reads orders.Display Name", "reads customers.id"}},
 		{"insert select", `INSERT INTO orders (customer_id, "Display Name") SELECT id, name FROM customers`, []string{"inserts orders.customer_id", "inserts orders.Display Name", "reads customers.id", "reads customers.name"}},
@@ -57,6 +59,8 @@ func TestSQLScopesAndWrites(t *testing.T) {
 		{"quoted", `SELECT '🍋', o."Display Name" FROM orders AS o`, []string{"reads orders.Display Name"}},
 	}
 	s := scopeCatalog()
+	s.Objects = append(s.Objects, snapshot.Object{ID: "t", Name: "t", Schema: "public", Kind: "table"})
+	s.Columns = append(s.Columns, snapshot.Column{ID: "t.coalesce", ObjectID: "t", Name: "coalesce", Position: 1})
 	var routines []snapshot.Routine
 	for i, tc := range cases {
 		id := fmt.Sprintf("f%d", i)

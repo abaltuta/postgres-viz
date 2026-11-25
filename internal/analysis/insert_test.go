@@ -84,3 +84,35 @@ func TestInsertColumnWrites(t *testing.T) {
 		})
 	}
 }
+
+func TestInsertTargetSubscriptReads(t *testing.T) {
+	s := scopeCatalog()
+	s.Objects = append(s.Objects, snapshot.Object{ID: "arrays", Name: "arrays", Schema: "public", Kind: "table"})
+	s.Columns = append(s.Columns, snapshot.Column{ID: "arrays.vals", ObjectID: "arrays", Name: "vals", Position: 1})
+	body := `WITH customers AS (SELECT 1 AS id)
+INSERT INTO arrays (vals[(SELECT id FROM customers):(SELECT a.id FROM audit a)]) VALUES (ARRAY[7])`
+	r := snapshot.Routine{ID: "put", Name: "put", Schema: "public", Language: "sql", Body: body, Definition: body}
+	if err := Analyze(context.Background(), s, []snapshot.Routine{r}); err != nil {
+		t.Fatal(err)
+	}
+	var edges, spans []string
+	for _, edge := range s.Relationships {
+		edges = append(edges, edge.Provenance+" "+edge.Kind+" "+edge.Target)
+	}
+	for _, evidence := range s.Evidence {
+		if evidence.Start != nil && evidence.End != nil {
+			spans = append(spans, body[*evidence.Start:*evidence.End])
+		}
+	}
+	slices.Sort(edges)
+	if want := []string{"parsed inserts arrays.vals", "parsed reads audit.id"}; !slices.Equal(edges, want) {
+		t.Errorf("relationships: got %v, want %v", edges, want)
+	}
+	slices.Sort(spans)
+	if want := []string{"a.id", "vals"}; !slices.Equal(spans, want) {
+		t.Errorf("evidence spans: got %v, want %v", spans, want)
+	}
+	if len(s.Diagnostics.Unresolved) != 0 {
+		t.Errorf("unresolved references: %+v", s.Diagnostics.Unresolved)
+	}
+}
