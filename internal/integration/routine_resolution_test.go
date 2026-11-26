@@ -30,6 +30,8 @@ CREATE FUNCTION review.implicit_output() RETURNS bigint LANGUAGE sql
   AS $$ SELECT (SELECT sum FROM (SELECT sum(o.total) FROM review.orders AS o) q) FROM review.audit $$;
 CREATE FUNCTION review.coalesce_output() RETURNS int LANGUAGE sql
   AS $$ SELECT (SELECT "coalesce" FROM (SELECT COALESCE(1, 2)) q) FROM review.audit $$;
+CREATE FUNCTION review.cast_output() RETURNS bigint LANGUAGE sql
+  AS $$ SELECT (SELECT total FROM (SELECT o.total::bigint FROM review.orders o) q) FROM "Actual, Data".orders $$;
 CREATE TABLE review.buffer(payload int[]);
 CREATE FUNCTION review.put() RETURNS int LANGUAGE sql AS $$
   INSERT INTO review.buffer (payload[(SELECT total FROM review.orders)]) VALUES (7)
@@ -45,7 +47,10 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]int{"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10, "paged_union": 20, "coalesce_output": 1, "put": 7} {
+	for name, want := range map[string]int{
+		"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10,
+		"paged_union": 20, "coalesce_output": 1, "put": 7, "cast_output": 10,
+	} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
 			t.Fatalf("%s: got %d, want %d (%v)", name, got, want, err)
@@ -53,7 +58,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	}
 	s := read(scan("--schema", "review", "--schema", "Actual, Data"))
 	for column, want := range map[string][]string{
-		"review.orders.total":         {"review.implicit_output()", "review.put()", "review.sampled()"},
+		"review.orders.total":         {"review.cast_output()", "review.implicit_output()", "review.put()", "review.sampled()"},
 		"review.audit.sum":            {},
 		"review.audit.coalesce":       {},
 		"review.pagination.page_size": {"review.paged_union()"},

@@ -511,17 +511,48 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 		return binding{columns: []output{{name, ids}}}
 	}
 	if name == "" {
-		if f := child(value, "FuncCall"); f != nil {
-			name = last(names(f["funcname"]))
-		} else if child(value, "CoalesceExpr") != nil {
-			name = "coalesce"
-		}
+		name = a.expressionName(value, s)
 	}
 	// A composite expression ending in .* expands according to its result type.
 	return binding{
 		columns:      []output{{name, a.expr(value, s)}},
 		unknownWidth: expandsStar(child(value, "A_Indirection")["indirection"]),
 	}
+}
+
+func (a *analyzer) expressionName(value any, s *scope) string {
+	var typeName string
+	if cast := child(value, "TypeCast"); cast != nil {
+		// A name from the argument wins over a type name. Among nested
+		// casts, the outermost type supplies the fallback.
+		typeName = last(names(child(cast, "typeName")["names"]))
+		for ; cast != nil; cast = child(value, "TypeCast") {
+			value = cast["arg"]
+		}
+		if cr := a.directColumn(value, s); cr != nil {
+			fields := items(cr["fields"])
+			if expandsStar(fields) {
+				fields = fields[:len(fields)-1]
+			}
+			if name := last(names(fields)); name != "" {
+				return name
+			}
+		}
+	}
+	if f := child(value, "FuncCall"); f != nil {
+		return last(names(f["funcname"]))
+	}
+	if child(value, "CoalesceExpr") != nil {
+		return "coalesce"
+	}
+	// Other expression forms may have their own PostgreSQL labels.
+	if child(value, "A_Const") != nil {
+		return typeName
+	}
+	if expr := child(value, "A_Expr"); expr != nil && str(expr, "kind") != "AEXPR_NULLIF" {
+		return typeName
+	}
+	return ""
 }
 
 func (a *analyzer) valuesRow(values any, s *scope) binding {

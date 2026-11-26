@@ -23,10 +23,21 @@ func TestFromSubqueryVisibility(t *testing.T) {
 		{"implicit function label", "SELECT (SELECT sum FROM (SELECT sum(o.total) FROM orders o) q) FROM audit", "orders.total"},
 		{"qualified function in CTE", "WITH totals AS (SELECT pg_catalog.sum(o.total) FROM orders o) SELECT (SELECT sum FROM totals) FROM audit", "orders.total"},
 		{"explicit alias overrides function label", "SELECT (SELECT sum FROM (SELECT sum(o.total) AS amount FROM orders o) q) FROM audit", "audit.sum orders.total"},
+		{"cast column label", "SELECT (SELECT id FROM (SELECT o.id::bigint FROM orders o) q) FROM audit", "orders.id"},
+		{"nested cast column label", "SELECT (SELECT id FROM (SELECT CAST(o.id AS bigint)::numeric FROM orders o) q) FROM audit", "orders.id"},
+		{"cast function label", "SELECT (SELECT sum FROM (SELECT pg_catalog.sum(o.total)::numeric FROM orders o) q) FROM audit", "orders.total"},
+		{"cast type label", "SELECT (SELECT int8 FROM (SELECT (o.total + o.id)::bigint FROM orders o) q) FROM audit", "orders.id orders.total"},
+		{"outer cast type label", `SELECT (SELECT "numeric" FROM (SELECT 1::bigint::numeric) q) FROM audit`, ""},
+		{"cast with unmodeled argument label", "SELECT (SELECT int8 FROM (SELECT GREATEST(1, 2)::bigint) q) FROM audit", "audit.int8"},
+		{"explicit alias overrides cast label", "SELECT (SELECT id + amount FROM (SELECT o.id::bigint AS amount FROM orders o) q) FROM audit", "audit.id orders.id"},
 	}
 	for _, language := range []string{"sql", "plpgsql"} {
 		s := scopeCatalog()
-		s.Columns = append(s.Columns, snapshot.Column{ID: "audit.sum", ObjectID: "audit", Name: "sum", Position: 3})
+		s.Columns = append(s.Columns,
+			snapshot.Column{ID: "audit.sum", ObjectID: "audit", Name: "sum", Position: 3},
+			snapshot.Column{ID: "audit.int8", ObjectID: "audit", Name: "int8", Position: 4},
+			snapshot.Column{ID: "audit.numeric", ObjectID: "audit", Name: "numeric", Position: 5},
+		)
 		var routines []snapshot.Routine
 		for _, tc := range cases {
 			body := tc.query
