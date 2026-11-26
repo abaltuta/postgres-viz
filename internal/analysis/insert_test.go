@@ -27,6 +27,9 @@ func TestInsertColumnWrites(t *testing.T) {
 		{"mixed known and unknown writes", "INSERT INTO destination VALUES (1); INSERT INTO destination SELECT 1, src.* FROM outside.source AS src", []string{"destination", "destination.first"}, false},
 		{"nested unavailable star width", "INSERT INTO destination SELECT q.* FROM (SELECT 1, src.* FROM outside.source AS src) AS q", []string{"destination"}, false},
 		{"partially aliased function star", "INSERT INTO destination SELECT 1, src.* FROM outside.pair() AS src(renamed)", []string{"destination"}, false},
+		{"ordinality with unknown function width", "INSERT INTO destination SELECT src.* FROM outside.pair() WITH ORDINALITY AS src", []string{"destination"}, false},
+		{"ordinality with potentially overloaded function", "INSERT INTO destination SELECT src.* FROM generate_series(1, 2) WITH ORDINALITY AS src", []string{"destination"}, false},
+		{"ordinality with known function width", "INSERT INTO destination SELECT src.* FROM pg_catalog.generate_series(1, 2) WITH ORDINALITY AS src", []string{"destination.first", "destination.second"}, false},
 		{"unknown composite select star", "INSERT INTO destination SELECT 1, (ROW('two', 2)::outside.pair).*", []string{"destination"}, false},
 		{"unknown composite values star", "INSERT INTO destination VALUES (1, (ROW('two', 2)::outside.pair).*)", []string{"destination"}, false},
 		{"aggregate star", "INSERT INTO destination SELECT count(*) FROM customers", []string{"destination.first"}, false},
@@ -34,13 +37,16 @@ func TestInsertColumnWrites(t *testing.T) {
 		{"PL/pgSQL", "BEGIN INSERT INTO destination VALUES (1); END;", []string{"destination.first"}, false},
 	}
 	s := scopeCatalog()
-	s.Objects = append(s.Objects, snapshot.Object{ID: "destination", Name: "destination", Schema: "public", Kind: "table"})
+	s.Objects = append(s.Objects,
+		snapshot.Object{ID: "destination", Name: "destination", Schema: "public", Kind: "table"},
+		snapshot.Object{ID: "overload", Name: "generate_series(integer, integer)", Schema: "public", Kind: "function"},
+	)
 	s.Columns = append(s.Columns,
 		snapshot.Column{ID: "destination.third", ObjectID: "destination", Name: "third", Position: 4},
 		snapshot.Column{ID: "destination.second", ObjectID: "destination", Name: "second", Position: 3},
 		snapshot.Column{ID: "destination.first", ObjectID: "destination", Name: "first", Position: 1},
 	)
-	var routines []snapshot.Routine
+	routines := []snapshot.Routine{{ID: "overload", Name: "generate_series", Schema: "public"}}
 	for _, tc := range cases {
 		routine := snapshot.Routine{ID: tc.name, Name: "record_write", Schema: "public", Language: "sql", Body: tc.sql, Definition: tc.sql}
 		if tc.name == "PL/pgSQL" {

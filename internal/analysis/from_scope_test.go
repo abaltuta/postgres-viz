@@ -30,6 +30,17 @@ func TestFromSubqueryVisibility(t *testing.T) {
 		{"outer cast type label", `SELECT (SELECT "numeric" FROM (SELECT 1::bigint::numeric) q) FROM audit`, ""},
 		{"cast with unmodeled argument label", "SELECT (SELECT int8 FROM (SELECT GREATEST(1, 2)::bigint) q) FROM audit", "audit.int8"},
 		{"explicit alias overrides cast label", "SELECT (SELECT id + amount FROM (SELECT o.id::bigint AS amount FROM orders o) q) FROM audit", "audit.id orders.id"},
+		{"ordinality shadows outer column", "SELECT (SELECT ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g) FROM audit", ""},
+		{"qualified ordinality", "SELECT g.ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g", ""},
+		{"implicit range name for ordinality", "SELECT generate_series.ordinality FROM generate_series(7, 7) WITH ORDINALITY", ""},
+		{"outer column without ordinality", "SELECT (SELECT ordinality FROM generate_series(7, 7) AS g) FROM audit", "audit.ordinality"},
+		{"alias before ordinality", "SELECT (SELECT ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g(value)) FROM audit", ""},
+		{"alias renames ordinality", "SELECT (SELECT ordinality + g.n FROM generate_series(7, 7) WITH ORDINALITY AS g(value, n)) FROM audit", "audit.ordinality"},
+		{"rows from ordinality after defined output", "SELECT (SELECT ordinality FROM ROWS FROM (json_to_record('{}') AS (x integer)) WITH ORDINALITY AS g(value)) FROM audit", ""},
+		{"rows from ordinal renamed after defined outputs", "SELECT (SELECT ordinality + g.n FROM ROWS FROM (json_to_record('{}') AS (x integer, y integer)) WITH ORDINALITY AS g(x, y, n)) FROM audit", "audit.ordinality"},
+		{"rows from ordinality follows all members", "SELECT (SELECT ordinality FROM ROWS FROM (json_to_record('{}') AS (x integer), pg_catalog.generate_series(7, 7)) WITH ORDINALITY AS g(x, n)) FROM audit", ""},
+		{"rows from known suffix after unknown outputs", "SELECT (SELECT id + ordinality FROM ROWS FROM (jsonb_each('{}'), json_to_record('{\"id\":1}') AS (x integer, id integer)) WITH ORDINALITY AS g(k)) FROM audit", ""},
+		{"ordinality after unknown outputs", "SELECT (SELECT ordinality FROM jsonb_each('{}') WITH ORDINALITY AS g) FROM audit", ""},
 	}
 	for _, language := range []string{"sql", "plpgsql"} {
 		s := scopeCatalog()
@@ -37,6 +48,7 @@ func TestFromSubqueryVisibility(t *testing.T) {
 			snapshot.Column{ID: "audit.sum", ObjectID: "audit", Name: "sum", Position: 3},
 			snapshot.Column{ID: "audit.int8", ObjectID: "audit", Name: "int8", Position: 4},
 			snapshot.Column{ID: "audit.numeric", ObjectID: "audit", Name: "numeric", Position: 5},
+			snapshot.Column{ID: "audit.ordinality", ObjectID: "audit", Name: "ordinality", Position: 6},
 		)
 		var routines []snapshot.Routine
 		for _, tc := range cases {

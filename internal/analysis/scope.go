@@ -369,6 +369,61 @@ func jsonTableOutputs(columns any) binding {
 	return b
 }
 
+func (a *analyzer) ordinalFunction(r node, s *scope) (binding, string) {
+	alias := child(r, "alias")
+	aliases := names(alias["colnames"])
+	functions := items(r["functions"])
+	var b binding
+	var defaultName string
+	for i, item := range functions {
+		pair := items(child(item, "List")["items"])
+		expr, definition := pair[0], pair[1]
+		name := a.expressionName(expr, s)
+		if i == 0 {
+			defaultName = name
+		}
+		if defs := items(child(definition, "List")["items"]); len(defs) > 0 {
+			for _, def := range defs {
+				b.columns = append(b.columns, output{name: str(child(def, "ColumnDef"), "colname")})
+			}
+			continue
+		}
+		if !a.isBuiltinGenerateSeries(child(expr, "FuncCall")) {
+			b.unknownWidth = true
+			continue
+		}
+		if aliasName := str(alias, "aliasname"); len(functions) == 1 && aliasName != "" {
+			name = aliasName
+		}
+		b.columns = append(b.columns, output{name: name})
+	}
+	// The known outputs give a lower bound on the ordinal's position. Keep
+	// the default name only when the aliases cannot reach that position.
+	if !b.unknownWidth || len(aliases) <= len(b.columns) {
+		b.columns = append(b.columns, output{name: "ordinality"})
+	}
+	// Renaming this prefix can discard names at uncertain positions, while
+	// leaving names past the end of the alias list intact.
+	for len(b.columns) < len(aliases) {
+		b.columns = append(b.columns, output{})
+	}
+	return b, defaultName
+}
+
+func (a *analyzer) isBuiltinGenerateSeries(call node) bool {
+	parts := names(call["funcname"])
+	const name = "generate_series"
+	if last(parts) != name {
+		return false
+	}
+	if len(parts) > 1 {
+		return parts[len(parts)-2] == "pg_catalog"
+	}
+	return !slices.ContainsFunc(a.functions[name], func(id string) bool {
+		return a.objs[id].Schema != "pg_catalog"
+	})
+}
+
 func (a *analyzer) from(item node, s *scope) binding {
 	var b binding
 	var alias node
@@ -407,6 +462,10 @@ func (a *analyzer) from(item node, s *scope) binding {
 		r := child(item, "RangeFunction")
 		alias = child(r, "alias")
 		a.expr(r["functions"], s)
+		if r["ordinality"] == true {
+			b, defaultName = a.ordinalFunction(r, s)
+			break
+		}
 		for _, name := range names(alias["colnames"]) {
 			b.columns = append(b.columns, output{name, nil})
 		}

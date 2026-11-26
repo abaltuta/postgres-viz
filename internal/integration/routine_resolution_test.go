@@ -17,8 +17,8 @@ CREATE TABLE review.orders(total int);
 CREATE TABLE "Actual, Data".orders(total int);
 INSERT INTO review.orders VALUES (10);
 INSERT INTO "Actual, Data".orders VALUES (20);
-CREATE TABLE review.audit(sum bigint, "coalesce" int);
-INSERT INTO review.audit VALUES (99, 99);
+CREATE TABLE review.audit(sum bigint, "coalesce" int, ordinality bigint);
+INSERT INTO review.audit VALUES (99, 99, 99);
 CREATE TABLE review.pagination(page_size int, skip_rows int);
 INSERT INTO review.pagination VALUES (1, 1);
 CREATE FUNCTION review.paged_union() RETURNS SETOF int LANGUAGE sql AS $$
@@ -32,6 +32,10 @@ CREATE FUNCTION review.coalesce_output() RETURNS int LANGUAGE sql
   AS $$ SELECT (SELECT "coalesce" FROM (SELECT COALESCE(1, 2)) q) FROM review.audit $$;
 CREATE FUNCTION review.cast_output() RETURNS bigint LANGUAGE sql
   AS $$ SELECT (SELECT total FROM (SELECT o.total::bigint FROM review.orders o) q) FROM "Actual, Data".orders $$;
+CREATE FUNCTION review.inner_ordinal() RETURNS bigint LANGUAGE sql
+  AS $$ SELECT (SELECT ordinality FROM generate_series(7,7) WITH ORDINALITY AS g) FROM review.audit $$;
+CREATE FUNCTION review.outer_ordinal() RETURNS bigint LANGUAGE sql
+  AS $$ SELECT (SELECT ordinality FROM generate_series(7,7) AS g) FROM review.audit $$;
 CREATE TABLE review.buffer(payload int[]);
 CREATE FUNCTION review.put() RETURNS int LANGUAGE sql AS $$
   INSERT INTO review.buffer (payload[(SELECT total FROM review.orders)]) VALUES (7)
@@ -50,6 +54,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	for name, want := range map[string]int{
 		"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10,
 		"paged_union": 20, "coalesce_output": 1, "put": 7, "cast_output": 10,
+		"inner_ordinal": 1, "outer_ordinal": 99,
 	} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
@@ -61,6 +66,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"review.orders.total":         {"review.cast_output()", "review.implicit_output()", "review.put()", "review.sampled()"},
 		"review.audit.sum":            {},
 		"review.audit.coalesce":       {},
+		"review.audit.ordinality":     {"review.outer_ordinal()"},
 		"review.pagination.page_size": {"review.paged_union()"},
 		"review.pagination.skip_rows": {"review.paged_union()"},
 		`"Actual, Data".orders.total`: {"review.by_path()", "review.forward_cte()"},
