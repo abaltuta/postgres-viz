@@ -1,6 +1,6 @@
 id = "postgres-viz"
 name = "postgres-viz"
-version = "0.1.0"
+version = "0.11.0"
 schema_version = 1
 authors = ["Andrei Baltuta"]
 description = "Explore PostgreSQL snapshots and navigate their objects and columns in Zed."
