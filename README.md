@@ -13,7 +13,7 @@ postgres-viz is a standalone CLI with a built-in browser viewer. Scan your datab
 **mise** (macOS, Linux, Windows)
 
 ```sh
-mise use -g github:abaltuta/postgres-viz@0.10.0
+mise use -g github:abaltuta/postgres-viz@0.11.0
 ```
 
 **Homebrew** (macOS, Linux)
