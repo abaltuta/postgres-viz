@@ -36,6 +36,10 @@ func TestFromSubqueryVisibility(t *testing.T) {
 		{"cast preserves nullif label and operand reads", `SELECT (SELECT "nullif" + int8 FROM (SELECT NULLIF(o.id, o.total)::bigint FROM orders o) q) FROM audit`, "audit.int8 orders.id orders.total"},
 		{"explicit alias overrides nullif label", `SELECT (SELECT "nullif" + amount FROM (SELECT NULLIF(o.total, 2) AS amount FROM orders o) q) FROM audit`, "audit.nullif orders.total"},
 		{"explicit alias overrides cast label", "SELECT (SELECT id + amount FROM (SELECT o.id::bigint AS amount FROM orders o) q) FROM audit", "audit.id orders.id"},
+		{"implicit subscript label", "SELECT q.amounts FROM (SELECT o.amounts[o.id] FROM orders o) q", "orders.amounts orders.id"},
+		{"cast preserves subscript label", "SELECT q.amounts FROM (SELECT o.amounts[o.id]::bigint FROM orders o) q", "orders.amounts orders.id"},
+		{"explicit alias overrides subscript label", "SELECT (SELECT amounts + q.amount FROM (SELECT o.amounts[o.id] AS amount FROM orders o) q) FROM audit", "audit.amounts orders.amounts orders.id"},
+		{"subscript ignores index as label", "SELECT (SELECT id + q.array FROM (SELECT (ARRAY[o.total])[o.id] FROM orders o) q) FROM audit", "audit.id orders.id orders.total"},
 		{"ordinality shadows outer column", "SELECT (SELECT ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g) FROM audit", ""},
 		{"qualified ordinality", "SELECT g.ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g", ""},
 		{"implicit range name for ordinality", "SELECT generate_series.ordinality FROM generate_series(7, 7) WITH ORDINALITY", ""},
@@ -58,6 +62,8 @@ func TestFromSubqueryVisibility(t *testing.T) {
 			snapshot.Column{ID: "audit.greatest", ObjectID: "audit", Name: "greatest", Position: 7},
 			snapshot.Column{ID: "audit.least", ObjectID: "audit", Name: "least", Position: 8},
 			snapshot.Column{ID: "audit.nullif", ObjectID: "audit", Name: "nullif", Position: 9},
+			snapshot.Column{ID: "audit.amounts", ObjectID: "audit", Name: "amounts", Position: 10},
+			snapshot.Column{ID: "orders.amounts", ObjectID: "orders", Name: "amounts", Position: 5},
 		)
 		var routines []snapshot.Routine
 		for _, tc := range cases {

@@ -369,7 +369,7 @@ func jsonTableOutputs(columns any) binding {
 	return b
 }
 
-func (a *analyzer) ordinalFunction(r node, s *scope) (binding, string) {
+func (a *analyzer) ordinalFunction(r node) (binding, string) {
 	alias := child(r, "alias")
 	aliases := names(alias["colnames"])
 	functions := items(r["functions"])
@@ -378,7 +378,7 @@ func (a *analyzer) ordinalFunction(r node, s *scope) (binding, string) {
 	for i, item := range functions {
 		pair := items(child(item, "List")["items"])
 		expr, definition := pair[0], pair[1]
-		name := a.expressionName(expr, s)
+		name := expressionName(expr)
 		if i == 0 {
 			defaultName = name
 		}
@@ -463,7 +463,7 @@ func (a *analyzer) from(item node, s *scope) binding {
 		alias = child(r, "alias")
 		a.expr(r["functions"], s)
 		if r["ordinality"] == true {
-			b, defaultName = a.ordinalFunction(r, s)
+			b, defaultName = a.ordinalFunction(r)
 			break
 		}
 		for _, name := range names(alias["colnames"]) {
@@ -570,7 +570,7 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 		return binding{columns: []output{{name, ids}}}
 	}
 	if name == "" {
-		name = a.expressionName(value, s)
+		name = expressionName(value)
 	}
 	// A composite expression ending in .* expands according to its result type.
 	return binding{
@@ -579,27 +579,43 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 	}
 }
 
-func (a *analyzer) expressionName(value any, s *scope) string {
+func expressionName(value any) string {
 	var typeName string
-	if cast := child(value, "TypeCast"); cast != nil {
-		// A name from the argument wins over a type name. Among nested
-		// casts, the outermost type supplies the fallback.
-		typeName = last(names(child(cast, "typeName")["names"]))
-		for ; cast != nil; cast = child(value, "TypeCast") {
+	for {
+		if cast := child(value, "TypeCast"); cast != nil {
+			// A name from the argument wins over the outermost cast type.
+			if typeName == "" {
+				typeName = last(names(child(cast, "typeName")["names"]))
+			}
 			value = cast["arg"]
+			continue
 		}
-		if cr := a.directColumn(value, s); cr != nil {
-			fields := items(cr["fields"])
+		if ind := child(value, "A_Indirection"); ind != nil {
+			// Subscripts leave the last field or operand name intact.
+			fields := items(ind["indirection"])
 			if expandsStar(fields) {
 				fields = fields[:len(fields)-1]
 			}
 			if name := last(names(fields)); name != "" {
 				return name
 			}
+			value = ind["arg"]
+			continue
 		}
+		break
+	}
+	if cr := child(value, "ColumnRef"); cr != nil {
+		fields := items(cr["fields"])
+		if expandsStar(fields) {
+			fields = fields[:len(fields)-1]
+		}
+		return last(names(fields))
 	}
 	if f := child(value, "FuncCall"); f != nil {
 		return last(names(f["funcname"]))
+	}
+	if child(value, "A_ArrayExpr") != nil {
+		return "array"
 	}
 	if child(value, "CoalesceExpr") != nil {
 		return "coalesce"

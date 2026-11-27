@@ -43,6 +43,10 @@ CREATE FUNCTION review.inner_ordinal() RETURNS bigint LANGUAGE sql
 CREATE FUNCTION review.outer_ordinal() RETURNS bigint LANGUAGE sql
   AS $$ SELECT (SELECT ordinality FROM generate_series(7,7) AS g) FROM review.audit $$;
 CREATE TABLE review.buffer(payload int[]);
+CREATE TABLE review.samples(vals int[], pos int);
+INSERT INTO review.samples VALUES (ARRAY[3, 7], 2);
+CREATE FUNCTION review.sample_value() RETURNS int LANGUAGE sql
+  AS $$ SELECT q.vals FROM (SELECT vals[pos] FROM review.samples) q $$;
 CREATE FUNCTION review.put() RETURNS int LANGUAGE sql AS $$
   INSERT INTO review.buffer (payload[(SELECT total FROM review.orders)]) VALUES (7)
   RETURNING payload[10]
@@ -61,6 +65,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10,
 		"paged_union": 20, "coalesce_output": 1, "put": 7, "cast_output": 10,
 		"inner_ordinal": 1, "outer_ordinal": 99, "greatest_output": 10, "nullif_output": 10,
+		"sample_value": 7,
 	} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
@@ -76,6 +81,8 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"review.audit.ordinality":     {"review.outer_ordinal()"},
 		"review.pagination.page_size": {"review.paged_union()"},
 		"review.pagination.skip_rows": {"review.paged_union()"},
+		"review.samples.vals":         {"review.sample_value()"},
+		"review.samples.pos":          {"review.sample_value()"},
 		`"Actual, Data".orders.total`: {"review.by_path()", "review.forward_cte()"},
 	} {
 		refs, err := s.References(column, 1)
