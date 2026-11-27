@@ -141,7 +141,13 @@ func TestSelectNameResolution(t *testing.T) {
 		{"null test", `SELECT q."?column?" FROM (SELECT id IS NULL FROM orders) q`, `q."?column?"`, "orders.id", ""},
 		{"null test with cast", `SELECT q.bool FROM (SELECT (id IS NOT NULL)::boolean FROM orders) q`, "q.bool", "orders.id", ""},
 		{"null test in CASE", `SELECT q."case" FROM (SELECT CASE WHEN false THEN true ELSE id IS NULL END FROM orders) q`, `q."case"`, "orders.id", ""},
+		{"boolean test", `SELECT q."?column?" FROM (SELECT NULL IS UNKNOWN) q`, `q."?column?"`, "", ""},
+		{"boolean test with cast", `SELECT q.bool FROM (SELECT (id = 1 IS NOT TRUE)::boolean FROM orders) q`, "q.bool", "orders.id", ""},
+		{"boolean test in CASE", `SELECT q."case" FROM (SELECT CASE WHEN false THEN true ELSE (id = 1) IS FALSE END FROM orders) q`, `q."case"`, "orders.id", ""},
 		{"JSON object with cast", `SELECT q.json_object FROM (SELECT JSON_OBJECT('key' VALUE id)::text FROM customers) q`, "q.json_object", "customers.id", ""},
+		{"JSON array", `SELECT q.json_array FROM (SELECT JSON_ARRAY(7)) q`, "q.json_array", "", ""},
+		{"JSON array with cast", `SELECT q.json_array FROM (SELECT JSON_ARRAY(id)::text FROM orders) q`, "q.json_array", "orders.id", ""},
+		{"JSON array with query", `SELECT q.json_array FROM (SELECT JSON_ARRAY(SELECT id FROM orders)) q`, "q.json_array", "orders.id", ""},
 		{"JSON object function", `SELECT q.json_object FROM (SELECT pg_catalog.json_object(ARRAY['key', name])::text FROM customers) q`, "q.json_object", "customers.name", ""},
 		{"order expression", "SELECT total AS id FROM orders ORDER BY id + 1", "id", "orders.id", ""},
 		{"group alias", "SELECT total AS amount FROM orders GROUP BY amount", "amount", "orders.total", ""},
@@ -210,7 +216,9 @@ func TestImplicitOutputNamesInPLpgSQL(t *testing.T) {
 		PERFORM q.name FROM (SELECT name COLLATE "C" FROM customers) q;
 		PERFORM q.grouping FROM (SELECT GROUPING(id) FROM orders GROUP BY id) q;
 		PERFORM q."?column?" FROM (SELECT id IS NULL FROM orders) q;
+		PERFORM b."?column?" FROM (SELECT (total > 0) IS UNKNOWN FROM orders) b;
 		PERFORM q.json_object FROM (SELECT JSON_OBJECT(name VALUE id) FROM customers) q;
+		PERFORM q.json_array FROM (SELECT JSON_ARRAY(name) FROM customers) q;
 	END`
 	routine := snapshot.Routine{ID: "implicit_outputs", Name: "implicit_outputs", Schema: "public", Language: "plpgsql", Returns: "void", Body: body,
 		Definition: "CREATE FUNCTION implicit_outputs() RETURNS void LANGUAGE plpgsql AS $$" + body + "$$"}
@@ -224,8 +232,10 @@ func TestImplicitOutputNamesInPLpgSQL(t *testing.T) {
 		{"q.name", "customers.name"},
 		{"q.grouping", "orders.id"},
 		{`q."?column?"`, "orders.id"},
+		{`b."?column?"`, "orders.total"},
 		{"q.json_object", "customers.name"},
 		{"q.json_object", "customers.id"},
+		{"q.json_array", "customers.name"},
 	} {
 		ref, target := dep.ref, dep.target
 		start := strings.Index(routine.Definition, ref)

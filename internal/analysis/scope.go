@@ -664,6 +664,9 @@ func expressionName(value any) string {
 	if child(value, "JsonObjectConstructor") != nil {
 		return "json_object"
 	}
+	if child(value, "JsonArrayConstructor") != nil || child(value, "JsonArrayQueryConstructor") != nil {
+		return "json_array"
+	}
 	if child(value, "A_ArrayExpr") != nil {
 		return "array"
 	}
@@ -719,7 +722,8 @@ func expressionName(value any) string {
 		return "xmlelement"
 	}
 	// Other expression forms may have their own PostgreSQL labels.
-	if child(value, "A_Const") != nil || child(value, "A_Expr") != nil || child(value, "NullTest") != nil {
+	if child(value, "A_Const") != nil || child(value, "A_Expr") != nil ||
+		child(value, "NullTest") != nil || child(value, "BooleanTest") != nil {
 		if fallbackName != "" {
 			return fallbackName
 		}

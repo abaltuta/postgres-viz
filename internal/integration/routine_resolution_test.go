@@ -94,6 +94,12 @@ $$;
 CREATE FUNCTION review.json_object_result() RETURNS int LANGUAGE sql AS $$
   SELECT (q.json_object ->> 'k')::int FROM (SELECT JSON_OBJECT('k' VALUE n) FROM review.documents) q
 $$;
+CREATE FUNCTION review.boolean_test_result() RETURNS int LANGUAGE sql AS $$
+  SELECT q."?column?"::int FROM (SELECT (pos > 0) IS TRUE FROM review.samples) q
+$$;
+CREATE FUNCTION review.json_array_result() RETURNS int LANGUAGE sql AS $$
+  SELECT (q.json_array ->> 0)::int FROM (SELECT JSON_ARRAY(SELECT n FROM review.documents)) q
+$$;
 CREATE FUNCTION review.put() RETURNS int LANGUAGE sql AS $$
   INSERT INTO review.buffer (payload[(SELECT total FROM review.orders)]) VALUES (7)
   RETURNING payload[10]
@@ -119,6 +125,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"collated_result": 7, "grouping_result": 1,
 		"row_result": 1, "xml_element_result": 1,
 		"null_test_result": 0, "json_object_result": 7,
+		"boolean_test_result": 1, "json_array_result": 7,
 	} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
@@ -135,8 +142,8 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"review.pagination.page_size": {"review.paged_union()"},
 		"review.pagination.skip_rows": {"review.paged_union()"},
 		"review.samples.vals":         {"review.null_test_result()", "review.sample_value()"},
-		"review.samples.pos":          {"review.exists_result()", "review.grouping_result()", "review.sample_value()", "review.series_result()", "review.xml_element_result()"},
-		"review.documents.n":          {"review.array_result()", "review.case_result()", "review.collated_result()", "review.cycle_result()", "review.json_object_result()", "review.row_result()", "review.scalar_result()"},
+		"review.samples.pos":          {"review.boolean_test_result()", "review.exists_result()", "review.grouping_result()", "review.sample_value()", "review.series_result()", "review.xml_element_result()"},
+		"review.documents.n":          {"review.array_result()", "review.case_result()", "review.collated_result()", "review.cycle_result()", "review.json_array_result()", "review.json_object_result()", "review.row_result()", "review.scalar_result()"},
 		"review.documents.doc":        {"review.xml_result()"},
 		`"Actual, Data".orders.total`: {"review.by_path()", "review.forward_cte()"},
 	} {
