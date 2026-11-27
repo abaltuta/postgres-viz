@@ -52,6 +52,17 @@ func TestFromSubqueryVisibility(t *testing.T) {
 		{"scalar subquery label from set operation", "SELECT q.n FROM (SELECT (SELECT o.total AS n FROM orders o UNION ALL SELECT c.id FROM customers c LIMIT 1)) q", "customers.id orders.total"},
 		{"default scalar subquery label", `SELECT q."?column?" FROM (SELECT (SELECT 7)) q`, ""},
 		{"explicit alias overrides scalar subquery label", "SELECT q.amount FROM (SELECT (SELECT total FROM orders) AS amount) q", "orders.total"},
+		{"current date label", "SELECT q.current_date FROM (SELECT CURRENT_DATE) q", ""},
+		{"other SQL value function labels", `SELECT q.current_time, q.current_timestamp, q.localtime, q.localtimestamp,
+			q.current_role, q.current_user, q.user, q.session_user, q.current_catalog, q.current_schema
+			FROM (SELECT CURRENT_TIME, CURRENT_TIMESTAMP, LOCALTIME, LOCALTIMESTAMP,
+				CURRENT_ROLE, CURRENT_USER, USER, SESSION_USER, CURRENT_CATALOG, CURRENT_SCHEMA) q`, ""},
+		{"SQL value function labels with precision", `SELECT q.current_time, q.current_timestamp, q.localtime, q.localtimestamp
+			FROM (SELECT CURRENT_TIME(0), CURRENT_TIMESTAMP(1), LOCALTIME(2), LOCALTIMESTAMP(3)) q`, ""},
+		{"cast preserves SQL value function label", "SELECT q.current_date FROM (SELECT CURRENT_DATE::text) q", ""},
+		{"array subquery label", "SELECT q.array FROM (SELECT ARRAY(SELECT 7)) q", ""},
+		{"cast preserves array subquery label and reads", "SELECT q.array FROM (SELECT ARRAY(SELECT o.total FROM orders o)::bigint[]) q", "orders.total"},
+		{"exists subquery label and reads", "SELECT q.exists FROM (SELECT EXISTS(SELECT 1 FROM orders WHERE id = 7)) q", "orders.id"},
 		{"xmltable qualified column", `SELECT x.n FROM XMLTABLE('/r' PASSING XML '<r>8</r>' COLUMNS n int PATH '.') x`, ""},
 		{"xmltable implicit range name and alias prefix", `SELECT xmltable.n, x.renamed, x.seq FROM XMLTABLE('/r' PASSING XML '<r>8</r>' COLUMNS n int PATH '.') CROSS JOIN XMLTABLE('/r' PASSING XML '<r>8</r>' COLUMNS n int PATH '.', seq FOR ORDINALITY) AS x(renamed)`, ""},
 		{"xmltable lateral expressions and column shadowing", `SELECT (SELECT note FROM orders o CROSS JOIN XMLTABLE((o.total::text) PASSING (o.customer_id::text::xml) COLUMNS note int PATH (o.amounts::text) DEFAULT o.id) x) FROM audit`, "orders.amounts orders.customer_id orders.id orders.total"},

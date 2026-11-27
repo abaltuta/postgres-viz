@@ -659,8 +659,35 @@ func expressionName(value any) string {
 	if child(value, "CoalesceExpr") != nil {
 		return "coalesce"
 	}
-	if str(child(value, "SubLink"), "subLinkType") == "EXISTS_SUBLINK" {
+	switch str(child(value, "SubLink"), "subLinkType") {
+	case "EXISTS_SUBLINK":
 		return "exists"
+	case "ARRAY_SUBLINK":
+		return "array"
+	}
+	switch str(child(value, "SQLValueFunction"), "op") {
+	case "SVFOP_CURRENT_DATE":
+		return "current_date"
+	case "SVFOP_CURRENT_TIME", "SVFOP_CURRENT_TIME_N":
+		return "current_time"
+	case "SVFOP_CURRENT_TIMESTAMP", "SVFOP_CURRENT_TIMESTAMP_N":
+		return "current_timestamp"
+	case "SVFOP_LOCALTIME", "SVFOP_LOCALTIME_N":
+		return "localtime"
+	case "SVFOP_LOCALTIMESTAMP", "SVFOP_LOCALTIMESTAMP_N":
+		return "localtimestamp"
+	case "SVFOP_CURRENT_ROLE":
+		return "current_role"
+	case "SVFOP_CURRENT_USER":
+		return "current_user"
+	case "SVFOP_USER":
+		return "user"
+	case "SVFOP_SESSION_USER":
+		return "session_user"
+	case "SVFOP_CURRENT_CATALOG":
+		return "current_catalog"
+	case "SVFOP_CURRENT_SCHEMA":
+		return "current_schema"
 	}
 	if str(child(value, "A_Expr"), "kind") == "AEXPR_NULLIF" {
 		return "nullif"
