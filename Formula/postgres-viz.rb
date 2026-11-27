@@ -1,26 +1,26 @@
 class PostgresViz < Formula
   desc "Explore PostgreSQL dependencies in an offline viewer"
   homepage "https://github.com/abaltuta/postgres-viz"
-  version "0.11.0"
+  version "0.11.1"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/abaltuta/postgres-viz/releases/download/v#{version}/postgres-viz-darwin-arm64.zip"
-      sha256 "5ddcc73eeaef464cfd3eb0509ebb397ec191b5c03369958813c8ca903a9fece0"
+      sha256 "1922400a6237652eff91776d6d331be2b297bd96aa9e0b31d08091f6c43df512"
     else
       url "https://github.com/abaltuta/postgres-viz/releases/download/v#{version}/postgres-viz-darwin-amd64.zip"
-      sha256 "21adb93a9ea061dfa6e8c1f9d32dc82fcfd7d5a17bd265a42b577df89fcf5cf3"
+      sha256 "ed329f1c26882e23c5a8f8a13de6eea5902c5d2354d389c6f72b0415922e586e"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
       url "https://github.com/abaltuta/postgres-viz/releases/download/v#{version}/postgres-viz-linux-arm64.zip"
-      sha256 "17171afa31548859445c92f128cc87060c5c2cc5af15885f501c34b4e69f023d"
+      sha256 "2d56305f726ce93776e5affe2cbdc142ad702171c4430b3cbb18180ed0fe1365"
     else
       url "https://github.com/abaltuta/postgres-viz/releases/download/v#{version}/postgres-viz-linux-amd64.zip"
-      sha256 "32d125b45852d8c1f628738f1daf731eab5b6fac28cd35c8f1339c467d3a460b"
+      sha256 "1e3ebe35ce5162737f5838df477af9dfac82cab885cc2a722a8169639f3aa0f8"
     end
   end
 

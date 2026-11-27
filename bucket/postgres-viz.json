@@ -1,16 +1,16 @@
 {
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Explore PostgreSQL dependencies in an offline viewer.",
   "homepage": "https://github.com/abaltuta/postgres-viz",
   "license": "MIT",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/abaltuta/postgres-viz/releases/download/v0.11.0/postgres-viz-windows-amd64.zip",
-      "hash": "c42932095b1a687291e0fbafba26826f5fc87c60b5c902f9bbcc91edc2d7d4f5"
+      "url": "https://github.com/abaltuta/postgres-viz/releases/download/v0.11.1/postgres-viz-windows-amd64.zip",
+      "hash": "1379b6adb4c4d233c845e2f21216d39da4f284bf3bb6e7b6209528d5baa7210f"
     },
     "arm64": {
-      "url": "https://github.com/abaltuta/postgres-viz/releases/download/v0.11.0/postgres-viz-windows-arm64.zip",
-      "hash": "3a5148f40b11587d1fb30bbd6445ce2cc8b71c06ccbd9b74c1efbfb1583054ba"
+      "url": "https://github.com/abaltuta/postgres-viz/releases/download/v0.11.1/postgres-viz-windows-arm64.zip",
+      "hash": "442fe57e0b897c51792307116971bedb6fe3027e1627743f512e7e26e3dd9ac8"
     }
   },
   "bin": "postgres-viz.exe"
