@@ -148,6 +148,12 @@ func TestSelectNameResolution(t *testing.T) {
 		{"JSON array", `SELECT q.json_array FROM (SELECT JSON_ARRAY(7)) q`, "q.json_array", "", ""},
 		{"JSON array with cast", `SELECT q.json_array FROM (SELECT JSON_ARRAY(id)::text FROM orders) q`, "q.json_array", "orders.id", ""},
 		{"JSON array with query", `SELECT q.json_array FROM (SELECT JSON_ARRAY(SELECT id FROM orders)) q`, "q.json_array", "orders.id", ""},
+		{"JSON array aggregate", `SELECT q.json_arrayagg FROM (SELECT JSON_ARRAYAGG(7)) q`, "q.json_arrayagg", "", ""},
+		{"JSON array aggregate with cast", `SELECT q.json_arrayagg FROM (SELECT JSON_ARRAYAGG(id)::text FROM orders) q`, "q.json_arrayagg", "orders.id", ""},
+		{"JSON array aggregate with alias", `SELECT q.totals FROM (SELECT JSON_ARRAYAGG(total) AS totals FROM orders) q`, "q.totals", "orders.total", ""},
+		{"XML serialize", `SELECT q.xmlserialize FROM (SELECT XMLSERIALIZE(CONTENT XML '<r/>' AS text)) q`, "q.xmlserialize", "", ""},
+		{"XML serialize with cast", `SELECT q.xmlserialize FROM (SELECT XMLSERIALIZE(CONTENT XMLELEMENT(NAME r, total) AS text)::varchar FROM orders) q`, "q.xmlserialize", "orders.total", ""},
+		{"XML serialize with alias", `SELECT q.serialized FROM (SELECT XMLSERIALIZE(CONTENT XMLELEMENT(NAME r, total) AS text) AS serialized FROM orders) q`, "q.serialized", "orders.total", ""},
 		{"JSON object function", `SELECT q.json_object FROM (SELECT pg_catalog.json_object(ARRAY['key', name])::text FROM customers) q`, "q.json_object", "customers.name", ""},
 		{"order expression", "SELECT total AS id FROM orders ORDER BY id + 1", "id", "orders.id", ""},
 		{"group alias", "SELECT total AS amount FROM orders GROUP BY amount", "amount", "orders.total", ""},
@@ -219,6 +225,8 @@ func TestImplicitOutputNamesInPLpgSQL(t *testing.T) {
 		PERFORM b."?column?" FROM (SELECT (total > 0) IS UNKNOWN FROM orders) b;
 		PERFORM q.json_object FROM (SELECT JSON_OBJECT(name VALUE id) FROM customers) q;
 		PERFORM q.json_array FROM (SELECT JSON_ARRAY(name) FROM customers) q;
+		PERFORM a.json_arrayagg FROM (SELECT JSON_ARRAYAGG(total ORDER BY id) FILTER (WHERE customer_id > 0) FROM orders) a;
+		PERFORM q.xmlserialize FROM (SELECT XMLSERIALIZE(CONTENT XMLELEMENT(NAME r, name) AS text) FROM customers) q;
 	END`
 	routine := snapshot.Routine{ID: "implicit_outputs", Name: "implicit_outputs", Schema: "public", Language: "plpgsql", Returns: "void", Body: body,
 		Definition: "CREATE FUNCTION implicit_outputs() RETURNS void LANGUAGE plpgsql AS $$" + body + "$$"}
@@ -236,6 +244,10 @@ func TestImplicitOutputNamesInPLpgSQL(t *testing.T) {
 		{"q.json_object", "customers.name"},
 		{"q.json_object", "customers.id"},
 		{"q.json_array", "customers.name"},
+		{"a.json_arrayagg", "orders.total"},
+		{"a.json_arrayagg", "orders.id"},
+		{"a.json_arrayagg", "orders.customer_id"},
+		{"q.xmlserialize", "customers.name"},
 	} {
 		ref, target := dep.ref, dep.target
 		start := strings.Index(routine.Definition, ref)
