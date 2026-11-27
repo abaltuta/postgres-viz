@@ -138,6 +138,11 @@ func TestSelectNameResolution(t *testing.T) {
 		{"grouping", `SELECT q.grouping FROM (SELECT GROUPING(id) FROM orders GROUP BY id) q`, "q.grouping", "orders.id", ""},
 		{"grouping with cast", `SELECT q.grouping FROM (SELECT GROUPING(id)::bigint FROM orders GROUP BY id) q`, "q.grouping", "orders.id", ""},
 		{"grouping with alias", `SELECT q.mask FROM (SELECT GROUPING(id) AS mask FROM orders GROUP BY id) q`, "q.mask", "orders.id", ""},
+		{"null test", `SELECT q."?column?" FROM (SELECT id IS NULL FROM orders) q`, `q."?column?"`, "orders.id", ""},
+		{"null test with cast", `SELECT q.bool FROM (SELECT (id IS NOT NULL)::boolean FROM orders) q`, "q.bool", "orders.id", ""},
+		{"null test in CASE", `SELECT q."case" FROM (SELECT CASE WHEN false THEN true ELSE id IS NULL END FROM orders) q`, `q."case"`, "orders.id", ""},
+		{"JSON object with cast", `SELECT q.json_object FROM (SELECT JSON_OBJECT('key' VALUE id)::text FROM customers) q`, "q.json_object", "customers.id", ""},
+		{"JSON object function", `SELECT q.json_object FROM (SELECT pg_catalog.json_object(ARRAY['key', name])::text FROM customers) q`, "q.json_object", "customers.name", ""},
 		{"order expression", "SELECT total AS id FROM orders ORDER BY id + 1", "id", "orders.id", ""},
 		{"group alias", "SELECT total AS amount FROM orders GROUP BY amount", "amount", "orders.total", ""},
 		{"group input", "SELECT count(*) AS id FROM orders GROUP BY id", "id", "orders.id", ""},
@@ -204,6 +209,8 @@ func TestImplicitOutputNamesInPLpgSQL(t *testing.T) {
 	body := `BEGIN
 		PERFORM q.name FROM (SELECT name COLLATE "C" FROM customers) q;
 		PERFORM q.grouping FROM (SELECT GROUPING(id) FROM orders GROUP BY id) q;
+		PERFORM q."?column?" FROM (SELECT id IS NULL FROM orders) q;
+		PERFORM q.json_object FROM (SELECT JSON_OBJECT(name VALUE id) FROM customers) q;
 	END`
 	routine := snapshot.Routine{ID: "implicit_outputs", Name: "implicit_outputs", Schema: "public", Language: "plpgsql", Returns: "void", Body: body,
 		Definition: "CREATE FUNCTION implicit_outputs() RETURNS void LANGUAGE plpgsql AS $$" + body + "$$"}
@@ -213,7 +220,14 @@ func TestImplicitOutputNamesInPLpgSQL(t *testing.T) {
 	if len(s.Diagnostics.Unresolved) != 0 || len(s.Diagnostics.Warnings) != 0 {
 		t.Fatalf("diagnostics: %+v", s.Diagnostics)
 	}
-	for ref, target := range map[string]string{"q.name": "customers.name", "q.grouping": "orders.id"} {
+	for _, dep := range []struct{ ref, target string }{
+		{"q.name", "customers.name"},
+		{"q.grouping", "orders.id"},
+		{`q."?column?"`, "orders.id"},
+		{"q.json_object", "customers.name"},
+		{"q.json_object", "customers.id"},
+	} {
+		ref, target := dep.ref, dep.target
 		start := strings.Index(routine.Definition, ref)
 		end := start + len(ref)
 		relationship := "reads|" + routine.ID + "|" + target
