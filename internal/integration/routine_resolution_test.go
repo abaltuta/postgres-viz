@@ -61,6 +61,14 @@ $$;
 CREATE FUNCTION review.series_result() RETURNS int LANGUAGE sql AS $$
   SELECT g.g FROM review.samples s, generate_series(s.pos, s.pos) g
 $$;
+CREATE FUNCTION review.cycle_result() RETURNS int LANGUAGE sql AS $$
+  WITH RECURSIVE r(n) AS (SELECT n FROM review.documents UNION ALL SELECT n FROM r)
+  CYCLE n SET seen USING path
+  SELECT cardinality(r.path) FROM r WHERE r.seen
+$$;
+CREATE FUNCTION review.exists_result() RETURNS int LANGUAGE sql AS $$
+  SELECT q."exists"::int FROM (SELECT EXISTS(SELECT 1 FROM review.samples WHERE pos > 0)) q
+$$;
 CREATE FUNCTION review.put() RETURNS int LANGUAGE sql AS $$
   INSERT INTO review.buffer (payload[(SELECT total FROM review.orders)]) VALUES (7)
   RETURNING payload[10]
@@ -81,6 +89,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"inner_ordinal": 1, "outer_ordinal": 99, "greatest_output": 10, "nullif_output": 10,
 		"sample_value": 7, "scalar_result": 7, "xml_result": 8,
 		"case_result": 7, "series_result": 2,
+		"cycle_result": 2, "exists_result": 1,
 	} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
@@ -97,8 +106,8 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"review.pagination.page_size": {"review.paged_union()"},
 		"review.pagination.skip_rows": {"review.paged_union()"},
 		"review.samples.vals":         {"review.sample_value()"},
-		"review.samples.pos":          {"review.sample_value()", "review.series_result()"},
-		"review.documents.n":          {"review.case_result()", "review.scalar_result()"},
+		"review.samples.pos":          {"review.exists_result()", "review.sample_value()", "review.series_result()"},
+		"review.documents.n":          {"review.case_result()", "review.cycle_result()", "review.scalar_result()"},
 		"review.documents.doc":        {"review.xml_result()"},
 		`"Actual, Data".orders.total`: {"review.by_path()", "review.forward_cte()"},
 	} {

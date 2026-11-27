@@ -9,6 +9,58 @@ import (
 	"postgres-viz/internal/snapshot"
 )
 
+func TestRoutineGeneratedOutputNames(t *testing.T) {
+	for _, tc := range []struct {
+		name, query string
+		refs        map[string]string
+	}{
+		{"exists", `SELECT q."exists", q.amount FROM (SELECT EXISTS (SELECT id FROM customers), (SELECT total FROM orders LIMIT 1) AS amount) q`, map[string]string{`q."exists"`: "customers.id", "q.amount": "orders.total"}},
+		{"scalar subquery", `SELECT q.total FROM (SELECT (SELECT total FROM orders LIMIT 1)) q`, map[string]string{"q.total": "orders.total"}},
+		{"cycle", `WITH RECURSIVE r(n) AS (VALUES (1) UNION ALL SELECT n FROM r) CYCLE n SET seen USING path SELECT bool_or(r.seen) FROM r`, nil},
+		{"search and cycle", `WITH RECURSIVE r(n, weight) AS (SELECT id, total FROM orders UNION ALL SELECT r.* FROM r WHERE NOT r.seen)
+SEARCH BREADTH FIRST BY weight SET seq CYCLE n SET seen TO true DEFAULT false USING path
+SELECT x.key, x.seq, x.seen, x.path FROM r AS x(key)`, map[string]string{"r.seen": "orders.id", "x.key": "orders.id", "x.seq": "orders.total", "x.seen": "orders.id", "x.path": "orders.id"}},
+		{"unknown width", `WITH RECURSIVE r(n, m) AS (
+SELECT numbers.*, o.id FROM all_numbers() numbers CROSS JOIN orders o UNION ALL SELECT r.* FROM r
+) CYCLE n SET seen USING path SELECT r.seen, r.path FROM r`, map[string]string{"r.seen": "", "r.path": ""}},
+	} {
+		for _, language := range []string{"sql", "plpgsql"} {
+			t.Run(tc.name+"/"+language, func(t *testing.T) {
+				body := tc.query
+				if language == "plpgsql" {
+					body = "BEGIN\n  RETURN QUERY " + body + ";\nEND"
+				}
+				routine := snapshot.Routine{ID: "f", Name: "f", Schema: "public", Language: language, Body: body,
+					Definition: "CREATE FUNCTION f() RETURNS SETOF record LANGUAGE " + language + " AS $$\n" + body + "\n$$"}
+				s := scopeCatalog()
+				if err := Analyze(context.Background(), s, []snapshot.Routine{routine}); err != nil {
+					t.Fatal(err)
+				}
+				if len(s.Diagnostics.Unresolved) != 0 || len(s.Diagnostics.Warnings) != 0 {
+					t.Errorf("diagnostics: %+v", s.Diagnostics)
+				}
+				for ref, target := range tc.refs {
+					start := strings.Index(routine.Definition, ref)
+					end := start + len(ref)
+					var got []string
+					for _, e := range s.Evidence {
+						if e.OwnerID == routine.ID && e.Start != nil && e.End != nil && *e.Start == start && *e.End == end {
+							got = append(got, e.RelationshipID)
+						}
+					}
+					var want []string
+					if target != "" {
+						want = []string{"reads|f|" + target}
+					}
+					if !slices.Equal(got, want) {
+						t.Errorf("evidence for %q: got %v, want %v", ref, got, want)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestRoutinePartialColumnAliases(t *testing.T) {
 	const query = `WITH priced_orders (order_key) AS (
   SELECT o.id, o.total, o.customer_id FROM orders AS o

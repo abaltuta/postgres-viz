@@ -244,7 +244,7 @@ func (a *analyzer) sqlRelation(rv node) string {
 func (a *analyzer) base(id string) binding {
 	b := binding{unknownWidth: id == ""}
 	for _, c := range a.cols[id] {
-		b.columns = append(b.columns, output{c.Name, []string{c.ID}})
+		b.columns = append(b.columns, output{name: c.Name, ids: []string{c.ID}})
 	}
 	return b
 }

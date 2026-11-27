@@ -8,8 +8,9 @@ import (
 )
 
 type output struct {
-	name string
-	ids  []string
+	name         string
+	ids          []string
+	omitFromStar bool
 }
 type binding struct {
 	columns      []output
@@ -47,6 +48,12 @@ func (b binding) refs() []string {
 	}
 	return unique(ids)
 }
+func (b binding) star() binding {
+	if slices.ContainsFunc(b.columns, func(c output) bool { return c.omitFromStar }) {
+		b.columns = slices.DeleteFunc(slices.Clone(b.columns), func(c output) bool { return c.omitFromStar })
+	}
+	return b
+}
 func (b binding) renamed(aliases []string) binding {
 	if len(aliases) == 0 {
 		return b
@@ -70,8 +77,9 @@ type scope struct {
 
 // Recursive WITH exposes sibling names before their queries have been visited.
 type cteBinding struct {
-	columns binding
-	resolve func() binding
+	columns   binding
+	generated []output
+	resolve   func() binding
 }
 
 func (c *cteBinding) get() binding {
@@ -90,13 +98,13 @@ type rangeName struct {
 func newScope(parent *scope) *scope {
 	return &scope{parent: parent, ctes: map[string]*cteBinding{}}
 }
-func (s *scope) cte(name string) (binding, bool) {
-	for ; s != nil; s = s.parent {
-		if b, ok := s.ctes[name]; ok {
-			return b.get(), true
+func (s *scope) cte(name string) (*cteBinding, bool) {
+	for cur := s; cur != nil; cur = cur.parent {
+		if b, ok := cur.ctes[name]; ok {
+			return b, cur != s
 		}
 	}
-	return binding{}, false
+	return nil, false
 }
 func (s *scope) qualified(schema, name string) []binding {
 	for ; s != nil; s = s.parent {
@@ -134,7 +142,7 @@ func (s *scope) unqualified(name string) ([]string, int) {
 func (s *scope) star() binding {
 	var b binding
 	for _, source := range s.sources {
-		b.append(source)
+		b.append(source.star())
 	}
 	return b
 }
@@ -233,7 +241,7 @@ func (a *analyzer) columnRef(n node, s *scope) (binding, []string) {
 		}
 		for _, b := range matches {
 			if star {
-				source.append(b)
+				source.append(b.star())
 				hits++
 				continue
 			}
@@ -430,6 +438,8 @@ func (a *analyzer) isBuiltinGenerateSeries(call node) bool {
 
 func (a *analyzer) from(item node, s *scope) binding {
 	var b binding
+	var generated []output
+	var outerCTE bool
 	var alias node
 	var defaultName, schema string
 	switch {
@@ -443,15 +453,18 @@ func (a *analyzer) from(item node, s *scope) binding {
 		alias = child(r, "alias")
 		defaultName = str(r, "relname")
 		schema = str(r, "schemaname")
-		var cte bool
+		var cte *cteBinding
 		if schema == "" {
-			b, cte = s.cte(defaultName)
+			cte, outerCTE = s.cte(defaultName)
 		}
-		if !cte {
+		if cte == nil {
 			id := a.sqlRelation(r)
 			a.table("reads", id)
 			b = a.base(id)
 			schema = a.objs[id].Schema
+		} else {
+			b = cte.get()
+			generated = cte.generated
 		}
 	case child(item, "RangeSubselect") != nil:
 		r := child(item, "RangeSubselect")
@@ -511,7 +524,7 @@ func (a *analyzer) from(item node, s *scope) binding {
 			for _, id := range ids {
 				a.column("reads", id, -1, name)
 			}
-			merged.columns = append(merged.columns, output{name, ids})
+			merged.columns = append(merged.columns, output{name: name, ids: ids})
 		}
 		b.columns = slices.Clone(merged.columns)
 		b.unknownWidth = l.unknownWidth || r.unknownWidth
@@ -537,6 +550,14 @@ func (a *analyzer) from(item node, s *scope) binding {
 		b.unknownWidth = true
 	}
 	b = b.renamed(names(alias["colnames"]))
+	if len(generated) > 0 {
+		// PostgreSQL adds SEARCH and CYCLE columns after applying range aliases.
+		b.columns = slices.Clip(b.columns)
+		for _, col := range generated {
+			col.omitFromStar = outerCTE
+			b.columns = append(b.columns, col)
+		}
+	}
 	name := str(alias, "aliasname")
 	if name == "" {
 		name = defaultName
@@ -567,21 +588,21 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 		if name == "" {
 			name = last(names(cr["fields"]))
 		}
-		return binding{columns: []output{{name, ids}}}
+		return binding{columns: []output{{name: name, ids: ids}}}
 	}
 	if link := child(value, "SubLink"); str(link, "subLinkType") == "EXPR_SUBLINK" {
 		b := a.selectStmt(child(link, "subselect", "SelectStmt"), s)
 		if name == "" && !b.unknownWidth && len(b.columns) == 1 {
 			name = b.columns[0].name
 		}
-		return binding{columns: []output{{name, b.refs()}}}
+		return binding{columns: []output{{name: name, ids: b.refs()}}}
 	}
 	if name == "" {
 		name = expressionName(value)
 	}
 	// A composite expression ending in .* expands according to its result type.
 	return binding{
-		columns:      []output{{name, a.expr(value, s)}},
+		columns:      []output{{name: name, ids: a.expr(value, s)}},
 		unknownWidth: expandsStar(child(value, "A_Indirection")["indirection"]),
 	}
 }
@@ -638,6 +659,9 @@ func expressionName(value any) string {
 	if child(value, "CoalesceExpr") != nil {
 		return "coalesce"
 	}
+	if str(child(value, "SubLink"), "subLinkType") == "EXISTS_SUBLINK" {
+		return "exists"
+	}
 	if str(child(value, "A_Expr"), "kind") == "AEXPR_NULLIF" {
 		return "nullif"
 	}
@@ -667,6 +691,37 @@ func (a *analyzer) valuesRow(values any, s *scope) binding {
 	}
 	return out
 }
+
+func cteKeyRefs(b binding, keys any) []string {
+	if b.unknownWidth {
+		// Set-operation lineage can shift when a projection's width is unknown.
+		return nil
+	}
+	var ids []string
+	for _, name := range names(keys) {
+		refs, hits := b.lookup(name)
+		if hits == 1 {
+			ids = append(ids, refs...)
+		}
+	}
+	return unique(ids)
+}
+
+func cteGeneratedOutputs(b binding, search, cycle node, markRefs []string) []output {
+	var generated []output
+	if search != nil {
+		generated = append(generated, output{name: str(search, "search_seq_column"), ids: cteKeyRefs(b, search["search_col_list"])})
+	}
+	if cycle != nil {
+		pathRefs := cteKeyRefs(b, cycle["cycle_col_list"])
+		generated = append(generated,
+			output{name: str(cycle, "cycle_mark_column"), ids: unique(append(slices.Clone(pathRefs), markRefs...))},
+			output{name: str(cycle, "cycle_path_column"), ids: pathRefs},
+		)
+	}
+	return generated
+}
+
 func (a *analyzer) with(n node, s *scope) {
 	var pending []*cteBinding
 	for _, w := range items(n["ctes"]) {
@@ -674,19 +729,22 @@ func (a *analyzer) with(n node, s *scope) {
 		name := str(c, "ctename")
 		aliases := names(c["aliascolnames"])
 		query := child(c, "ctequery")
+		search, cycle := child(c, "search_clause"), child(c, "cycle_clause")
 		entry := &cteBinding{columns: binding{unknownWidth: true}}
 		entry.resolve = func() binding {
+			markRefs := append(a.expr(cycle["cycle_mark_value"], s), a.expr(cycle["cycle_mark_default"], s)...)
 			var b binding
 			if sel := child(query, "SelectStmt"); sel != nil && n["recursive"] == true {
-				b = a.selectWithAnchor(sel, s, func(anchor binding) { entry.columns = anchor.renamed(aliases) })
+				b = a.selectWithAnchor(sel, s, func(anchor binding) {
+					entry.columns = anchor.renamed(aliases)
+					entry.generated = cteGeneratedOutputs(entry.columns, search, cycle, markRefs)
+				})
 			} else {
 				b = a.statement(query, s)
 			}
-			// SEARCH and CYCLE add columns after the recursive query's outputs.
-			if c["search_clause"] != nil || c["cycle_clause"] != nil {
-				b.unknownWidth = true
-			}
-			return b.renamed(aliases)
+			b = b.renamed(aliases)
+			entry.generated = cteGeneratedOutputs(b, search, cycle, markRefs)
+			return b
 		}
 		if n["recursive"] == true {
 			pending = append(pending, entry)
