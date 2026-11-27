@@ -129,6 +129,15 @@ func TestSelectNameResolution(t *testing.T) {
 		name, sql, ref, target, reason string
 	}{
 		{"order alias", "SELECT total AS id FROM orders ORDER BY id", "id", "orders.total", ""},
+		{"collate", `SELECT q.name FROM (SELECT name COLLATE "C" FROM customers) q`, "q.name", "customers.name", ""},
+		{"collate with cast", `SELECT q.name FROM (SELECT (name COLLATE "C")::text FROM customers) q`, "q.name", "customers.name", ""},
+		{"collate unnamed literal", `SELECT q."?column?" FROM (SELECT 'x' COLLATE "C") q`, `q."?column?"`, "", ""},
+		{"collate with cast label", `SELECT q.text FROM (SELECT 'x'::text COLLATE "C") q`, "q.text", "", ""},
+		{"collate with alias", `SELECT q.label FROM (SELECT name COLLATE "C" AS label FROM customers) q`, "q.label", "customers.name", ""},
+		{"collated scalar subquery", `SELECT q.name FROM (SELECT (SELECT name FROM customers LIMIT 1) COLLATE "C") q`, "q.name", "customers.name", ""},
+		{"grouping", `SELECT q.grouping FROM (SELECT GROUPING(id) FROM orders GROUP BY id) q`, "q.grouping", "orders.id", ""},
+		{"grouping with cast", `SELECT q.grouping FROM (SELECT GROUPING(id)::bigint FROM orders GROUP BY id) q`, "q.grouping", "orders.id", ""},
+		{"grouping with alias", `SELECT q.mask FROM (SELECT GROUPING(id) AS mask FROM orders GROUP BY id) q`, "q.mask", "orders.id", ""},
 		{"order expression", "SELECT total AS id FROM orders ORDER BY id + 1", "id", "orders.id", ""},
 		{"group alias", "SELECT total AS amount FROM orders GROUP BY amount", "amount", "orders.total", ""},
 		{"group input", "SELECT count(*) AS id FROM orders GROUP BY id", "id", "orders.id", ""},
@@ -187,6 +196,32 @@ func TestSelectNameResolution(t *testing.T) {
 				t.Errorf("evidence at %q refers to %v, want %v", tc.ref, edges, want)
 			}
 		})
+	}
+}
+
+func TestImplicitOutputNamesInPLpgSQL(t *testing.T) {
+	s := scopeCatalog()
+	body := `BEGIN
+		PERFORM q.name FROM (SELECT name COLLATE "C" FROM customers) q;
+		PERFORM q.grouping FROM (SELECT GROUPING(id) FROM orders GROUP BY id) q;
+	END`
+	routine := snapshot.Routine{ID: "implicit_outputs", Name: "implicit_outputs", Schema: "public", Language: "plpgsql", Returns: "void", Body: body,
+		Definition: "CREATE FUNCTION implicit_outputs() RETURNS void LANGUAGE plpgsql AS $$" + body + "$$"}
+	if err := Analyze(context.Background(), s, []snapshot.Routine{routine}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Diagnostics.Unresolved) != 0 || len(s.Diagnostics.Warnings) != 0 {
+		t.Fatalf("diagnostics: %+v", s.Diagnostics)
+	}
+	for ref, target := range map[string]string{"q.name": "customers.name", "q.grouping": "orders.id"} {
+		start := strings.Index(routine.Definition, ref)
+		end := start + len(ref)
+		relationship := "reads|" + routine.ID + "|" + target
+		if !slices.ContainsFunc(s.Evidence, func(e snapshot.Evidence) bool {
+			return e.RelationshipID == relationship && e.Start != nil && e.End != nil && *e.Start == start && *e.End == end
+		}) {
+			t.Errorf("evidence at %q does not refer to %s", ref, target)
+		}
 	}
 }
 

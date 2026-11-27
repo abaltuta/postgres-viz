@@ -590,7 +590,11 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 		}
 		return binding{columns: []output{{name: name, ids: ids}}}
 	}
-	if link := child(value, "SubLink"); str(link, "subLinkType") == "EXPR_SUBLINK" {
+	operand := value
+	for collate := child(operand, "CollateClause"); collate != nil; collate = child(operand, "CollateClause") {
+		operand = collate["arg"]
+	}
+	if link := child(operand, "SubLink"); str(link, "subLinkType") == "EXPR_SUBLINK" {
 		b := a.selectStmt(child(link, "subselect", "SelectStmt"), s)
 		if name == "" && !b.unknownWidth && len(b.columns) == 1 {
 			name = b.columns[0].name
@@ -610,6 +614,10 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 func expressionName(value any) string {
 	var fallbackName string
 	for {
+		if collate := child(value, "CollateClause"); collate != nil {
+			value = collate["arg"]
+			continue
+		}
 		if cast := child(value, "TypeCast"); cast != nil {
 			if fallbackName == "" {
 				fallbackName = last(names(child(cast, "typeName")["names"]))
@@ -658,6 +666,9 @@ func expressionName(value any) string {
 	}
 	if child(value, "CoalesceExpr") != nil {
 		return "coalesce"
+	}
+	if child(value, "GroupingFunc") != nil {
+		return "grouping"
 	}
 	switch str(child(value, "SubLink"), "subLinkType") {
 	case "EXISTS_SUBLINK":
