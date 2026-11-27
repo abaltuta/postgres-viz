@@ -1,10 +1,10 @@
-# Where did that column come from? Ten fixes in postgres-viz
+# Where did that column come from? Twenty fixes in postgres-viz
 
 Suppose you're about to rename a column. You open a postgres-viz snapshot, select the column, and find a function listed as a reader. The function contains the right name. Did it actually read your column? A nested query can give its own result the same name, sometimes without an `AS` anywhere in the SQL.
 
 When postgres-viz scans a SQL routine, the parser gives it a syntax tree. The analyzer then builds a list of visible columns at each query level. Each entry needs a name that the surrounding query can use, plus the underlying column reads that explain its value. Losing the name can produce a missing-reference warning. If a column with that name exists in an outer query, the same mistake can silently attach the reference to the wrong place.
 
-These ten fixes are in the development checkout after v0.11.0. Each query below runs independently, without a sample database. We ran all ten as SQL functions on PostgreSQL 16, checked the results shown here, and scanned them with the updated CLI. The snapshot contained no warnings or unresolved references.
+These twenty examples cover fixes in postgres-viz v0.11.1. Each query runs independently, without a sample database. We ran all twenty as SQL functions on PostgreSQL 16, checked their results, and scanned them with the updated CLI. The snapshot contained no warnings or unresolved references.
 
 ## Following a name through a SELECT
 
@@ -109,6 +109,98 @@ SELECT q.array FROM (SELECT ARRAY(SELECT 7)) AS q;
 ```
 
 The result is the one-element integer array `{7}`. A bracket constructor such as `ARRAY[7]` and a query constructor such as `ARRAY(SELECT 7)` have different syntax-tree nodes. The analyzer already knew the bracket constructor's label. Recognizing the array subquery gives the second form its PostgreSQL name, `array`, while preserving the reads performed by the inner query. Previously, the snapshot listed `q.array` as missing. [Output-name inference](../../internal/analysis/scope.go)
+
+## Which name survives a transformation?
+
+### 11. COLLATE carries the input name through
+
+```sql
+SELECT q.word FROM (SELECT word COLLATE "C" FROM (VALUES ('pear')) AS v(word)) AS q;
+```
+
+The result is `pear`. Changing how text compares leaves its output name intact. The analyzer now follows the operand of the collation clause, so it can resolve `q.word` and trace it back to the input.
+
+### 12. GROUPING supplies a name for its mask
+
+```sql
+SELECT q.grouping
+FROM (SELECT GROUPING(n) FROM (VALUES (7)) AS v(n) GROUP BY ROLLUP(n)) AS q
+ORDER BY q.grouping;
+```
+
+The result has two rows. The detail row has mask `0` and the grand total has mask `1`. PostgreSQL calls the output `grouping` in both rows. The parser represents this operation with a dedicated node, so recognizing ordinary function names alone missed it.
+
+### 13. ROW names the whole constructed value
+
+```sql
+SELECT q.row = ROW(3, 7) FROM (SELECT ROW(3, 7)) AS q;
+```
+
+The comparison returns `true`. The outer query refers to one composite column named `row`. When the constructor takes table columns as arguments, the analyzer records reads of those inputs under the single projected value.
+
+### 14. XMLELEMENT keeps the SQL name separate from the XML tag
+
+```sql
+SELECT q.xmlelement FROM (SELECT XMLELEMENT(NAME invoice, 7)) AS q;
+```
+
+The value is `<invoice>7</invoice>`. The tag comes from `NAME invoice` and the SQL column name comes from `XMLELEMENT`. In a routine that builds XML from stored data, both attribute expressions and element content can contribute column reads.
+
+## Predicates and JSON constructors
+
+### 15. An IS NULL result can be referenced by its default label
+
+```sql
+SELECT q."?column?" FROM (SELECT 1 IS NULL) AS q;
+```
+
+The result is `false`. PostgreSQL exposes its default label, `?column?`, as an actual identifier. The quotes let the outer query refer to it. Casting the predicate to a type can supply a different label, and an explicit alias determines the name directly.
+
+### 16. JSON_OBJECT names its output independently of its keys
+
+```sql
+SELECT q.json_object ->> 'invoice' FROM (SELECT JSON_OBJECT('invoice' VALUE 7)) AS q;
+```
+
+The outer query extracts the text `7`. It first resolves the SQL column `json_object`, then accesses the JSON key `invoice`. The SQL constructor has its own syntax-tree node. A key expression and a value expression can each read a table column.
+
+### 17. Boolean tests also use the default label
+
+```sql
+SELECT q."?column?" FROM (SELECT NULL IS UNKNOWN) AS q;
+```
+
+The result is `true` because SQL treats a null boolean as unknown. This looks similar to example 15, but PostgreSQL parses `IS UNKNOWN` as a boolean test and `IS NULL` as a null test. The analyzer needs a naming rule for each node.
+
+### 18. JSON_ARRAY gives both constructor forms the same label
+
+```sql
+SELECT q.json_array FROM (SELECT JSON_ARRAY(SELECT 7)) AS q;
+```
+
+The result is the JSON array `[7]`. The value-list form `JSON_ARRAY(7)` has the same output name. For the query form shown here, the analyzer follows the inner query to record any source columns that supply elements.
+
+## Serializing and aggregating
+
+### 19. XMLSERIALIZE returns text under its own name
+
+```sql
+SELECT q.xmlserialize FROM (SELECT XMLSERIALIZE(CONTENT XML '<r/>' AS text)) AS q;
+```
+
+The result is the text `<r/>`. Here `AS text` specifies the serialization type. The output column is still called `xmlserialize`. The live regression uses a stored XML document to check that the outer reference resolves back to that document column.
+
+### 20. JSON_ARRAYAGG depends on what orders and filters the input
+
+```sql
+SELECT q.json_arrayagg
+FROM (
+  SELECT JSON_ARRAYAGG(value ORDER BY position) FILTER (WHERE keep)
+  FROM (VALUES (7, 2, true), (8, 1, true), (9, 3, false)) AS v(value, position, keep)
+) AS q;
+```
+
+The result is `[8, 7]`. The filter drops `9`, and the sort places `8` first. The output name `json_arrayagg` lets the outer query refer to the result. For a stored table, a dependency report must also include reads of `value`, `position`, and `keep`: changing any of them can change the array. [Aggregate dependency tests](../../internal/analysis/scope_test.go)
 
 ## Checking the graph against the database
 
