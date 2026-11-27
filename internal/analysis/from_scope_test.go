@@ -32,6 +32,9 @@ func TestFromSubqueryVisibility(t *testing.T) {
 		{"implicit least label with operands", `SELECT (SELECT "least" FROM (SELECT LEAST(o.id, o.total) FROM orders o) q) FROM audit`, "orders.id orders.total"},
 		{"cast preserves greatest label", `SELECT (SELECT "greatest" + int8 FROM (SELECT GREATEST(1, 2)::bigint) q) FROM audit`, "audit.int8"},
 		{"explicit alias overrides least label", `SELECT (SELECT "least" + amount FROM (SELECT LEAST(o.total, 2) AS amount FROM orders o) q) FROM audit`, "audit.least orders.total"},
+		{"implicit nullif label", `SELECT (SELECT "nullif" FROM (SELECT NULLIF(1, 2)) q) FROM audit`, ""},
+		{"cast preserves nullif label and operand reads", `SELECT (SELECT "nullif" + int8 FROM (SELECT NULLIF(o.id, o.total)::bigint FROM orders o) q) FROM audit`, "audit.int8 orders.id orders.total"},
+		{"explicit alias overrides nullif label", `SELECT (SELECT "nullif" + amount FROM (SELECT NULLIF(o.total, 2) AS amount FROM orders o) q) FROM audit`, "audit.nullif orders.total"},
 		{"explicit alias overrides cast label", "SELECT (SELECT id + amount FROM (SELECT o.id::bigint AS amount FROM orders o) q) FROM audit", "audit.id orders.id"},
 		{"ordinality shadows outer column", "SELECT (SELECT ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g) FROM audit", ""},
 		{"qualified ordinality", "SELECT g.ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g", ""},
@@ -54,6 +57,7 @@ func TestFromSubqueryVisibility(t *testing.T) {
 			snapshot.Column{ID: "audit.ordinality", ObjectID: "audit", Name: "ordinality", Position: 6},
 			snapshot.Column{ID: "audit.greatest", ObjectID: "audit", Name: "greatest", Position: 7},
 			snapshot.Column{ID: "audit.least", ObjectID: "audit", Name: "least", Position: 8},
+			snapshot.Column{ID: "audit.nullif", ObjectID: "audit", Name: "nullif", Position: 9},
 		)
 		var routines []snapshot.Routine
 		for _, tc := range cases {

@@ -32,6 +32,10 @@ CREATE FUNCTION review.coalesce_output() RETURNS int LANGUAGE sql
   AS $$ SELECT (SELECT "coalesce" FROM (SELECT COALESCE(1, 2)) q) FROM review.audit $$;
 CREATE FUNCTION review.greatest_output() RETURNS int LANGUAGE sql
   AS $$ SELECT (SELECT "greatest" FROM (SELECT GREATEST(o.total, 2) FROM review.orders o) q) FROM review.audit $$;
+CREATE FUNCTION review.nullif_output() RETURNS int LANGUAGE sql AS $$
+  SELECT (SELECT "nullif" FROM (SELECT NULLIF(o.total, 0) FROM review.orders o) q)
+  FROM review.audit AS a("nullif")
+$$;
 CREATE FUNCTION review.cast_output() RETURNS bigint LANGUAGE sql
   AS $$ SELECT (SELECT total FROM (SELECT o.total::bigint FROM review.orders o) q) FROM "Actual, Data".orders $$;
 CREATE FUNCTION review.inner_ordinal() RETURNS bigint LANGUAGE sql
@@ -56,7 +60,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	for name, want := range map[string]int{
 		"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10,
 		"paged_union": 20, "coalesce_output": 1, "put": 7, "cast_output": 10,
-		"inner_ordinal": 1, "outer_ordinal": 99, "greatest_output": 10,
+		"inner_ordinal": 1, "outer_ordinal": 99, "greatest_output": 10, "nullif_output": 10,
 	} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
@@ -65,7 +69,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 	}
 	s := read(scan("--schema", "review", "--schema", "Actual, Data"))
 	for column, want := range map[string][]string{
-		"review.orders.total":         {"review.cast_output()", "review.greatest_output()", "review.implicit_output()", "review.put()", "review.sampled()"},
+		"review.orders.total":         {"review.cast_output()", "review.greatest_output()", "review.implicit_output()", "review.nullif_output()", "review.put()", "review.sampled()"},
 		"review.audit.sum":            {},
 		"review.audit.coalesce":       {},
 		"review.audit.greatest":       {},

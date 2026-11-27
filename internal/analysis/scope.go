@@ -604,6 +604,9 @@ func (a *analyzer) expressionName(value any, s *scope) string {
 	if child(value, "CoalesceExpr") != nil {
 		return "coalesce"
 	}
+	if str(child(value, "A_Expr"), "kind") == "AEXPR_NULLIF" {
+		return "nullif"
+	}
 	switch str(child(value, "MinMaxExpr"), "op") {
 	case "IS_GREATEST":
 		return "greatest"
@@ -614,7 +617,7 @@ func (a *analyzer) expressionName(value any, s *scope) string {
 	if child(value, "A_Const") != nil {
 		return typeName
 	}
-	if expr := child(value, "A_Expr"); expr != nil && str(expr, "kind") != "AEXPR_NULLIF" {
+	if child(value, "A_Expr") != nil {
 		return typeName
 	}
 	return ""
