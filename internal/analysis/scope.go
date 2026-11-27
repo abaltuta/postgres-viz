@@ -664,6 +664,9 @@ func expressionName(value any) string {
 	if child(value, "A_ArrayExpr") != nil {
 		return "array"
 	}
+	if child(value, "RowExpr") != nil {
+		return "row"
+	}
 	if child(value, "CoalesceExpr") != nil {
 		return "coalesce"
 	}
@@ -708,6 +711,9 @@ func expressionName(value any) string {
 		return "greatest"
 	case "IS_LEAST":
 		return "least"
+	}
+	if str(child(value, "XmlExpr"), "op") == "IS_XMLELEMENT" {
+		return "xmlelement"
 	}
 	// Other expression forms may have their own PostgreSQL labels.
 	if child(value, "A_Const") != nil || child(value, "A_Expr") != nil {
