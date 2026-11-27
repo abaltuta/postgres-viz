@@ -30,6 +30,8 @@ func TestInsertColumnWrites(t *testing.T) {
 		{"ordinality with unknown function width", "INSERT INTO destination SELECT src.* FROM outside.pair() WITH ORDINALITY AS src", []string{"destination"}, false},
 		{"ordinality with potentially overloaded function", "INSERT INTO destination SELECT src.* FROM generate_series(1, 2) WITH ORDINALITY AS src", []string{"destination"}, false},
 		{"ordinality with known function width", "INSERT INTO destination SELECT src.* FROM pg_catalog.generate_series(1, 2) WITH ORDINALITY AS src", []string{"destination.first", "destination.second"}, false},
+		{"potentially overloaded scalar range width", "INSERT INTO destination SELECT src.* FROM generate_series(1, 2) AS src", []string{"destination"}, false},
+		{"known scalar range width", "INSERT INTO destination SELECT src.* FROM pg_catalog.generate_series(1, 2) AS src", []string{"destination.first"}, false},
 		{"unknown composite select star", "INSERT INTO destination SELECT 1, (ROW('two', 2)::outside.pair).*", []string{"destination"}, false},
 		{"unknown composite values star", "INSERT INTO destination VALUES (1, (ROW('two', 2)::outside.pair).*)", []string{"destination"}, false},
 		{"aggregate star", "INSERT INTO destination SELECT count(*) FROM customers", []string{"destination.first"}, false},

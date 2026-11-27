@@ -369,7 +369,7 @@ func jsonTableOutputs(columns any) binding {
 	return b
 }
 
-func (a *analyzer) ordinalFunction(r node) (binding, string) {
+func (a *analyzer) functionOutputs(r node) (binding, string) {
 	alias := child(r, "alias")
 	aliases := names(alias["colnames"])
 	functions := items(r["functions"])
@@ -382,7 +382,11 @@ func (a *analyzer) ordinalFunction(r node) (binding, string) {
 		if i == 0 {
 			defaultName = name
 		}
-		if defs := items(child(definition, "List")["items"]); len(defs) > 0 {
+		defs := items(child(definition, "List")["items"])
+		if len(functions) == 1 && len(defs) == 0 {
+			defs = items(r["coldeflist"])
+		}
+		if len(defs) > 0 {
 			for _, def := range defs {
 				b.columns = append(b.columns, output{name: str(child(def, "ColumnDef"), "colname")})
 			}
@@ -399,7 +403,7 @@ func (a *analyzer) ordinalFunction(r node) (binding, string) {
 	}
 	// The known outputs give a lower bound on the ordinal's position. Keep
 	// the default name only when the aliases cannot reach that position.
-	if !b.unknownWidth || len(aliases) <= len(b.columns) {
+	if r["ordinality"] == true && (!b.unknownWidth || len(aliases) <= len(b.columns)) {
 		b.columns = append(b.columns, output{name: "ordinality"})
 	}
 	// Renaming this prefix can discard names at uncertain positions, while
@@ -462,19 +466,7 @@ func (a *analyzer) from(item node, s *scope) binding {
 		r := child(item, "RangeFunction")
 		alias = child(r, "alias")
 		a.expr(r["functions"], s)
-		if r["ordinality"] == true {
-			b, defaultName = a.ordinalFunction(r)
-			break
-		}
-		for _, name := range names(alias["colnames"]) {
-			b.columns = append(b.columns, output{name, nil})
-		}
-		defs := items(r["coldeflist"])
-		for _, c := range defs {
-			b.columns = append(b.columns, output{str(child(c, "ColumnDef"), "colname"), nil})
-		}
-		// A list of aliases can name only a prefix of a function's outputs.
-		b.unknownWidth = len(defs) == 0
+		b, defaultName = a.functionOutputs(r)
 	case child(item, "JsonTable") != nil:
 		r := child(item, "JsonTable")
 		alias = child(r, "alias")
@@ -595,14 +587,25 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 }
 
 func expressionName(value any) string {
-	var typeName string
+	var fallbackName string
 	for {
 		if cast := child(value, "TypeCast"); cast != nil {
-			// A name from the argument wins over the outermost cast type.
-			if typeName == "" {
-				typeName = last(names(child(cast, "typeName")["names"]))
+			if fallbackName == "" {
+				fallbackName = last(names(child(cast, "typeName")["names"]))
 			}
 			value = cast["arg"]
+			continue
+		}
+		if c := child(value, "CaseExpr"); c != nil {
+			// CASE and casts supply weak labels. A strong ELSE label wins
+			// over either, otherwise the outermost weak label wins.
+			if fallbackName == "" {
+				fallbackName = "case"
+			}
+			value = c["defresult"]
+			if value == nil {
+				return fallbackName
+			}
 			continue
 		}
 		if ind := child(value, "A_Indirection"); ind != nil {
@@ -646,8 +649,8 @@ func expressionName(value any) string {
 	}
 	// Other expression forms may have their own PostgreSQL labels.
 	if child(value, "A_Const") != nil || child(value, "A_Expr") != nil {
-		if typeName != "" {
-			return typeName
+		if fallbackName != "" {
+			return fallbackName
 		}
 		return "?column?"
 	}

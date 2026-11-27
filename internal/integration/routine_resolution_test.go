@@ -55,6 +55,12 @@ CREATE FUNCTION review.xml_result() RETURNS int LANGUAGE sql AS $$
   SELECT x.n FROM review.documents d,
     XMLTABLE('/r' PASSING d.doc COLUMNS n int PATH '.') x
 $$;
+CREATE FUNCTION review.case_result() RETURNS int LANGUAGE sql AS $$
+  SELECT q."case" FROM (SELECT CASE WHEN n > 0 THEN n END FROM review.documents) q
+$$;
+CREATE FUNCTION review.series_result() RETURNS int LANGUAGE sql AS $$
+  SELECT g.g FROM review.samples s, generate_series(s.pos, s.pos) g
+$$;
 CREATE FUNCTION review.put() RETURNS int LANGUAGE sql AS $$
   INSERT INTO review.buffer (payload[(SELECT total FROM review.orders)]) VALUES (7)
   RETURNING payload[10]
@@ -74,6 +80,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"paged_union": 20, "coalesce_output": 1, "put": 7, "cast_output": 10,
 		"inner_ordinal": 1, "outer_ordinal": 99, "greatest_output": 10, "nullif_output": 10,
 		"sample_value": 7, "scalar_result": 7, "xml_result": 8,
+		"case_result": 7, "series_result": 2,
 	} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
@@ -90,8 +97,8 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"review.pagination.page_size": {"review.paged_union()"},
 		"review.pagination.skip_rows": {"review.paged_union()"},
 		"review.samples.vals":         {"review.sample_value()"},
-		"review.samples.pos":          {"review.sample_value()"},
-		"review.documents.n":          {"review.scalar_result()"},
+		"review.samples.pos":          {"review.sample_value()", "review.series_result()"},
+		"review.documents.n":          {"review.case_result()", "review.scalar_result()"},
 		"review.documents.doc":        {"review.xml_result()"},
 		`"Actual, Data".orders.total`: {"review.by_path()", "review.forward_cte()"},
 	} {
