@@ -604,6 +604,12 @@ func (a *analyzer) expressionName(value any, s *scope) string {
 	if child(value, "CoalesceExpr") != nil {
 		return "coalesce"
 	}
+	switch str(child(value, "MinMaxExpr"), "op") {
+	case "IS_GREATEST":
+		return "greatest"
+	case "IS_LEAST":
+		return "least"
+	}
 	// Other expression forms may have their own PostgreSQL labels.
 	if child(value, "A_Const") != nil {
 		return typeName

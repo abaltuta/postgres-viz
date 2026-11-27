@@ -28,7 +28,10 @@ func TestFromSubqueryVisibility(t *testing.T) {
 		{"cast function label", "SELECT (SELECT sum FROM (SELECT pg_catalog.sum(o.total)::numeric FROM orders o) q) FROM audit", "orders.total"},
 		{"cast type label", "SELECT (SELECT int8 FROM (SELECT (o.total + o.id)::bigint FROM orders o) q) FROM audit", "orders.id orders.total"},
 		{"outer cast type label", `SELECT (SELECT "numeric" FROM (SELECT 1::bigint::numeric) q) FROM audit`, ""},
-		{"cast with unmodeled argument label", "SELECT (SELECT int8 FROM (SELECT GREATEST(1, 2)::bigint) q) FROM audit", "audit.int8"},
+		{"implicit greatest label", `SELECT (SELECT "greatest" FROM (SELECT GREATEST(1, 2)) q) FROM audit`, ""},
+		{"implicit least label with operands", `SELECT (SELECT "least" FROM (SELECT LEAST(o.id, o.total) FROM orders o) q) FROM audit`, "orders.id orders.total"},
+		{"cast preserves greatest label", `SELECT (SELECT "greatest" + int8 FROM (SELECT GREATEST(1, 2)::bigint) q) FROM audit`, "audit.int8"},
+		{"explicit alias overrides least label", `SELECT (SELECT "least" + amount FROM (SELECT LEAST(o.total, 2) AS amount FROM orders o) q) FROM audit`, "audit.least orders.total"},
 		{"explicit alias overrides cast label", "SELECT (SELECT id + amount FROM (SELECT o.id::bigint AS amount FROM orders o) q) FROM audit", "audit.id orders.id"},
 		{"ordinality shadows outer column", "SELECT (SELECT ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g) FROM audit", ""},
 		{"qualified ordinality", "SELECT g.ordinality FROM generate_series(7, 7) WITH ORDINALITY AS g", ""},
@@ -49,6 +52,8 @@ func TestFromSubqueryVisibility(t *testing.T) {
 			snapshot.Column{ID: "audit.int8", ObjectID: "audit", Name: "int8", Position: 4},
 			snapshot.Column{ID: "audit.numeric", ObjectID: "audit", Name: "numeric", Position: 5},
 			snapshot.Column{ID: "audit.ordinality", ObjectID: "audit", Name: "ordinality", Position: 6},
+			snapshot.Column{ID: "audit.greatest", ObjectID: "audit", Name: "greatest", Position: 7},
+			snapshot.Column{ID: "audit.least", ObjectID: "audit", Name: "least", Position: 8},
 		)
 		var routines []snapshot.Routine
 		for _, tc := range cases {
