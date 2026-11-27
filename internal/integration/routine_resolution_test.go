@@ -47,6 +47,14 @@ CREATE TABLE review.samples(vals int[], pos int);
 INSERT INTO review.samples VALUES (ARRAY[3, 7], 2);
 CREATE FUNCTION review.sample_value() RETURNS int LANGUAGE sql
   AS $$ SELECT q.vals FROM (SELECT vals[pos] FROM review.samples) q $$;
+CREATE TABLE review.documents(n integer, doc xml);
+INSERT INTO review.documents VALUES (7, XML '<r>8</r>');
+CREATE FUNCTION review.scalar_result() RETURNS int LANGUAGE sql
+  AS $$ SELECT q.n FROM (SELECT (SELECT n FROM review.documents)) q $$;
+CREATE FUNCTION review.xml_result() RETURNS int LANGUAGE sql AS $$
+  SELECT x.n FROM review.documents d,
+    XMLTABLE('/r' PASSING d.doc COLUMNS n int PATH '.') x
+$$;
 CREATE FUNCTION review.put() RETURNS int LANGUAGE sql AS $$
   INSERT INTO review.buffer (payload[(SELECT total FROM review.orders)]) VALUES (7)
   RETURNING payload[10]
@@ -65,7 +73,7 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"by_path": 20, "sampled": 10, "forward_cte": 20, "implicit_output": 10,
 		"paged_union": 20, "coalesce_output": 1, "put": 7, "cast_output": 10,
 		"inner_ordinal": 1, "outer_ordinal": 99, "greatest_output": 10, "nullif_output": 10,
-		"sample_value": 7,
+		"sample_value": 7, "scalar_result": 7, "xml_result": 8,
 	} {
 		var got int
 		if err := db.QueryRow(ctx, "SELECT review."+name+"()").Scan(&got); err != nil || got != want {
@@ -83,6 +91,8 @@ CREATE FUNCTION review.forward_cte() RETURNS int LANGUAGE sql
 		"review.pagination.skip_rows": {"review.paged_union()"},
 		"review.samples.vals":         {"review.sample_value()"},
 		"review.samples.pos":          {"review.sample_value()"},
+		"review.documents.n":          {"review.scalar_result()"},
+		"review.documents.doc":        {"review.xml_result()"},
 		`"Actual, Data".orders.total`: {"review.by_path()", "review.forward_cte()"},
 	} {
 		refs, err := s.References(column, 1)

@@ -481,6 +481,14 @@ func (a *analyzer) from(item node, s *scope) binding {
 		defaultName = "json_table"
 		a.expr(r, s)
 		b = jsonTableOutputs(r["columns"])
+	case child(item, "RangeTableFunc") != nil:
+		r := child(item, "RangeTableFunc")
+		alias = child(r, "alias")
+		defaultName = "xmltable"
+		a.expr(r, s)
+		for _, item := range items(r["columns"]) {
+			b.columns = append(b.columns, output{name: str(child(item, "RangeTableFuncCol"), "colname")})
+		}
 	case child(item, "JoinExpr") != nil:
 		j := child(item, "JoinExpr")
 		alias = child(j, "alias")
@@ -569,6 +577,13 @@ func (a *analyzer) project(value any, name string, s *scope) binding {
 		}
 		return binding{columns: []output{{name, ids}}}
 	}
+	if link := child(value, "SubLink"); str(link, "subLinkType") == "EXPR_SUBLINK" {
+		b := a.selectStmt(child(link, "subselect", "SelectStmt"), s)
+		if name == "" && !b.unknownWidth && len(b.columns) == 1 {
+			name = b.columns[0].name
+		}
+		return binding{columns: []output{{name, b.refs()}}}
+	}
 	if name == "" {
 		name = expressionName(value)
 	}
@@ -630,11 +645,11 @@ func expressionName(value any) string {
 		return "least"
 	}
 	// Other expression forms may have their own PostgreSQL labels.
-	if child(value, "A_Const") != nil {
-		return typeName
-	}
-	if child(value, "A_Expr") != nil {
-		return typeName
+	if child(value, "A_Const") != nil || child(value, "A_Expr") != nil {
+		if typeName != "" {
+			return typeName
+		}
+		return "?column?"
 	}
 	return ""
 }
