@@ -116,6 +116,8 @@ Open the procedure in **Object explorer** to inspect the unresolved SQL alongsid
 postgres-viz refs --file examples/routines/routines.pgviz.json --column ledger.entries.account_id --depth 2
 ```
 
+For ten worked SQL examples, see [Tracing PostgreSQL output columns](docs/blog/tracing-postgresql-output-columns.md).
+
 ## PostgreSQL parser coverage
 
 postgres-viz supports PostgreSQL 16 through 19. It uses the PostgreSQL 17 grammar with targeted extensions for newer syntax. A dash means the server version has no such syntax.
